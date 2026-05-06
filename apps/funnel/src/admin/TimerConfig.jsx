@@ -27,34 +27,44 @@ function fmtIST(iso) {
 
 /* ── Webinar Session Card ── */
 function WebinarCard({ webinar }) {
+  const isFuture = webinar.webinar_at && new Date(webinar.webinar_at) > new Date();
+  const status = webinar.is_active ? 'active' : isFuture ? 'upcoming' : 'inactive';
+  const statusStyle = {
+    active:   { bg: 'rgba(5,150,105,0.10)',  color: '#059669', dot: '#059669', label: 'Active' },
+    upcoming: { bg: 'rgba(37,99,235,0.10)',  color: '#2563EB', dot: '#3B82F6', label: 'Upcoming' },
+    inactive: { bg: 'rgba(156,163,175,0.12)', color: '#9CA3AF', dot: '#D1D5DB', label: 'Inactive' },
+  }[status];
+
   return (
     <div style={{
       borderRadius: 14,
       border: webinar.is_active
         ? '1.5px solid rgba(91,33,182,0.35)'
-        : '1px solid rgba(147,51,234,0.10)',
+        : status === 'upcoming'
+          ? '1.5px solid rgba(37,99,235,0.25)'
+          : '1px solid rgba(147,51,234,0.10)',
       background: webinar.is_active ? 'rgba(237,234,248,0.55)' : '#fff',
       padding: '14px 16px',
       display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
       transition: 'all 200ms',
     }}>
       <div style={{ minWidth: 0 }}>
-        {/* Active badge */}
+        {/* Status badge */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
           <span style={{
             display: 'inline-flex', alignItems: 'center', gap: 4,
             padding: '2px 8px', borderRadius: 20,
             fontFamily: 'Outfit, sans-serif', fontSize: '0.65rem', fontWeight: 700,
             letterSpacing: '0.06em', textTransform: 'uppercase',
-            background: webinar.is_active ? 'rgba(5,150,105,0.10)' : 'rgba(156,163,175,0.12)',
-            color: webinar.is_active ? '#059669' : '#9CA3AF',
+            background: statusStyle.bg,
+            color: statusStyle.color,
           }}>
             <span style={{
               width: 5, height: 5, borderRadius: '50%',
-              background: webinar.is_active ? '#059669' : '#D1D5DB',
+              background: statusStyle.dot,
               display: 'inline-block',
             }} />
-            {webinar.is_active ? 'Active' : 'Inactive'}
+            {statusStyle.label}
           </span>
         </div>
 

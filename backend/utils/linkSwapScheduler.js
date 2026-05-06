@@ -1,9 +1,11 @@
 const pool = require('../db');
 const cache = require('./webinarConfigCache');
 const { broadcast } = require('./sseClients');
+const { rotateLink } = require('./linkRotation');
 
 async function runSwaps() {
   try {
+    // ── Legacy slot swaps (kept for backward compat) ──
     // Slot 1
     await pool.query(`
       UPDATE webinar_config
@@ -34,19 +36,64 @@ async function runSwaps() {
         AND pending_whatsapp_link_2 != ''
     `);
 
-    // Auto-switch: when current webinar has passed and backup exists, promote backup → current
-    await pool.query(`
-      UPDATE webinar_config
-      SET next_webinar_at    = backup_webinar_at,
-          backup_webinar_at  = NULL,
-          updated_at         = NOW()
-      WHERE id = 1
-        AND next_webinar_at IS NOT NULL
-        AND next_webinar_at < NOW()
-        AND backup_webinar_at IS NOT NULL
-    `);
+    // ── Webinar auto-transition ──
+    // When current webinar has passed and a backup exists:
+    // 1. Promote backup → current in webinar_config
+    // 2. Mark old active webinar as inactive
+    // 3. Mark new webinar as active
+    // 4. Activate the first WhatsApp link of the new webinar
+    const { rows: configRows } = await pool.query(
+      `SELECT next_webinar_at, backup_webinar_at FROM webinar_config WHERE id = 1`
+    );
 
-    // Fetch fresh after all updates
+    if (configRows.length > 0) {
+      const cfg = configRows[0];
+      const now = new Date();
+      const currentEnd = cfg.next_webinar_at ? new Date(cfg.next_webinar_at) : null;
+      const hasBackup = !!cfg.backup_webinar_at;
+
+      if (currentEnd && currentEnd < now && hasBackup) {
+        // Step 1: Update webinar_config — promote backup
+        await pool.query(`
+          UPDATE webinar_config
+          SET next_webinar_at   = backup_webinar_at,
+              backup_webinar_at = NULL,
+              updated_at        = NOW()
+          WHERE id = 1
+        `);
+
+        // Step 2: Mark old active webinar(s) as inactive
+        await pool.query(`UPDATE webinars SET is_active = FALSE WHERE is_active = TRUE`);
+
+        // Step 3: Find or create the new active webinar
+        const { rows: upcomingRows } = await pool.query(
+          `SELECT id FROM webinars WHERE date_time = $1 LIMIT 1`,
+          [cfg.backup_webinar_at]
+        );
+
+        let newWebinarId;
+        if (upcomingRows.length > 0) {
+          newWebinarId = upcomingRows[0].id;
+          await pool.query(`UPDATE webinars SET is_active = TRUE WHERE id = $1`, [newWebinarId]);
+        } else {
+          // Create the webinar row if it doesn't exist
+          const { rows: insertedRows } = await pool.query(
+            `INSERT INTO webinars (date_time, is_active) VALUES ($1, TRUE) RETURNING id`,
+            [cfg.backup_webinar_at]
+          );
+          newWebinarId = insertedRows[0]?.id;
+        }
+
+        // Step 4: Activate the first WhatsApp link of the new active webinar
+        if (newWebinarId) {
+          await rotateLink(newWebinarId);
+        }
+
+        console.log('[Scheduler] Webinar transitioned:', cfg.next_webinar_at, '→', cfg.backup_webinar_at);
+      }
+    }
+
+    // ── Fetch fresh config after all updates ──
     const { rows, rowCount } = await pool.query(`
       SELECT next_webinar_at, backup_webinar_at, tuesday_whatsapp_link,
              friday_whatsapp_link, kill_switch,
@@ -58,7 +105,6 @@ async function runSwaps() {
       cache.invalidate();
       cache.set(rows[0]);
       broadcast(rows[0]);
-      console.log('WhatsApp link swap check at', new Date().toISOString());
     }
   } catch (err) {
     console.error('Link swap scheduler error:', err.message);

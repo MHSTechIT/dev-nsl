@@ -32,7 +32,7 @@ const TAB_ICONS = {
 };
 
 const TABS = [
-  { id: 'dashboard', label: 'Home Dashboard' },
+  { id: 'dashboard', label: 'Page Performance' },
   { id: 'leads',     label: 'Leads' },
   { id: 'whatsapp',  label: 'WhatsApp Links' },
   { id: 'timer',     label: 'Timer & Controls' },

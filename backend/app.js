@@ -1,6 +1,8 @@
-const express = require('express');
-const cors    = require('cors');
-const pool    = require('./db');
+const express   = require('express');
+const cors      = require('cors');
+const helmet    = require('helmet');
+const rateLimit = require('express-rate-limit');
+const pool      = require('./db');
 
 const webinarConfigRouter = require('./routes/webinarConfig');
 const leadsRouter         = require('./routes/leads');
@@ -48,6 +50,20 @@ _webinarTableMigration.then(() =>
   `);
 }).catch(err => console.error('[Migration] leads.webinar_id / backfill error:', err.message));
 
+// Auto-migrate: create whatsapp_links table (per-webinar link management)
+_webinarTableMigration.then(() =>
+  pool.query(`
+    CREATE TABLE IF NOT EXISTS whatsapp_links (
+      id          BIGSERIAL PRIMARY KEY,
+      webinar_id  UUID NOT NULL REFERENCES webinars(id) ON DELETE CASCADE,
+      link_url    TEXT NOT NULL DEFAULT '',
+      order_index INT NOT NULL DEFAULT 1,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_wa_links_webinar ON whatsapp_links (webinar_id, order_index);
+  `)
+).catch(err => console.error('[Migration] whatsapp_links table error:', err.message));
+
 // Auto-migrate: create click_events table for button analytics
 const _clickMigration = pool.query(`
   CREATE TABLE IF NOT EXISTS click_events (
@@ -64,15 +80,42 @@ if (_clickMigration && typeof _clickMigration.catch === 'function') {
   _clickMigration.catch(err => console.error('[Migration] click_events error:', err.message));
 }
 
+// ── Security middleware ──
+app.use(helmet());
 app.use(cors({ origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173' }));
-app.use(express.json());
+app.use(express.json({ limit: '50kb' }));
+
+// ── Rate limiters ──
+const publicLimiter = rateLimit({
+  windowMs: 60 * 1000,   // 1 minute
+  max: 30,               // 30 requests per minute per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again shortly.' },
+});
+
+const authLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,               // 10 auth attempts per minute
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many attempts. Please wait a minute.' },
+});
+
+const leadsLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,               // 20 registrations per minute per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many registrations. Please try again shortly.' },
+});
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
 app.use('/api',       webinarConfigRouter);
-app.use('/api',       leadsRouter);
-app.use('/api',       eventsRouter);
-app.use('/api/auth',  authRouter);
+app.use('/api',       leadsLimiter, leadsRouter);
+app.use('/api',       publicLimiter, eventsRouter);
+app.use('/api/auth',  authLimiter, authRouter);
 app.use('/api/admin', adminRouter);
 
 module.exports = app;

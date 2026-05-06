@@ -1,8 +1,84 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import DatePicker from './DatePicker';
 
 const DURATION_LABELS = { new: '< 1 yr', mid: '1–5 yrs', long: '5+ yrs', pre: 'Pre-diabetic' };
 const SUGAR_LABELS    = { '150-250': '150–250', '250+': '250+' };
+
+function fmtWebinar(iso) {
+  if (!iso) return '';
+  return new Date(iso).toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    day: 'numeric', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: true,
+  });
+}
+
+function WebinarSelect({ value, onChange, webinars }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    function handleClick(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, []);
+
+  const options = [
+    { value: '', label: 'All Webinars' },
+    ...webinars.map(w => ({ value: String(w.id), label: fmtWebinar(w.webinar_at) })),
+  ];
+  const selected = options.find(o => o.value === value);
+
+  return (
+    <div ref={ref} style={{ position: 'relative', minWidth: 180 }}>
+      <button
+        onClick={() => setOpen(!open)}
+        style={{
+          width: '100%', height: '2.1rem', borderRadius: 10,
+          border: '1px solid rgba(139,92,246,0.25)', background: '#fff',
+          padding: '0 32px 0 12px', fontFamily: 'Outfit, sans-serif',
+          fontSize: '0.82rem', fontWeight: 600, color: '#3B0764',
+          cursor: 'pointer', outline: 'none', textAlign: 'left',
+          position: 'relative',
+        }}
+      >
+        {selected ? selected.label : 'All Webinars'}
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#5B21B6" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+          style={{ position: 'absolute', right: 10, top: '50%', transform: `translateY(-50%) rotate(${open ? 180 : 0}deg)`, transition: 'transform 200ms' }}>
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </button>
+
+      {open && (
+        <div style={{
+          position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0,
+          background: '#fff', borderRadius: 12, border: '1px solid rgba(139,92,246,0.20)',
+          boxShadow: '0 8px 24px rgba(91,33,182,0.15)', zIndex: 50,
+          padding: '4px 0', maxHeight: 200, overflowY: 'auto',
+        }}>
+          {options.map(opt => (
+            <button
+              key={opt.value}
+              onClick={() => { onChange(opt.value); setOpen(false); }}
+              style={{
+                width: '100%', border: 'none', background: value === opt.value ? 'rgba(91,33,182,0.08)' : 'transparent',
+                padding: '8px 14px', fontFamily: 'Outfit, sans-serif', fontSize: '0.80rem',
+                fontWeight: value === opt.value ? 700 : 500,
+                color: value === opt.value ? '#5B21B6' : '#3B0764',
+                cursor: 'pointer', textAlign: 'left',
+                transition: 'background 100ms',
+              }}
+              onMouseEnter={e => { if (value !== opt.value) e.target.style.background = 'rgba(91,33,182,0.05)'; }}
+              onMouseLeave={e => { if (value !== opt.value) e.target.style.background = 'transparent'; }}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function LeadsTable({ token }) {
   const [leads, setLeads]           = useState([]);
@@ -14,6 +90,8 @@ export default function LeadsTable({ token }) {
   const [dateFrom, setDateFrom]     = useState('');
   const [dateTo, setDateTo]         = useState('');
   const [syncToast, setSyncToast]   = useState(null);
+  const [webinars, setWebinars]     = useState([]);
+  const [webinarFilter, setWebinarFilter] = useState('');
 
   // Pagination
   const [page, setPage] = useState(1);
@@ -35,6 +113,14 @@ export default function LeadsTable({ token }) {
 
   useEffect(() => { loadLeads(); }, [token]);
 
+  // Fetch webinar sessions for filter dropdown
+  useEffect(() => {
+    fetch('/api/admin/webinars', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(d => setWebinars(d.webinars || []))
+      .catch(() => {});
+  }, [token]);
+
   function handleSort(key) {
     if (sortKey === key) setSortAsc(a => !a);
     else { setSortKey(key); setSortAsc(true); }
@@ -42,7 +128,7 @@ export default function LeadsTable({ token }) {
   }
 
   // Reset page when filters change
-  useEffect(() => { setPage(1); }, [activeFilter, dateFrom, dateTo]);
+  useEffect(() => { setPage(1); }, [activeFilter, dateFrom, dateTo, webinarFilter]);
 
   // ── Duplicate detection ──
   // Group by phone number, keep oldest (first registered) as original, rest are duplicates
@@ -68,6 +154,8 @@ export default function LeadsTable({ token }) {
   const duplicateCount = duplicateIds.size;
 
   const filtered = leads.filter(l => {
+    // Webinar filter — match by webinar_id
+    if (webinarFilter && String(l.webinar_id) !== String(webinarFilter)) return false;
     if (dateFrom || dateTo) {
       const created = new Date(l.created_at);
       if (dateFrom && created < new Date(dateFrom + 'T00:00:00+05:30')) return false;
@@ -169,6 +257,7 @@ export default function LeadsTable({ token }) {
   }
 
   const dateFiltered = leads.filter(l => {
+    if (webinarFilter && String(l.webinar_id) !== String(webinarFilter)) return false;
     if (dateFrom && new Date(l.created_at) < new Date(dateFrom + 'T00:00:00+05:30')) return false;
     if (dateTo   && new Date(l.created_at) > new Date(dateTo   + 'T23:59:59+05:30')) return false;
     return true;
@@ -369,6 +458,28 @@ export default function LeadsTable({ token }) {
           </button>
         )}
       </div>
+
+      {/* Webinar session filter */}
+      {webinars.length > 0 && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+          background: 'rgba(237,234,248,0.50)', borderRadius: 14,
+          border: '1px solid rgba(139,92,246,0.15)',
+          padding: '10px 14px', marginBottom: 14,
+        }}>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="rgba(91,33,182,0.55)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+            <path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/><path d="m9 16 2 2 4-4"/>
+          </svg>
+          <span style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', fontWeight: 600, color: 'rgba(91,33,182,0.65)', whiteSpace: 'nowrap' }}>Webinar</span>
+          <WebinarSelect value={webinarFilter} onChange={setWebinarFilter} webinars={webinars} />
+          {webinarFilter && (
+            <button onClick={() => setWebinarFilter('')}
+              style={{ height: '2.1rem', padding: '0 12px', borderRadius: 10, border: '1px solid rgba(239,68,68,0.30)', background: 'rgba(254,242,242,0.80)', fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', fontWeight: 600, color: '#DC2626', cursor: 'pointer', whiteSpace: 'nowrap' }}>
+              ✕ Clear
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">

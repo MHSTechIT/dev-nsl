@@ -15,7 +15,7 @@ function createTransporter() {
   return nodemailer.createTransport({
     service: 'gmail',
     auth: {
-      user: process.env.GMAIL_FROM || 'hariharan19.mhs@gmail.com',
+      user: process.env.GMAIL_FROM,
       pass: process.env.GMAIL_APP_PASSWORD,
     },
   });
@@ -36,8 +36,13 @@ router.post('/forgot-password', async (req, res) => {
 
     const origin   = process.env.CLIENT_ORIGIN || 'http://localhost:5173';
     const resetUrl = `${origin}/admin/reset-password?token=${token}`;
-    const fromAddr = process.env.GMAIL_FROM    || 'hariharan19.mhs@gmail.com';
-    const toAddr   = process.env.RESET_EMAIL_TO || 'marketing.integfarms@gmail.com';
+    const fromAddr = process.env.GMAIL_FROM;
+    const toAddr   = process.env.RESET_EMAIL_TO;
+
+    if (!fromAddr || !toAddr || !process.env.GMAIL_APP_PASSWORD) {
+      console.error('forgot-password: email env vars not configured');
+      return res.status(500).json({ error: 'Email service not configured.' });
+    }
 
     const transporter = createTransporter();
 
@@ -102,7 +107,7 @@ router.post('/forgot-password', async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('forgot-password error:', err.message);
-    res.status(500).json({ error: 'Failed to send reset email. Check GMAIL_APP_PASSWORD in .env' });
+    res.status(500).json({ error: 'Failed to send reset email. Please try again later.' });
   }
 });
 
@@ -113,17 +118,23 @@ router.post('/forgot-password', async (req, res) => {
 ───────────────────────────────────────────────────────────── */
 router.post('/reset-password',
   body('token').notEmpty(),
-  body('new_password').isLength({ min: 6 }),
+  body('new_password').isLength({ min: 8 }),
   (req, res) => {
     const errs = validationResult(req);
     if (!errs.isEmpty()) {
-      return res.status(422).json({ error: 'Password must be at least 6 characters.' });
+      return res.status(422).json({ error: 'Password must be at least 8 characters.' });
     }
 
     const { token, new_password } = req.body;
     const cfg = readConfig();
 
-    if (!cfg.reset_token || cfg.reset_token !== token) {
+    // Timing-safe token comparison
+    if (!cfg.reset_token || token.length !== cfg.reset_token.length) {
+      return res.status(400).json({ error: 'Invalid or already-used reset link.' });
+    }
+    const a = Buffer.from(token);
+    const b = Buffer.from(cfg.reset_token);
+    if (!crypto.timingSafeEqual(a, b)) {
       return res.status(400).json({ error: 'Invalid or already-used reset link.' });
     }
 

@@ -471,7 +471,7 @@ export default function HomeDashboard({ token }) {
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20, flexWrap: 'wrap', gap: 8 }}>
         <div>
           <h2 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 800, color: '#3B0764' }}>
-            Home Dashboard
+            Page Performance
           </h2>
           <p style={{ margin: '2px 0 0', fontSize: '0.72rem', color: 'rgba(91,33,182,0.50)' }}>
             Button click analytics across all funnel pages

@@ -201,9 +201,22 @@ export default function Screen1A() {
     return () => mq.removeEventListener('change', handler);
   }, []);
 
-  // Track page visit (fires once on mount)
+  // Track page visit — fires once (waits up to 3s for webinar config, then fires anyway)
+  const pageTracked = useRef(false);
   useEffect(() => {
-    trackEvent('page_visited', state.webinarConfig?.next_webinar_at);
+    if (!pageTracked.current && state.webinarConfig?.next_webinar_at) {
+      pageTracked.current = true;
+      trackEvent('page_visited', state.webinarConfig.next_webinar_at);
+    }
+  }, [state.webinarConfig?.next_webinar_at]);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (!pageTracked.current) {
+        pageTracked.current = true;
+        trackEvent('page_visited', state.webinarConfig?.next_webinar_at ?? null);
+      }
+    }, 3000);
+    return () => clearTimeout(t);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Intercept browser/device back button while popup is open

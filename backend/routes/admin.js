@@ -8,6 +8,7 @@ const { getPassword, writeConfig } = require('../utils/adminConfig');
 const cache = require('../utils/webinarConfigCache');
 const { broadcast } = require('../utils/sseClients');
 const { syncLeadsToSheet } = require('../utils/leadsSheetSync');
+const { rotateLink }       = require('../utils/linkRotation');
 
 router.use(adminAuth);
 
@@ -77,16 +78,51 @@ router.put('/webinar-config', configValidators, async (req, res) => {
       broadcast(fresh);
     }
 
-    // If a new webinar date was set, create a new active webinar session
+    // Sync webinar sessions — UPDATE existing row, only INSERT if none exists
     if (updates.next_webinar_at) {
       try {
-        await pool.query('UPDATE webinars SET is_active = FALSE');
-        await pool.query(
-          'INSERT INTO webinars (date_time, is_active) VALUES ($1, TRUE)',
+        // Try to update the currently active webinar's date
+        const { rowCount } = await pool.query(
+          'UPDATE webinars SET date_time = $1 WHERE is_active = TRUE',
           [updates.next_webinar_at]
         );
+        // If no active webinar existed, create one
+        if (rowCount === 0) {
+          await pool.query(
+            'INSERT INTO webinars (date_time, is_active) VALUES ($1, TRUE)',
+            [updates.next_webinar_at]
+          );
+        }
       } catch (webinarErr) {
-        console.error('Webinar session create error:', webinarErr.message);
+        console.error('Webinar session update error:', webinarErr.message);
+      }
+    }
+
+    if (updates.backup_webinar_at) {
+      try {
+        // Find an existing "upcoming" webinar (inactive, 0 leads) to update
+        // If none exists, create a new one — never touch old sessions with leads
+        const { rowCount } = await pool.query(
+          `UPDATE webinars SET date_time = $1
+           WHERE id = (
+             SELECT w.id FROM webinars w
+             LEFT JOIN leads l ON l.webinar_id = w.id
+             WHERE w.is_active = FALSE
+             GROUP BY w.id
+             HAVING COUNT(l.id) = 0
+             ORDER BY w.created_at DESC LIMIT 1
+           )`,
+          [updates.backup_webinar_at]
+        );
+
+        if (rowCount === 0) {
+          await pool.query(
+            'INSERT INTO webinars (date_time, is_active) VALUES ($1, FALSE)',
+            [updates.backup_webinar_at]
+          );
+        }
+      } catch (webinarErr) {
+        console.error('Upcoming webinar update error:', webinarErr.message);
       }
     }
 
@@ -194,6 +230,71 @@ router.patch('/change-password',
     }
   }
 );
+
+/* ── GET /api/admin/wa-links?webinar_id=X ── */
+router.get('/wa-links', async (req, res) => {
+  const { webinar_id } = req.query;
+  if (!webinar_id) return res.status(400).json({ error: 'webinar_id required' });
+
+  try {
+    const { rows } = await pool.query(
+      'SELECT id, webinar_id, link_url, order_index FROM whatsapp_links WHERE webinar_id = $1 ORDER BY order_index',
+      [webinar_id]
+    );
+    res.json({ links: rows });
+  } catch (err) {
+    // Table may not exist yet
+    if (err.message && err.message.includes('does not exist')) {
+      return res.json({ links: [] });
+    }
+    console.error('Get WA links error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch links' });
+  }
+});
+
+/* ── PUT /api/admin/wa-links — save all links for a webinar (upsert) ── */
+router.put('/wa-links', async (req, res) => {
+  const { webinar_id, links } = req.body;
+  if (!webinar_id || !Array.isArray(links)) {
+    return res.status(400).json({ error: 'webinar_id and links[] required' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Delete existing links for this webinar
+    await client.query('DELETE FROM whatsapp_links WHERE webinar_id = $1', [webinar_id]);
+
+    // Insert new links
+    for (const link of links) {
+      if (!link.link_url) continue;
+      await client.query(
+        'INSERT INTO whatsapp_links (webinar_id, link_url, order_index) VALUES ($1, $2, $3)',
+        [webinar_id, link.link_url.trim(), link.order_index || 1]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    // If this is the active webinar, rotate the link immediately
+    const { rows: wRows } = await pool.query(
+      'SELECT is_active FROM webinars WHERE id = $1',
+      [webinar_id]
+    );
+    if (wRows.length > 0 && wRows[0].is_active) {
+      await rotateLink(webinar_id);
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Save WA links error:', err.message);
+    res.status(500).json({ error: 'Failed to save links' });
+  } finally {
+    client.release();
+  }
+});
 
 /* ── GET /api/admin/dashboard ── */
 router.get('/dashboard', async (req, res) => {

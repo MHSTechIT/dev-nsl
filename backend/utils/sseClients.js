@@ -1,7 +1,13 @@
+const MAX_SSE_CLIENTS = 500;
 const clients = new Set();
 
 function addClient(res) {
+  if (clients.size >= MAX_SSE_CLIENTS) {
+    res.status(503).end();
+    return false;
+  }
   clients.add(res);
+  return true;
 }
 
 function removeClient(res) {

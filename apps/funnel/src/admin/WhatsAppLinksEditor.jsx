@@ -1,373 +1,471 @@
-import { useEffect, useState } from 'react';
-import DateTimePicker from './DateTimePicker';
+import { useEffect, useState, useRef } from 'react';
 
-function toISTValue(isoString) {
-  if (!isoString) return '';
-  const d = new Date(isoString);
-  const ist = new Date(d.getTime() + 5.5 * 60 * 60 * 1000);
-  return ist.toISOString().slice(0, 16);
+/* ── Helpers ── */
+function fmtDate(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    day: 'numeric', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: true,
+  });
 }
 
-function fromISTValue(localVal) {
-  if (!localVal) return null;
-  const [date, time] = localVal.split('T');
-  const [y, mo, d]  = date.split('-').map(Number);
-  const [h, m]      = time.split(':').map(Number);
-  return new Date(Date.UTC(y, mo - 1, d, h, m) - 5.5 * 60 * 60 * 1000).toISOString();
+function getLinkIndex(leadCount) {
+  return Math.max(1, Math.ceil(leadCount / 500));
 }
 
-/* ── Reusable Schedule Slot ── */
-function ScheduleSlot({ label, link, setLink, swapAt, setSwapAt, activeSchedule, saving, onSave, toast }) {
-  const hasSchedule = link && swapAt;
-  const swapDate = swapAt ? new Date(fromISTValue(swapAt)) : null;
-  const activeScheduleDate = activeSchedule ? new Date(fromISTValue(activeSchedule)) : null;
+/* ── Editable Link Row ── */
+function LinkRow({ label, value, onChange, bg, isActive, readOnly }) {
+  const [editing, setEditing] = useState(false);
+  const inputRef = useRef(null);
 
-  function extractURL(val) {
-    const match = val.match(/https?:\/\/[^\s]+/);
-    return match ? match[0] : val.trim();
+  useEffect(() => {
+    if (editing && inputRef.current) inputRef.current.focus();
+  }, [editing]);
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+        <label style={{
+          fontFamily: 'Outfit, sans-serif', fontSize: '0.75rem', fontWeight: 700,
+          color: '#4A1A94',
+        }}>
+          {label}
+        </label>
+        {isActive && (
+          <span style={{
+            display: 'inline-flex', alignItems: 'center', gap: 4,
+            padding: '1px 8px', borderRadius: 20,
+            background: 'rgba(5,150,105,0.10)', border: '1px solid rgba(5,150,105,0.30)',
+            fontFamily: 'Outfit, sans-serif', fontSize: '0.62rem', fontWeight: 700,
+            color: '#059669', textTransform: 'uppercase', letterSpacing: '0.05em',
+          }}>
+            <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#22c55e' }} />
+            Active
+          </span>
+        )}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{
+          flex: 1, position: 'relative',
+          background: bg || 'rgba(237,234,248,0.30)',
+          borderRadius: 10,
+          border: editing
+            ? '1.5px solid rgba(91,33,182,0.50)'
+            : isActive
+              ? '1.5px solid rgba(5,150,105,0.35)'
+              : '1px solid rgba(139,92,246,0.18)',
+          transition: 'border 200ms',
+        }}>
+          <input
+            ref={inputRef}
+            type="url"
+            value={value}
+            onChange={e => onChange(e.target.value)}
+            readOnly={!editing && !readOnly}
+            placeholder="https://chat.whatsapp.com/..."
+            style={{
+              width: '100%', height: '2.6rem',
+              padding: '0 12px',
+              borderRadius: 10, border: 'none',
+              background: 'transparent',
+              fontFamily: 'Outfit, sans-serif', fontSize: '0.82rem',
+              color: '#3B0764', fontWeight: 500,
+              outline: 'none', boxSizing: 'border-box',
+              cursor: editing ? 'text' : 'default',
+            }}
+          />
+        </div>
+        <button
+          onClick={() => setEditing(!editing)}
+          title={editing ? 'Done' : 'Edit'}
+          style={{
+            width: 36, height: 36, borderRadius: 10,
+            border: '1px solid rgba(139,92,246,0.20)',
+            background: editing ? 'rgba(91,33,182,0.08)' : 'rgba(237,234,248,0.50)',
+            cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+            flexShrink: 0, transition: 'all 200ms',
+          }}
+        >
+          {editing ? (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5B21B6" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="20 6 9 17 4 12"/>
+            </svg>
+          ) : (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5B21B6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>
+              <path d="m15 5 4 4"/>
+            </svg>
+          )}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ── Webinar Column Card ── */
+function WebinarCard({ type, webinarDate, webinarId, links, setLinks, leadCount, saving, onSave, toast }) {
+  const isCurrent = type === 'current';
+  const activeLinkIndex = isCurrent ? Math.min(getLinkIndex(leadCount), links.length || 1) : 0;
+
+  function updateLink(index, url) {
+    setLinks(prev => prev.map((l, i) => i === index ? { ...l, link_url: url } : l));
+  }
+
+  function addLink() {
+    setLinks(prev => [...prev, { link_url: '', order_index: prev.length + 1 }]);
+  }
+
+  function removeLink(index) {
+    setLinks(prev => prev.filter((_, i) => i !== index).map((l, i) => ({ ...l, order_index: i + 1 })));
   }
 
   return (
     <div style={{
-      background: '#fff', borderRadius: 16,
-      border: '1.5px solid rgba(139,92,246,0.22)',
-      padding: '18px 20px 20px',
-      boxShadow: '0 2px 12px rgba(91,33,182,0.07)',
-      display: 'flex', flexDirection: 'column', gap: 16,
+      flex: 1, minWidth: 300,
+      background: '#fff', borderRadius: 18,
+      border: isCurrent
+        ? '2px solid rgba(5,150,105,0.35)'
+        : '2px solid rgba(91,33,182,0.25)',
+      padding: 0,
+      boxShadow: '0 2px 16px rgba(91,33,182,0.06)',
+      display: 'flex', flexDirection: 'column',
     }}>
-      {/* Slot label */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      {/* Header */}
+      <div style={{
+        padding: '14px 20px',
+        borderBottom: isCurrent
+          ? '1px solid rgba(5,150,105,0.15)'
+          : '1px solid rgba(91,33,182,0.10)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}>
         <div style={{
-          width: 24, height: 24, borderRadius: '50%',
-          background: 'linear-gradient(135deg,#5B21B6,#9333EA)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+          display: 'inline-flex', alignItems: 'center', gap: 8,
+          padding: '8px 20px', borderRadius: 50,
+          border: isCurrent
+            ? '1.5px solid rgba(5,150,105,0.40)'
+            : '1.5px solid rgba(91,33,182,0.30)',
+          background: isCurrent
+            ? 'rgba(5,150,105,0.06)'
+            : 'rgba(91,33,182,0.04)',
         }}>
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+            stroke={isCurrent ? '#059669' : '#5B21B6'}
+            strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="4" width="18" height="18" rx="2"/>
+            <line x1="16" y1="2" x2="16" y2="6"/>
+            <line x1="8" y1="2" x2="8" y2="6"/>
+            <line x1="3" y1="10" x2="21" y2="10"/>
           </svg>
+          <span style={{
+            fontFamily: 'Outfit, sans-serif', fontSize: '0.82rem', fontWeight: 700,
+            color: isCurrent ? '#059669' : '#5B21B6',
+          }}>
+            {isCurrent ? 'Current Webinar' : 'Upcoming Webinar'} — {fmtDate(webinarDate)}
+          </span>
         </div>
-        <span style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', fontWeight: 700, color: '#4A1A94', textTransform: 'uppercase', letterSpacing: '0.07em' }}>
-          {label}
-        </span>
       </div>
 
-      {/* Update Link */}
-      <div>
-        <label style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.75rem', fontWeight: 700, color: '#4A1A94', display: 'block', marginBottom: 7 }}>
-          Update Link
-        </label>
-        <div style={{ position: 'relative' }}>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="#25D366"
-            style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }}>
-            <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
-          </svg>
-          <input
-            type="url"
-            value={link}
-            onChange={e => setLink(e.target.value)}
-            placeholder="https://chat.whatsapp.com/..."
-            style={{
-              width: '100%', height: '2.8rem',
-              paddingLeft: 38, paddingRight: 12,
-              borderRadius: 12,
-              border: '1px solid rgba(139,92,246,0.22)',
-              background: 'rgba(237,234,248,0.30)',
-              fontFamily: 'Outfit, sans-serif', fontSize: '0.88rem',
-              color: '#3B0764', outline: 'none', boxSizing: 'border-box',
-              transition: 'border 200ms',
-            }}
-            onFocus={e => e.target.style.borderColor = 'rgba(91,33,182,0.55)'}
-            onBlur={e => e.target.style.borderColor = 'rgba(139,92,246,0.22)'}
-          />
+      {/* Lead count + rotation info (current only) */}
+      {isCurrent && webinarId && (
+        <div style={{
+          margin: '14px 20px 0', padding: '10px 14px',
+          background: 'rgba(5,150,105,0.04)', borderRadius: 10,
+          border: '1px solid rgba(5,150,105,0.15)',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#059669" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+              <circle cx="9" cy="7" r="4"/>
+              <path d="M22 21v-2a4 4 0 0 0-3-3.87"/>
+              <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+            </svg>
+            <span style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', fontWeight: 600, color: '#059669' }}>
+              {leadCount} Leads
+            </span>
+          </div>
+          <span style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.72rem', fontWeight: 600, color: 'rgba(5,150,105,0.65)' }}>
+            Active: Link {activeLinkIndex} (rotates every 500)
+          </span>
         </div>
-        {link && (
-          <a href={link} target="_blank" rel="noreferrer"
-            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginTop: 6, fontFamily: 'Outfit, sans-serif', fontSize: '0.75rem', color: '#5B21B6', textDecoration: 'underline' }}>
-            Preview link ↗
-          </a>
-        )}
-      </div>
+      )}
 
-      {/* Auto-activate */}
-      <div>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 7 }}>
-          <label style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.75rem', fontWeight: 700, color: '#4A1A94' }}>
-            Auto-activate at (IST) <span style={{ fontWeight: 400, color: 'rgba(91,33,182,0.50)' }}>— optional</span>
-          </label>
-          {swapAt && (
-            <button type="button" onClick={() => setSwapAt('')}
+      {/* Links */}
+      <div style={{ padding: '18px 20px 6px', flex: 1 }}>
+        {!webinarId ? (
+          <div style={{
+            textAlign: 'center', padding: '32px 16px',
+            fontFamily: 'Outfit, sans-serif', fontSize: '0.85rem',
+            color: 'rgba(91,33,182,0.45)', fontWeight: 500,
+          }}>
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="rgba(91,33,182,0.25)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ marginBottom: 8 }}>
+              <rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>
+            </svg>
+            <p>No {isCurrent ? 'active' : 'upcoming'} webinar set.</p>
+            <p style={{ fontSize: '0.75rem', marginTop: 4 }}>Set the date in Timer & Controls tab.</p>
+          </div>
+        ) : (
+          <>
+            {links.map((link, i) => (
+              <div key={i} style={{ position: 'relative' }}>
+                <LinkRow
+                  label={isCurrent && i === 0 ? 'Current Link' : `${isCurrent ? 'Upcoming' : ''} Link ${i + 1}`}
+                  value={link.link_url}
+                  onChange={url => updateLink(i, url)}
+                  bg={isCurrent && i === activeLinkIndex - 1 ? 'rgba(5,150,105,0.06)' : undefined}
+                  isActive={isCurrent && i === activeLinkIndex - 1}
+                />
+                {links.length > 1 && (
+                  <button
+                    onClick={() => removeLink(i)}
+                    title="Remove link"
+                    style={{
+                      position: 'absolute', top: 0, right: 0,
+                      width: 20, height: 20, borderRadius: '50%',
+                      border: '1px solid rgba(220,38,38,0.30)',
+                      background: 'rgba(254,242,242,0.80)',
+                      cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      transition: 'all 200ms',
+                    }}
+                  >
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#DC2626" strokeWidth="3" strokeLinecap="round">
+                      <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                    </svg>
+                  </button>
+                )}
+              </div>
+            ))}
+
+            {/* Add link button */}
+            <button
+              onClick={addLink}
               style={{
-                display: 'inline-flex', alignItems: 'center', gap: 4,
-                padding: '2px 8px', borderRadius: 20,
-                border: '1px solid rgba(220,38,38,0.35)',
-                background: 'rgba(254,226,226,0.60)',
-                fontFamily: 'Outfit, sans-serif', fontSize: '0.70rem', fontWeight: 700,
-                color: '#DC2626', cursor: 'pointer',
-              }}>
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-              Clear
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                width: '100%', height: '2.4rem', borderRadius: 10,
+                border: '1.5px dashed rgba(139,92,246,0.30)',
+                background: 'rgba(237,234,248,0.25)',
+                fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', fontWeight: 600,
+                color: '#5B21B6', cursor: 'pointer', marginBottom: 16,
+                transition: 'all 200ms',
+              }}
+              onMouseEnter={e => e.target.style.background = 'rgba(237,234,248,0.50)'}
+              onMouseLeave={e => e.target.style.background = 'rgba(237,234,248,0.25)'}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+              </svg>
+              Add Link
             </button>
-          )}
-        </div>
-        <DateTimePicker value={swapAt} onChange={setSwapAt} placeholder="Leave blank to update immediately" />
-        {swapDate && (
-          <p style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.73rem', color: 'rgba(91,33,182,0.55)', marginTop: 6 }}>
-            {swapDate.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })} IST
-          </p>
-        )}
-        {!swapAt && link && (
-          <p style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.73rem', color: '#15803d', marginTop: 6, fontWeight: 600 }}>
-            ✓ No schedule — will go live immediately on Save
-          </p>
+
+            {/* Rotation info */}
+            {links.length > 1 && (
+              <div style={{
+                padding: '8px 12px', borderRadius: 8,
+                background: 'rgba(237,234,248,0.40)',
+                fontFamily: 'Outfit, sans-serif', fontSize: '0.70rem', fontWeight: 500,
+                color: 'rgba(91,33,182,0.55)', lineHeight: 1.5, marginBottom: 12,
+              }}>
+                Links auto-rotate every 500 leads:
+                {links.map((_, i) => (
+                  <span key={i}> Link {i + 1} = {i * 500}–{(i + 1) * 500} leads{i < links.length - 1 ? ',' : '+'}</span>
+                ))}
+              </div>
+            )}
+          </>
         )}
       </div>
-
-      {/* DB schedule info */}
-      {activeScheduleDate && !swapAt && (
-        <div style={{
-          background: 'rgba(245,243,255,1)', borderRadius: 10,
-          border: '1px solid rgba(139,92,246,0.25)', padding: '10px 14px',
-          display: 'flex', alignItems: 'flex-start', gap: 8,
-        }}>
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#7C3AED" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 1 }}>
-            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-          </svg>
-          <span style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', color: '#5B21B6', lineHeight: 1.4 }}>
-            Scheduled:{' '}
-            <strong>
-              {activeScheduleDate.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })} IST
-            </strong>
-            {' '}— pick a new date above to change it.
-          </span>
-        </div>
-      )}
-
-      {/* New schedule preview */}
-      {hasSchedule && (
-        <div style={{
-          background: 'rgba(245,243,255,1)', borderRadius: 10,
-          border: '1px solid rgba(139,92,246,0.25)', padding: '10px 14px',
-          display: 'flex', alignItems: 'flex-start', gap: 8,
-        }}>
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#7C3AED" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 1 }}>
-            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-          </svg>
-          <span style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', color: '#5B21B6', lineHeight: 1.4 }}>
-            Will auto-activate on{' '}
-            <strong>
-              {swapDate.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })} IST
-            </strong>
-          </span>
-        </div>
-      )}
 
       {/* Save button */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-        <button
-          onClick={onSave}
-          disabled={saving}
-          style={{
-            display: 'inline-flex', alignItems: 'center', gap: 8,
-            height: '2.5rem', padding: '0 24px', borderRadius: 50,
-            border: 'none',
-            background: saving ? 'rgba(91,33,182,0.55)' : '#5B21B6',
-            fontFamily: 'Outfit, sans-serif', fontWeight: 700, fontSize: '0.88rem',
-            color: '#fff', cursor: saving ? 'not-allowed' : 'pointer',
-            boxShadow: '0 2px 10px rgba(91,33,182,0.22)',
-            opacity: saving ? 0.7 : 1, transition: 'all 200ms',
-          }}
-        >
-          {saving ? (
-            <>
-              <svg style={{ animation: 'spin 1s linear infinite', width: 14, height: 14 }} viewBox="0 0 24 24" fill="none">
-                <circle style={{ opacity: 0.25 }} cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                <path style={{ opacity: 0.75 }} fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
-              </svg>
-              Saving...
-            </>
-          ) : 'Save'}
-        </button>
-        {toast && (
-          <span style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.82rem', fontWeight: 600, color: toast.ok ? '#15803d' : '#DC2626', display: 'flex', alignItems: 'center', gap: 4 }}>
-            {toast.ok ? '✓' : '✕'} {toast.msg}
-          </span>
-        )}
-      </div>
+      {webinarId && (
+        <div style={{ padding: '0 20px 20px', display: 'flex', alignItems: 'center', gap: 14, justifyContent: 'center' }}>
+          <button
+            onClick={onSave}
+            disabled={saving}
+            style={{
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+              height: '2.5rem', padding: '0 36px', borderRadius: 50,
+              border: 'none',
+              background: saving
+                ? 'rgba(91,33,182,0.55)'
+                : isCurrent ? '#059669' : '#5B21B6',
+              fontFamily: 'Outfit, sans-serif', fontWeight: 700, fontSize: '0.88rem',
+              color: '#fff', cursor: saving ? 'not-allowed' : 'pointer',
+              boxShadow: isCurrent
+                ? '0 2px 10px rgba(5,150,105,0.25)'
+                : '0 2px 10px rgba(91,33,182,0.22)',
+              opacity: saving ? 0.7 : 1, transition: 'all 200ms',
+            }}
+          >
+            {saving ? (
+              <>
+                <svg style={{ animation: 'spin 1s linear infinite', width: 14, height: 14 }} viewBox="0 0 24 24" fill="none">
+                  <circle style={{ opacity: 0.25 }} cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                  <path style={{ opacity: 0.75 }} fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+                </svg>
+                Saving...
+              </>
+            ) : 'Save'}
+          </button>
+          {toast && (
+            <span style={{
+              fontFamily: 'Outfit, sans-serif', fontSize: '0.82rem', fontWeight: 600,
+              color: toast.ok ? '#15803d' : '#DC2626',
+            }}>
+              {toast.ok ? '✓' : '✕'} {toast.msg}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
 /* ══════════════════════ WhatsAppLinksEditor ══════════════════════ */
 export default function WhatsAppLinksEditor({ token }) {
-  const [currentLink, setCurrentLink] = useState('');
-  const [copied, setCopied] = useState(false);
+  const [webinars, setWebinars] = useState([]);
+  const [config, setConfig]     = useState({});
 
-  // Slot 1
-  const [link1, setLink1]               = useState('');
-  const [swapAt1, setSwapAt1]           = useState('');
-  const [activeSchedule1, setActiveSchedule1] = useState('');
-  const [saving1, setSaving1]           = useState(false);
-  const [toast1, setToast1]             = useState(null);
+  // Current webinar state
+  const [curLinks, setCurLinks]     = useState([{ link_url: '', order_index: 1 }]);
+  const [savingCur, setSavingCur]   = useState(false);
+  const [toastCur, setToastCur]     = useState(null);
 
-  // Slot 2
-  const [link2, setLink2]               = useState('');
-  const [swapAt2, setSwapAt2]           = useState('');
-  const [activeSchedule2, setActiveSchedule2] = useState('');
-  const [saving2, setSaving2]           = useState(false);
-  const [toast2, setToast2]             = useState(null);
+  // Upcoming webinar state
+  const [upLinks, setUpLinks]       = useState([{ link_url: '', order_index: 1 }]);
+  const [savingUp, setSavingUp]     = useState(false);
+  const [toastUp, setToastUp]       = useState(null);
 
-  function loadConfig() {
-    fetch('/api/webinar-config')
-      .then(r => r.json())
-      .then(d => {
-        setCurrentLink(d.tuesday_whatsapp_link || '');
+  // Find active + upcoming webinars
+  const activeWebinar = webinars.find(w => w.is_active);
+  const upcomingWebinar = config.backup_webinar_at
+    ? webinars.find(w => {
+        const wDate = new Date(w.webinar_at).getTime();
+        const bDate = new Date(config.backup_webinar_at).getTime();
+        return Math.abs(wDate - bDate) < 60000; // within 1 minute
+      })
+    : null;
 
-        // Slot 1
-        setLink1(d.pending_whatsapp_link || '');
-        setSwapAt1('');
-        const s1 = d.whatsapp_link_swap_at;
-        setActiveSchedule1(s1 && new Date(s1) > new Date() ? toISTValue(s1) : '');
-
-        // Slot 2
-        setLink2(d.pending_whatsapp_link_2 || '');
-        setSwapAt2('');
-        const s2 = d.whatsapp_link_swap_at_2;
-        setActiveSchedule2(s2 && new Date(s2) > new Date() ? toISTValue(s2) : '');
-      });
+  function loadData() {
+    // Fetch webinars + config in parallel
+    Promise.all([
+      fetch('/api/admin/webinars', { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json()),
+      fetch('/api/webinar-config').then(r => r.json()),
+    ]).then(([wData, cData]) => {
+      setWebinars(wData.webinars || []);
+      setConfig(cData);
+    }).catch(() => {});
   }
 
-  useEffect(() => { loadConfig(); }, []);
+  useEffect(() => { loadData(); }, [token]);
 
-  function extractURL(val) {
-    const match = val.match(/https?:\/\/[^\s]+/);
-    return match ? match[0] : val.trim();
-  }
+  // Load links when webinars change
+  useEffect(() => {
+    if (activeWebinar?.id) {
+      fetch(`/api/admin/wa-links?webinar_id=${activeWebinar.id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+        .then(r => r.json())
+        .then(d => {
+          const links = d.links || [];
+          if (links.length > 0) {
+            setCurLinks(links);
+          } else {
+            // Pre-fill with current active link from webinar_config
+            const currentLink = config.tuesday_whatsapp_link || config.friday_whatsapp_link || '';
+            setCurLinks([{ link_url: currentLink, order_index: 1 }]);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [activeWebinar?.id, token, config.tuesday_whatsapp_link]);
 
-  async function handleSave(slot) {
-    const isSlot1 = slot === 1;
-    const link    = isSlot1 ? link1    : link2;
-    const swapAt  = isSlot1 ? swapAt1  : swapAt2;
-    const setSaving = isSlot1 ? setSaving1 : setSaving2;
-    const setToast  = isSlot1 ? setToast1  : setToast2;
-    const setLink   = isSlot1 ? setLink1   : setLink2;
+  useEffect(() => {
+    if (upcomingWebinar?.id) {
+      fetch(`/api/admin/wa-links?webinar_id=${upcomingWebinar.id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+        .then(r => r.json())
+        .then(d => {
+          const links = d.links || [];
+          setUpLinks(links.length > 0 ? links : [{ link_url: '', order_index: 1 }]);
+        })
+        .catch(() => {});
+    } else {
+      setUpLinks([{ link_url: '', order_index: 1 }]);
+    }
+  }, [upcomingWebinar?.id, token]);
 
+  async function handleSave(webinarId, links, setSaving, setToast) {
     setSaving(true);
     setToast(null);
 
-    const cleanLink = extractURL(link);
-    setLink(cleanLink);
+    try {
+      const res = await fetch('/api/admin/wa-links', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          webinar_id: webinarId,
+          links: links
+            .map((l, i) => ({ link_url: (l.link_url || '').trim(), order_index: i + 1 }))
+            .filter(l => l.link_url),
+        }),
+      });
 
-    let body;
-    if (swapAt) {
-      body = isSlot1
-        ? { pending_whatsapp_link: cleanLink, whatsapp_link_swap_at: fromISTValue(swapAt) }
-        : { pending_whatsapp_link_2: cleanLink, whatsapp_link_swap_at_2: fromISTValue(swapAt) };
-    } else {
-      // No schedule → activate immediately
-      body = {
-        tuesday_whatsapp_link: cleanLink,
-        friday_whatsapp_link: cleanLink,
-        ...(isSlot1
-          ? { pending_whatsapp_link: '', whatsapp_link_swap_at: null }
-          : { pending_whatsapp_link_2: '', whatsapp_link_swap_at_2: null }),
-      };
+      if (res.ok) {
+        setToast({ ok: true, msg: 'Links saved! Rotation updated.' });
+        loadData();
+      } else {
+        setToast({ ok: false, msg: 'Failed to save. Try again.' });
+      }
+    } catch {
+      setToast({ ok: false, msg: 'Network error.' });
+    } finally {
+      setSaving(false);
+      setTimeout(() => setToast(null), 4000);
     }
-
-    const res = await fetch('/api/admin/webinar-config', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify(body),
-    });
-
-    setSaving(false);
-    if (res.ok) loadConfig();
-
-    setToast({
-      ok: res.ok,
-      msg: res.ok
-        ? swapAt
-          ? 'Scheduled! Link will auto-update at the set time.'
-          : 'Link updated! It is now live for all users.'
-        : 'Failed to save. Try again.',
-    });
-    setTimeout(() => setToast(null), 4000);
   }
 
   return (
-    <div style={{ maxWidth: 560 }}>
-      <div style={{ marginBottom: 20 }}>
+    <div>
+      <div style={{ marginBottom: 24 }}>
         <h3 className="font-sans text-xl font-bold text-purple-900">WhatsApp Group Link</h3>
         <p className="font-sans text-sm text-purple-400 mt-1">
           Set the update link and the time — it will auto-activate on schedule.
         </p>
       </div>
 
-      {/* Currently Active */}
+      {/* Two-column layout */}
       <div style={{
-        background: '#fff', borderRadius: 16,
-        border: '1.5px solid rgba(37,211,102,0.35)',
-        padding: '18px 20px',
-        boxShadow: '0 2px 16px rgba(37,211,102,0.08)',
-        marginBottom: 20,
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))',
+        gap: 20,
+        alignItems: 'start',
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 12 }}>
-          <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#22c55e', display: 'inline-block' }} />
-          <span style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.70rem', fontWeight: 700, color: '#15803d', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-            Currently Active
-          </span>
-        </div>
-        <div style={{
-          background: 'rgba(37,211,102,0.07)', borderRadius: 12,
-          border: '1px solid rgba(37,211,102,0.25)', padding: '10px 14px',
-        }}>
-          <label style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.70rem', fontWeight: 700, color: '#15803d', textTransform: 'uppercase', letterSpacing: '0.07em', display: 'block', marginBottom: 7 }}>
-            Current Link
-          </label>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <input type="url" value={currentLink} readOnly style={{
-              flex: 1, height: '2.4rem', padding: '0 10px',
-              borderRadius: 10, border: '1px solid rgba(37,211,102,0.35)',
-              background: 'rgba(240,255,244,0.80)',
-              fontFamily: 'Outfit, sans-serif', fontSize: '0.82rem',
-              color: '#15803d', fontWeight: 500, outline: 'none', cursor: 'default',
-            }} />
-            <button type="button"
-              onClick={() => { navigator.clipboard.writeText(currentLink); setCopied(true); setTimeout(() => setCopied(false), 2000); }}
-              title="Copy link"
-              style={{
-                width: 34, height: 34, borderRadius: 9, border: '1px solid rgba(37,211,102,0.35)',
-                background: copied ? '#22c55e' : 'rgba(255,255,255,0.80)',
-                cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                flexShrink: 0, transition: 'all 200ms',
-              }}>
-              {copied
-                ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#15803d" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-              }
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Two schedule slots */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-        <ScheduleSlot
-          label="Schedule Slot 1"
-          link={link1} setLink={setLink1}
-          swapAt={swapAt1} setSwapAt={setSwapAt1}
-          activeSchedule={activeSchedule1}
-          saving={saving1}
-          onSave={() => handleSave(1)}
-          toast={toast1}
+        {/* Current Webinar Card */}
+        <WebinarCard
+          type="current"
+          webinarDate={config.next_webinar_at}
+          webinarId={activeWebinar?.id}
+          links={curLinks}
+          setLinks={setCurLinks}
+          leadCount={activeWebinar?.lead_count || 0}
+          saving={savingCur}
+          onSave={() => handleSave(activeWebinar?.id, curLinks, setSavingCur, setToastCur)}
+          toast={toastCur}
         />
-        <ScheduleSlot
-          label="Schedule Slot 2"
-          link={link2} setLink={setLink2}
-          swapAt={swapAt2} setSwapAt={setSwapAt2}
-          activeSchedule={activeSchedule2}
-          saving={saving2}
-          onSave={() => handleSave(2)}
-          toast={toast2}
+
+        {/* Upcoming Webinar Card */}
+        <WebinarCard
+          type="upcoming"
+          webinarDate={config.backup_webinar_at}
+          webinarId={upcomingWebinar?.id}
+          links={upLinks}
+          setLinks={setUpLinks}
+          leadCount={0}
+          saving={savingUp}
+          onSave={() => handleSave(upcomingWebinar?.id, upLinks, setSavingUp, setToastUp)}
+          toast={toastUp}
         />
       </div>
 

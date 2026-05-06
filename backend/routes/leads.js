@@ -2,6 +2,7 @@ const express = require('express');
 const { body, validationResult } = require('express-validator');
 const router = express.Router();
 const pool = require('../db');
+const { rotateLink } = require('../utils/linkRotation');
 
 function computeLeadScore(sugarLevel, duration) {
   if (duration === 'pre') return 2;
@@ -88,6 +89,11 @@ router.post('/leads', validators, async (req, res) => {
       lead_score,
       whatsapp_link,
     });
+
+    // Fire-and-forget: rotate WhatsApp link if lead count crossed a threshold
+    if (webinar_id) {
+      rotateLink(webinar_id).catch(e => console.error('[LinkRotation] post-lead error:', e.message));
+    }
   } catch (err) {
     console.error('Lead insert error:', err.message);
     res.status(500).json({ success: false, error: 'server_error' });
