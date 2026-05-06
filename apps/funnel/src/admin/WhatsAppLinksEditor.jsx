@@ -121,8 +121,8 @@ function WebinarCard({ type, webinarDate, webinarId, links, setLinks, leadCount,
   }
 
   return (
-    <div style={{
-      flex: 1, minWidth: 300,
+    <div className="wa-card" style={{
+      flex: 1, minWidth: 0,
       background: '#fff', borderRadius: 18,
       border: isCurrent
         ? '2px solid rgba(5,150,105,0.35)'
@@ -139,7 +139,7 @@ function WebinarCard({ type, webinarDate, webinarId, links, setLinks, leadCount,
           : '1px solid rgba(91,33,182,0.10)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}>
-        <div style={{
+        <div className="wa-card-header-pill" style={{
           display: 'inline-flex', alignItems: 'center', gap: 8,
           padding: '8px 20px', borderRadius: 50,
           border: isCurrent
@@ -148,10 +148,12 @@ function WebinarCard({ type, webinarDate, webinarId, links, setLinks, leadCount,
           background: isCurrent
             ? 'rgba(5,150,105,0.06)'
             : 'rgba(91,33,182,0.04)',
+          flexWrap: 'wrap', justifyContent: 'center', textAlign: 'center',
         }}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
             stroke={isCurrent ? '#059669' : '#5B21B6'}
-            strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+            style={{ flexShrink: 0 }}>
             <rect x="3" y="4" width="18" height="18" rx="2"/>
             <line x1="16" y1="2" x2="16" y2="6"/>
             <line x1="8" y1="2" x2="8" y2="6"/>
@@ -428,6 +430,14 @@ export default function WhatsAppLinksEditor({ token }) {
 
   return (
     <div>
+      <style>{`
+        @media (max-width: 640px) {
+          .wa-grid { grid-template-columns: 1fr !important; }
+          .wa-card { min-width: 0 !important; }
+          .wa-card-header-pill { padding: 6px 12px !important; font-size: 0.72rem !important; }
+          .wa-card-header-pill span { font-size: 0.72rem !important; }
+        }
+      `}</style>
       <div style={{ marginBottom: 24 }}>
         <h3 className="font-sans text-xl font-bold text-purple-900">WhatsApp Group Link</h3>
         <p className="font-sans text-sm text-purple-400 mt-1">
@@ -436,9 +446,9 @@ export default function WhatsAppLinksEditor({ token }) {
       </div>
 
       {/* Two-column layout */}
-      <div style={{
+      <div className="wa-grid" style={{
         display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
         gap: 20,
         alignItems: 'start',
       }}>

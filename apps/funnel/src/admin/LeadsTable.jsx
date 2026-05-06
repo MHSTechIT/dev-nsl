@@ -290,8 +290,16 @@ export default function LeadsTable({ token }) {
 
   return (
     <div>
+      <style>{`
+        @media (max-width: 640px) {
+          .leads-header { flex-direction: column !important; align-items: flex-start !important; gap: 12px !important; }
+          .leads-actions { width: 100% !important; justify-content: flex-start !important; }
+          .leads-action-btn { padding: 0 12px !important; font-size: 0.75rem !important; height: 2.1rem !important; }
+          .leads-stat-grid { grid-template-columns: repeat(2, 1fr) !important; }
+        }
+      `}</style>
       {/* Header row */}
-      <div className="flex items-center justify-between mb-5">
+      <div className="flex items-center justify-between mb-5 leads-header" style={{ flexWrap: 'wrap', gap: 8 }}>
         <div>
           <h3 className="font-sans text-xl font-bold text-purple-900">Lead Registry</h3>
           <p className="font-sans text-sm text-purple-400 mt-0.5">
@@ -301,7 +309,7 @@ export default function LeadsTable({ token }) {
             }
           </p>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <div className="leads-actions" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
 
           {/* Duplicates filter */}
           <button
@@ -316,6 +324,7 @@ export default function LeadsTable({ token }) {
                 setSelected(new Set());
               }
             }}
+            className="leads-action-btn"
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 6,
               height: '2.4rem', padding: '0 16px', borderRadius: 50,
@@ -336,6 +345,7 @@ export default function LeadsTable({ token }) {
           {!deleteMode ? (
             <button
               onClick={toggleDeleteMode}
+              className="leads-action-btn"
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 6,
                 height: '2.4rem', padding: '0 16px', borderRadius: 50,

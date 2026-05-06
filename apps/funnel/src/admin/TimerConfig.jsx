@@ -36,7 +36,7 @@ function WebinarCard({ webinar }) {
   }[status];
 
   return (
-    <div style={{
+    <div className="timer-session-card" style={{
       borderRadius: 14,
       border: webinar.is_active
         ? '1.5px solid rgba(91,33,182,0.35)'
@@ -181,11 +181,19 @@ export default function TimerConfig({ token }) {
 
   return (
     <>
-      <style>{`@keyframes timerPulse { 0%,100%{opacity:1} 50%{opacity:0.45} }`}</style>
-      <div style={{ display: 'flex', gap: 28, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+      <style>{`
+        @keyframes timerPulse { 0%,100%{opacity:1} 50%{opacity:0.45} }
+        @media (max-width: 640px) {
+          .timer-layout { flex-direction: column !important; gap: 20px !important; }
+          .timer-left { flex: 1 1 auto !important; min-width: 0 !important; max-width: 100% !important; }
+          .timer-right { min-width: 0 !important; }
+          .timer-session-card { padding: 12px 14px !important; }
+        }
+      `}</style>
+      <div className="timer-layout" style={{ display: 'flex', gap: 28, alignItems: 'flex-start', flexWrap: 'wrap' }}>
 
         {/* ══ LEFT COLUMN — existing content, zero logic changes ══ */}
-        <div style={{ flex: '0 0 420px', minWidth: 280 }}>
+        <div className="timer-left" style={{ flex: '0 0 420px', minWidth: 280 }}>
           <div className="space-y-5">
             <div>
               <h3 className="font-sans text-xl font-bold text-purple-900">Webinar Timer</h3>
@@ -272,7 +280,7 @@ export default function TimerConfig({ token }) {
         </div>
 
         {/* ══ RIGHT COLUMN — webinar session history ══ */}
-        <div style={{ flex: 1, minWidth: 260 }}>
+        <div className="timer-right" style={{ flex: 1, minWidth: 260 }}>
           {/* Header */}
           <div style={{
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',

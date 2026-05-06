@@ -233,22 +233,32 @@ export default function AdminPage() {
 
   return (
     <div className="min-h-screen" style={{ maxWidth: 'none', background: '#EDEAF8' }}>
-      <div className="max-w-6xl mx-auto px-4 sm:px-6 py-6">
+      <style>{`
+        @media (max-width: 640px) {
+          .admin-tabs-bar { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+          .admin-tabs-bar::-webkit-scrollbar { display: none; }
+          .admin-tab-btn { padding: 8px 10px !important; font-size: 0.75rem !important; gap: 5px !important; }
+          .admin-content-card { padding: 16px !important; }
+          .admin-outer { padding-left: 12px !important; padding-right: 12px !important; padding-top: 12px !important; }
+        }
+      `}</style>
+      <div className="max-w-6xl mx-auto px-4 sm:px-6 py-6 admin-outer">
 
         {/* ── Top row: Tab bar  +  Profile icon ── */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24, gap: 8 }}>
 
           {/* Tabs */}
-          <div style={{ display: 'flex', gap: 4, background: '#fff', borderRadius: 16, padding: 6, boxShadow: '0 2px 12px rgba(91,33,182,0.10)' }}>
+          <div className="admin-tabs-bar" style={{ display: 'flex', gap: 4, background: '#fff', borderRadius: 16, padding: 6, boxShadow: '0 2px 12px rgba(91,33,182,0.10)', minWidth: 0, flex: '1 1 0' }}>
             {TABS.map(t => (
               <button
                 key={t.id}
                 onClick={() => setTab(t.id)}
+                className="admin-tab-btn"
                 style={{
                   display: 'flex', alignItems: 'center', gap: 7,
                   padding: '8px 16px', borderRadius: 12, border: 'none',
                   fontFamily: 'Outfit, sans-serif', fontWeight: 600, fontSize: '0.85rem',
-                  cursor: 'pointer', transition: 'all 200ms',
+                  cursor: 'pointer', transition: 'all 200ms', whiteSpace: 'nowrap', flexShrink: 0,
                   background: tab === t.id ? '#5B21B6' : 'transparent',
                   color:      tab === t.id ? '#fff'    : 'rgba(91,33,182,0.50)',
                   boxShadow:  tab === t.id ? '0 2px 10px rgba(91,33,182,0.30)' : 'none',
@@ -317,7 +327,7 @@ export default function AdminPage() {
         </div>
 
         {/* Content card */}
-        <div className="bg-white rounded-card shadow-card p-6">
+        <div className="bg-white rounded-card shadow-card p-6 admin-content-card">
           {tab === 'dashboard' && <HomeDashboard token={token} />}
           {tab === 'leads'     && <LeadsTable token={token} />}
           {tab === 'whatsapp'  && <WhatsAppLinksEditor token={token} />}

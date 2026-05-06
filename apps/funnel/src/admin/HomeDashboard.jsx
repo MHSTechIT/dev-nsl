@@ -465,10 +465,20 @@ export default function HomeDashboard({ token }) {
           0%,100% { opacity: 1; }
           50%      { opacity: 0.45; }
         }
+        @media (max-width: 640px) {
+          .dash-stat-grid { grid-template-columns: repeat(2, 1fr) !important; }
+          .dash-dropoff-grid { grid-template-columns: repeat(2, 1fr) !important; }
+          .dash-header { flex-direction: column !important; align-items: flex-start !important; gap: 8px !important; }
+          .dash-filter-bar { padding: 8px 10px !important; gap: 6px !important; }
+        }
+        @media (max-width: 380px) {
+          .dash-stat-grid { grid-template-columns: 1fr !important; }
+          .dash-dropoff-grid { grid-template-columns: 1fr !important; }
+        }
       `}</style>
 
       {/* ── Header ── */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20, flexWrap: 'wrap', gap: 8 }}>
+      <div className="dash-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20, flexWrap: 'wrap', gap: 8 }}>
         <div>
           <h2 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 800, color: '#3B0764' }}>
             Page Performance
@@ -498,7 +508,7 @@ export default function HomeDashboard({ token }) {
       </div>
 
       {/* ── Filter bar — Date Range ── */}
-      <div style={{
+      <div className="dash-filter-bar" style={{
         display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
         background: 'rgba(237,234,248,0.50)', borderRadius: 14,
         border: '1px solid rgba(139,92,246,0.15)',
@@ -536,7 +546,7 @@ export default function HomeDashboard({ token }) {
 
       {/* ── Filter bar — Webinar Session ── */}
       {sessions.length > 0 && (
-        <div style={{
+        <div className="dash-filter-bar" style={{
           display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
           background: 'rgba(237,234,248,0.50)', borderRadius: 14,
           border: '1px solid rgba(139,92,246,0.15)',
@@ -570,7 +580,7 @@ export default function HomeDashboard({ token }) {
       )}
 
       {/* ── Stat grid ── */}
-      <div style={{
+      <div className="dash-stat-grid" style={{
         display: 'grid',
         gridTemplateColumns: 'repeat(auto-fill, minmax(155px, 1fr))',
         gap: 12, marginBottom: 28,
@@ -583,7 +593,7 @@ export default function HomeDashboard({ token }) {
 
       {/* ── Drop-off summary boxes ── */}
       {!loading && (
-        <div style={{
+        <div className="dash-dropoff-grid" style={{
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
           gap: 12, marginBottom: 28,
