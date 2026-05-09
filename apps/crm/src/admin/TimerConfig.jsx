@@ -261,7 +261,7 @@ export default function TimerConfig({ token }) {
                 </p>
               )}
 
-              {/* Actual webinar date (separate from the registration deadline) */}
+              {/* Actual webinar date — separate from the registration deadline */}
               <div style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid rgba(209,196,240,0.45)' }}>
                 <p className="font-sans text-xs text-purple-400 mb-2" style={{ fontWeight: 600 }}>Webinar date (when this session actually happens)</p>
                 <DateTimePicker value={currentWebinarDate} onChange={setCurrentWebinarDate} />

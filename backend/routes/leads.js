@@ -3,6 +3,7 @@ const { body, validationResult } = require('express-validator');
 const router = express.Router();
 const pool = require('../db');
 const { rotateLink } = require('../utils/linkRotation');
+const { assignNewLead } = require('../utils/leadAssigner');
 
 function computeLeadScore(sugarLevel, duration) {
   if (duration === 'pre') return 2;
@@ -93,6 +94,12 @@ router.post('/leads', validators, async (req, res) => {
     // Fire-and-forget: rotate WhatsApp link if lead count crossed a threshold
     if (webinar_id) {
       rotateLink(webinar_id).catch(e => console.error('[LinkRotation] post-lead error:', e.message));
+    }
+
+    // Fire-and-forget: round-robin assign this lead to an eligible caller
+    if (webinar_id) {
+      assignNewLead(rows[0].id, sugar_level, webinar_id)
+        .catch(e => console.error('[Assigner] post-lead error:', e.message));
     }
   } catch (err) {
     console.error('Lead insert error:', err.message);

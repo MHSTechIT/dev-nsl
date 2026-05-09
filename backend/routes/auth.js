@@ -10,6 +10,74 @@ const nodemailer = require('nodemailer');
 const router     = express.Router();
 const { readConfig, writeConfig } = require('../utils/adminConfig');
 
+const pool = require('../db');
+const jwtUtil = require('../utils/jwt');
+
+/* Verify a scrypt-hashed password (format: scrypt$<salt-hex>$<hash-hex>) */
+function verifyScryptHash(plain, stored) {
+  return new Promise(resolve => {
+    if (!stored || typeof stored !== 'string') return resolve(false);
+    const parts = stored.split('$');
+    if (parts.length !== 3 || parts[0] !== 'scrypt') return resolve(false);
+    let salt, expected;
+    try {
+      salt     = Buffer.from(parts[1], 'hex');
+      expected = Buffer.from(parts[2], 'hex');
+    } catch { return resolve(false); }
+    crypto.scrypt(plain, salt, expected.length, (err, derived) => {
+      if (err) return resolve(false);
+      try {
+        resolve(derived.length === expected.length && crypto.timingSafeEqual(derived, expected));
+      } catch { resolve(false); }
+    });
+  });
+}
+
+/* ─────────────────────────────────────────────────────────────
+   POST /api/auth/crm-login
+   Authenticates a CRM user (junior caller, manager, etc.)
+   against the crm_users table. Returns the user record on success.
+───────────────────────────────────────────────────────────── */
+router.post('/crm-login',
+  body('username').trim().isLength({ min: 1, max: 200 }),
+  body('password').isLength({ min: 1, max: 256 }),
+  async (req, res) => {
+    const errs = validationResult(req);
+    if (!errs.isEmpty()) return res.status(401).json({ error: 'Invalid credentials.' });
+
+    const { username, password } = req.body;
+    try {
+      const { rows } = await pool.query(
+        `SELECT id, full_name, email, phone, role, password_hash, is_active
+         FROM crm_users WHERE LOWER(email) = $1`,
+        [String(username).trim().toLowerCase()]
+      );
+      if (rows.length === 0) return res.status(401).json({ error: 'Invalid credentials.' });
+      const u = rows[0];
+      if (!u.is_active)      return res.status(401).json({ error: 'Account is inactive.' });
+      if (!u.password_hash)  return res.status(401).json({ error: 'No password set for this account. Contact your admin.' });
+
+      const ok = await verifyScryptHash(password, u.password_hash);
+      if (!ok) return res.status(401).json({ error: 'Invalid credentials.' });
+
+      const token = jwtUtil.sign({ user_id: u.id, role: u.role, full_name: u.full_name });
+      res.json({
+        user: {
+          id:        u.id,
+          full_name: u.full_name,
+          email:     u.email,
+          phone:     u.phone,
+          role:      u.role,
+        },
+        token,
+      });
+    } catch (err) {
+      console.error('crm-login error:', err.message);
+      res.status(500).json({ error: 'Login failed. Try again.' });
+    }
+  }
+);
+
 /* ── Gmail transporter ── */
 function createTransporter() {
   return nodemailer.createTransport({

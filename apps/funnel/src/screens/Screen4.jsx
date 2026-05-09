@@ -233,10 +233,12 @@ export default function Screen4() {
           border: '1px solid rgba(139,92,246,0.18)',
           backdropFilter: 'blur(16px)', WebkitBackdropFilter: 'blur(16px)',
         }}>
-        {[
+        {(() => {
+          const webinarDateISO = state.webinarConfig?.current_webinar_date || state.webinarConfig?.next_webinar_at;
+          return [
           {
-            text: state.webinarConfig?.next_webinar_at
-              ? new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', weekday: 'short', day: 'numeric', month: 'short' }).format(new Date(state.webinarConfig.next_webinar_at))
+            text: webinarDateISO
+              ? new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', weekday: 'short', day: 'numeric', month: 'short' }).format(new Date(webinarDateISO))
               : 'Every Sat & Tue',
             icon: (
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="rgba(167,139,250,0.85)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -245,8 +247,8 @@ export default function Screen4() {
             ),
           },
           {
-            text: state.webinarConfig?.next_webinar_at
-              ? new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true }).format(new Date(state.webinarConfig.next_webinar_at)) + ' IST'
+            text: webinarDateISO
+              ? new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true }).format(new Date(webinarDateISO)) + ' IST'
               : '7:00 PM IST',
             icon: (
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="rgba(167,139,250,0.85)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -271,7 +273,8 @@ export default function Screen4() {
             {item.icon}
             <span style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.68rem', fontWeight: 600, color: '#2d0a6e', whiteSpace: 'nowrap' }}>{item.text}</span>
           </div>
-        ))}
+        ));
+        })()}
       </m.div>
 
       {/* ── Based on your answers ── */}

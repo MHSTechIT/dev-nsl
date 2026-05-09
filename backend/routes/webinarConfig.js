@@ -46,7 +46,8 @@ async function checkAndExecutePendingSwap() {
       SELECT next_webinar_at, backup_webinar_at, tuesday_whatsapp_link,
              friday_whatsapp_link, kill_switch,
              pending_whatsapp_link, whatsapp_link_swap_at,
-             pending_whatsapp_link_2, whatsapp_link_swap_at_2
+             pending_whatsapp_link_2, whatsapp_link_swap_at_2,
+             current_webinar_date, next_webinar_date
       FROM webinar_config WHERE id = 1
     `);
     if (rows.length > 0) {
@@ -91,7 +92,7 @@ router.get('/webinar-config', async (req, res) => {
   try {
     const [configResult, countResult] = await Promise.all([
       pool.query(
-        'SELECT next_webinar_at, backup_webinar_at, tuesday_whatsapp_link, friday_whatsapp_link, kill_switch, pending_whatsapp_link, whatsapp_link_swap_at, pending_whatsapp_link_2, whatsapp_link_swap_at_2 FROM webinar_config WHERE id = 1'
+        'SELECT next_webinar_at, backup_webinar_at, tuesday_whatsapp_link, friday_whatsapp_link, kill_switch, pending_whatsapp_link, whatsapp_link_swap_at, pending_whatsapp_link_2, whatsapp_link_swap_at_2, current_webinar_date, next_webinar_date FROM webinar_config WHERE id = 1'
       ),
       pool.query('SELECT COUNT(*) FROM leads'),
     ]);

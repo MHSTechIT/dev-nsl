@@ -4,6 +4,7 @@ import { m, AnimatePresence } from 'framer-motion';
 import { useFunnel } from '../context/FunnelContext';
 import { t } from '../translations';
 import CountdownTimer, { stopTick } from '../components/CountdownTimer';
+import NextWebinarCard from '../components/NextWebinarCard';
 import { trackEvent } from '../utils/trackEvent';
 import Confetti from '../components/Confetti';
 import TrustBar from '../components/TrustBar';
@@ -538,6 +539,7 @@ export default function Screen1A() {
           {/* ── RIGHT: Countdown + Social Proof + CTA ── */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
             <m.div {...cardAnim(2)}><CountdownTimer /></m.div>
+            <m.div {...cardAnim(2)}><NextWebinarCard /></m.div>
             <m.div {...cardAnim(3)}>
               <SocialProofCard visibleMsgs={visibleMsgs} seatInfo={seatInfo} />
             </m.div>
@@ -570,6 +572,8 @@ export default function Screen1A() {
           </m.div>
 
           <m.div {...cardAnim(2)}><CountdownTimer /></m.div>
+
+          <m.div {...cardAnim(2)}><NextWebinarCard /></m.div>
 
           <m.div {...cardAnim(3)}>
             <SocialProofCard visibleMsgs={visibleMsgs} seatInfo={seatInfo} />

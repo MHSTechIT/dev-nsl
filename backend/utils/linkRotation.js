@@ -4,10 +4,10 @@ const { broadcast } = require('./sseClients');
 
 /**
  * Determine the correct WhatsApp link index based on lead count.
- * 0–500 → 1, 501–1000 → 2, 1001–1500 → 3, etc.
+ * 0–950 → 1, 951–1900 → 2, 1901–2850 → 3, etc.
  */
 function getLinkIndex(leadCount) {
-  return Math.max(1, Math.ceil(leadCount / 500));
+  return Math.max(1, Math.ceil(leadCount / 950));
 }
 
 /**
@@ -66,7 +66,8 @@ async function rotateLink(webinarId) {
         `SELECT next_webinar_at, backup_webinar_at, tuesday_whatsapp_link,
                 friday_whatsapp_link, kill_switch,
                 pending_whatsapp_link, whatsapp_link_swap_at,
-                pending_whatsapp_link_2, whatsapp_link_swap_at_2
+                pending_whatsapp_link_2, whatsapp_link_swap_at_2,
+                current_webinar_date, next_webinar_date
          FROM webinar_config WHERE id = 1`
       );
       if (fresh.length > 0) {

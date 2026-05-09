@@ -1,0 +1,24 @@
+/**
+ * JWT auth for CRM callers.
+ * Reads Authorization: Bearer <jwt> OR ?token=<jwt> (for EventSource SSE,
+ * which can't set headers). Verifies with utils/jwt and attaches req.caller.
+ */
+const { verify } = require('../utils/jwt');
+
+function callerAuth(req, res, next) {
+  const header = req.headers.authorization || '';
+  const bearer = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+  const token  = bearer || (typeof req.query?.token === 'string' ? req.query.token : '');
+  if (!token) return res.status(401).json({ error: 'unauthorized' });
+
+  try {
+    const payload = verify(token);
+    if (!payload?.user_id) return res.status(401).json({ error: 'unauthorized' });
+    req.caller = { id: payload.user_id, role: payload.role, full_name: payload.full_name };
+    next();
+  } catch (_) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+}
+
+module.exports = { callerAuth };

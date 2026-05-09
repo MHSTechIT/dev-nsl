@@ -43,7 +43,7 @@ async function runSwaps() {
     // 3. Mark new webinar as active
     // 4. Activate the first WhatsApp link of the new webinar
     const { rows: configRows } = await pool.query(
-      `SELECT next_webinar_at, backup_webinar_at FROM webinar_config WHERE id = 1`
+      `SELECT next_webinar_at, backup_webinar_at, current_webinar_date, next_webinar_date FROM webinar_config WHERE id = 1`
     );
 
     if (configRows.length > 0) {
@@ -53,12 +53,14 @@ async function runSwaps() {
       const hasBackup = !!cfg.backup_webinar_at;
 
       if (currentEnd && currentEnd < now && hasBackup) {
-        // Step 1: Update webinar_config — promote backup
+        // Step 1: Update webinar_config — promote backup pair (timer + actual webinar date)
         await pool.query(`
           UPDATE webinar_config
-          SET next_webinar_at   = backup_webinar_at,
-              backup_webinar_at = NULL,
-              updated_at        = NOW()
+          SET next_webinar_at      = backup_webinar_at,
+              current_webinar_date = next_webinar_date,
+              backup_webinar_at    = NULL,
+              next_webinar_date    = NULL,
+              updated_at           = NOW()
           WHERE id = 1
         `);
 
@@ -77,9 +79,11 @@ async function runSwaps() {
           await pool.query(`UPDATE webinars SET is_active = TRUE WHERE id = $1`, [newWebinarId]);
         } else {
           // Create the webinar row if it doesn't exist
+          const { nextWebinarName } = require('./webinarName');
+          const name = await nextWebinarName();
           const { rows: insertedRows } = await pool.query(
-            `INSERT INTO webinars (date_time, is_active) VALUES ($1, TRUE) RETURNING id`,
-            [cfg.backup_webinar_at]
+            `INSERT INTO webinars (date_time, is_active, name) VALUES ($1, TRUE, $2) RETURNING id`,
+            [cfg.backup_webinar_at, name]
           );
           newWebinarId = insertedRows[0]?.id;
         }
@@ -98,7 +102,8 @@ async function runSwaps() {
       SELECT next_webinar_at, backup_webinar_at, tuesday_whatsapp_link,
              friday_whatsapp_link, kill_switch,
              pending_whatsapp_link, whatsapp_link_swap_at,
-             pending_whatsapp_link_2, whatsapp_link_swap_at_2
+             pending_whatsapp_link_2, whatsapp_link_swap_at_2,
+             current_webinar_date, next_webinar_date
       FROM webinar_config WHERE id = 1
     `);
     if (rowCount > 0) {
