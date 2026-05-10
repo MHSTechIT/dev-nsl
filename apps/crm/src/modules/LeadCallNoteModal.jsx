@@ -272,8 +272,22 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
         }
         return;
       }
-      // Past the decision point already — don't retry from form / DNP / etc.
-      if (['form_window','form_reason_card','dnp_alert','auto_paused','recall_ringing','customer_on_call'].includes(phase)) return;
+      // Suppress in phases where customer.missed cannot be a real customer-side
+      // miss for the current attempt:
+      //   – Pre-customer-leg phases (idle, ext_check, agent_ringing_1/2,
+      //     agent_reason_card): the agent hasn't picked yet, so the customer
+      //     leg never started. Any customer.missed arriving here must be a
+      //     phantom (e.g. Tata firing the trigger on the first attempt's row
+      //     where the agent timed out, or a leftover signal in a fragment
+      //     row). Without this guard, the deferred retry would prematurely
+      //     bump customerAttempt to 2 and the next genuine customer miss
+      //     would jump straight to DNP without a second attempt.
+      //   – Post-decision phases (form_window, form_reason_card, dnp_alert,
+      //     auto_paused, recall_ringing, customer_on_call): we're past the
+      //     point where retry/DNP is the right action.
+      const PRE_CUSTOMER = ['idle','ext_check','agent_ringing_1','agent_ringing_2','agent_reason_card'];
+      const POST_DECISION = ['form_window','form_reason_card','dnp_alert','auto_paused','recall_ringing','customer_on_call'];
+      if (PRE_CUSTOMER.includes(phase) || POST_DECISION.includes(phase)) return;
       // Race protection: defer the retry. If customer.answered arrives
       // within 3 s OR phase moves into a non-retryable state, abort.
       if (customerMissedTimerRef.current) clearTimeout(customerMissedTimerRef.current);
@@ -281,7 +295,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
         customerMissedTimerRef.current = null;
         if (wasCustomerAnsweredRef.current) return;
         const p = callPhaseRef.current;
-        if (['form_window','form_reason_card','dnp_alert','auto_paused','recall_ringing','customer_on_call'].includes(p)) return;
+        if (PRE_CUSTOMER.includes(p) || POST_DECISION.includes(p)) return;
         if (customerAttemptRef.current < 2) {
           retryCallToCustomer();
         } else {
