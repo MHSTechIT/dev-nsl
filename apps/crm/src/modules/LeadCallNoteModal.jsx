@@ -206,11 +206,21 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
 
     if (eventType === 'agent.answered') {
       wasAgentAnsweredRef.current = true;
+      // Recall path / form-window: agent picking up means customer was already
+      // on the call before the recall flow → jump straight to customer_on_call.
       if (phase === 'recall_ringing' || phase === 'form_window' || phase === 'form_reason_card') {
         setCallPhase('customer_on_call');
-      } else {
-        setCallPhase('customer_ringing');
+        return;
       }
+      // Already past the agent-decision point — don't regress to customer_ringing.
+      // (A stale agent.answered re-delivery, or a fragment row's late-arriving
+      // signal, shouldn't flip the banner backwards from "Customer is on the
+      // call" to "Calling customer…".)
+      if (['customer_ringing','customer_on_call','dnp_alert','auto_paused',
+           'agent_reason_card'].includes(phase)) {
+        return;
+      }
+      setCallPhase('customer_ringing');
       return;
     }
 
@@ -277,8 +287,10 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
       // for the user's reason input (a stale agent.missed from a previous
       // attempt shouldn't be allowed to bump the attempt counter or auto-pause
       // the lead while the caller is mid-typing).
+      // recall_ringing is INTENTIONALLY allowed to fall through — per spec,
+      // agent.missed during recall_ringing must transition to agent_ringing_2.
       if (['form_window','form_reason_card','dnp_alert','auto_paused',
-           'customer_on_call','customer_ringing','recall_ringing',
+           'customer_on_call','customer_ringing',
            'agent_reason_card'].includes(phase)) return;
       handleAgentMissed();
       return;
