@@ -136,6 +136,12 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
   const [callPhase, setCallPhase] = useState(() =>
     lead?.last_call_id ? 'agent_ringing_1' : 'ext_check'
   );
+  // Sticky flag: true once the customer has answered AT LEAST ONCE during
+  // this lead's modal session. Used to gate the Complete Call button — the
+  // caller can't submit until the customer actually attends the call.
+  // Survives recall flows (resetCallSignalForNewAttempt does NOT clear it),
+  // resets only when the modal remounts (i.e. a new lead).
+  const [customerAnsweredOnce, setCustomerAnsweredOnce] = useState(false);
   const [agentAttempts, setAgentAttempts]     = useState(0);   // SmartFlow misses this session (0..5)
   const [customerAttempt, setCustomerAttempt] = useState(1);   // 1 or 2 (whole-call retry)
   const [agentReasons, setAgentReasons]       = useState([]);  // appended every reason submit
@@ -238,6 +244,9 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
 
     if (eventType === 'customer.answered') {
       wasCustomerAnsweredRef.current = true;
+      // Sticky: once the customer has answered, the Complete Call button
+      // becomes available for the rest of this lead's modal session.
+      setCustomerAnsweredOnce(true);
       // Cancel any pending customer.missed retry timer — customer DID answer.
       if (customerMissedTimerRef.current) {
         clearTimeout(customerMissedTimerRef.current);
@@ -1122,16 +1131,37 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
                      letterSpacing: '0.04em' }}>
             DNP — Did Not Pick
           </button>
-          <button type="button" onClick={submit}
-            disabled={saving || !(interested === 'yes' || interested === 'no')}
-            style={{ width: '100%', height: '2.8rem', borderRadius: 50, border: 'none',
-                     background: saving ? 'rgba(5,150,105,0.55)' : '#059669',
-                     color: '#fff', fontFamily: 'Outfit,sans-serif', fontWeight: 700, fontSize: '0.92rem',
-                     cursor: saving ? 'not-allowed' : 'pointer',
-                     boxShadow: '0 4px 16px rgba(5,150,105,0.35)',
-                     opacity: (interested === 'yes' || interested === 'no') ? 1 : 0.6 }}>
-            {saving ? 'Saving…' : 'Complete Call'}
-          </button>
+          {/* Complete Call is gated on customer having actually answered.
+              Until the customer attends the call, this button stays
+              disabled even if every form field is filled. DNP above is the
+              correct path when the customer never picks up. */}
+          {(() => {
+            const interestedSet = interested === 'yes' || interested === 'no';
+            const canComplete   = !saving && interestedSet && customerAnsweredOnce;
+            return (
+              <>
+                <button type="button" onClick={submit}
+                  disabled={!canComplete}
+                  title={!customerAnsweredOnce ? 'Waiting for the customer to attend the call…' : undefined}
+                  style={{ width: '100%', height: '2.8rem', borderRadius: 50, border: 'none',
+                           background: !canComplete ? 'rgba(5,150,105,0.55)' : '#059669',
+                           color: '#fff', fontFamily: 'Outfit,sans-serif', fontWeight: 700, fontSize: '0.92rem',
+                           cursor: canComplete ? 'pointer' : 'not-allowed',
+                           boxShadow: '0 4px 16px rgba(5,150,105,0.35)',
+                           opacity: canComplete ? 1 : 0.55 }}>
+                  {saving ? 'Saving…' : 'Complete Call'}
+                </button>
+                {!customerAnsweredOnce && interestedSet && !saving && (
+                  <p style={{
+                    margin: '6px 0 0', textAlign: 'center', fontSize: '0.74rem',
+                    color: 'rgba(91,33,182,0.55)', fontFamily: 'Outfit, sans-serif',
+                  }}>
+                    Complete Call unlocks once the customer answers the call.
+                  </p>
+                )}
+              </>
+            );
+          })()}
         </div>
       </div>
 
