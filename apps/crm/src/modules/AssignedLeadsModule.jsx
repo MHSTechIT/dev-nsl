@@ -110,7 +110,13 @@ export default function AssignedLeadsModule({ jwt, externalHighlightId }) {
     setAutoError('');
     setAutoMode('calling');
     const first = queue[0];
-    triggerCallAndOpen(first, setAutoError);
+    // FRESH START: open the modal at idle so the user sees the SmartFlow
+    // extension confirmation overlay (ext_check) BEFORE the first Tata call
+    // gets dialed. Auto-advance flows (advanceAutoCall, onSaved auto-advance)
+    // keep using triggerCallAndOpen because the user has already confirmed
+    // their extension is on for this session — re-prompting on every lead
+    // would break the auto flow.
+    setEditLead({ ...first, last_call_id: null });
   }
 
   /* Called after the "Complete Call" button submits the note OR when the
