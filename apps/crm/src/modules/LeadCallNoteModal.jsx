@@ -143,7 +143,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
   const customerAttemptRef = useRef(1);
   const wasAgentAnsweredRef = useRef(false);
   const wasCustomerAnsweredRef = useRef(false);
-  const lastSeenSigRef     = useRef(null);
+  const lastSeenSigsRef    = useRef(new Set());
   const activeCallIdRef    = useRef(lead?.last_call_id || null);
   useEffect(() => { callPhaseRef.current = callPhase; },             [callPhase]);
   useEffect(() => { agentAttemptsRef.current = agentAttempts; },     [agentAttempts]);
@@ -158,13 +158,19 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
   }, [lead?.last_call_id]);
 
   /* Reduce a typed call event into a phase transition. Read from refs so the
-     callback (registered once at mount) sees fresh values. */
+     callback (registered once at mount) sees fresh values.
+
+     Tata occasionally fires "Call missed by Customer" even when the customer
+     DID answer (likely fired on any premature hangup of the customer leg).
+     We treat the per-leg timestamp columns + ref flags as ground truth and
+     ignore *.missed events whenever the corresponding *.answered already
+     happened on the same call. */
   function handleCallEvent(eventType, call) {
     if (call && call.lead_id && call.lead_id !== lead.id) return;
 
     const sig = `${call?.id || ''}:${eventType}`;
-    if (lastSeenSigRef.current === sig) return;
-    lastSeenSigRef.current = sig;
+    if (lastSeenSigsRef.current.has(sig)) return;
+    lastSeenSigsRef.current.add(sig);
 
     if (call?.id) {
       setActiveCallId(call.id);
@@ -172,10 +178,11 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
     }
 
     const phase = callPhaseRef.current;
+    const agentAnswered    = wasAgentAnsweredRef.current    || !!call?.agent_answered_at;
+    const customerAnswered = wasCustomerAnsweredRef.current || !!call?.customer_answered_at;
 
     if (eventType === 'agent.answered') {
       wasAgentAnsweredRef.current = true;
-      // Caller picked SmartFlow → Tata is now bridging customer
       if (phase === 'recall_ringing' || phase === 'form_window' || phase === 'form_reason_card') {
         setCallPhase('customer_on_call');
       } else {
@@ -191,7 +198,11 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
     }
 
     if (eventType === 'customer.missed') {
-      // Customer didn't pick after caller did. First miss → silent retry; second → DNP.
+      // Customer ALREADY answered this call → not actually a miss; ignore.
+      if (customerAnswered) return;
+      // Once we're in form_window / form_reason_card / dnp_alert / auto_paused,
+      // the call is past the retry decision point — never retry from here.
+      if (['form_window','form_reason_card','dnp_alert','auto_paused','recall_ringing'].includes(phase)) return;
       if (customerAttemptRef.current < 2) {
         retryCallToCustomer();
       } else {
@@ -201,15 +212,15 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
     }
 
     if (eventType === 'agent.missed') {
-      // Caller didn't pick the SmartFlow ring. attempt 1 → auto-redial silently,
-      // attempt 2 → centered reason card.
+      // Agent already picked SmartFlow → not actually a miss; ignore.
+      if (agentAnswered) return;
+      if (['form_window','form_reason_card','dnp_alert','auto_paused','customer_on_call'].includes(phase)) return;
       handleAgentMissed();
       return;
     }
 
     if (eventType === 'call.hangup') {
-      if (wasCustomerAnsweredRef.current || call?.customer_answered_at) {
-        // Real conversation ended → form window
+      if (customerAnswered) {
         if (phase !== 'form_window' && phase !== 'form_reason_card') {
           setCallPhase('form_window');
           setFormTimerSecs(prev => (prev > 0 ? prev : FORM_WINDOW_SECS));
@@ -267,17 +278,20 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
         const data = await res.json();
         const c = data.calls?.[0];
         if (cancelled || !c) return;
-        // Derive missing events from timestamp columns
+        // Derive missing events from timestamp columns. Always process answered
+        // events first so the *.missed guards can short-circuit cleanly.
         if (c.agent_answered_at && !wasAgentAnsweredRef.current) {
           handleCallEvent('agent.answered', { ...c, lead_id: lead.id });
         }
         if (c.customer_answered_at && !wasCustomerAnsweredRef.current) {
           handleCallEvent('customer.answered', { ...c, lead_id: lead.id });
         }
-        if (c.customer_missed_at) {
+        // Only fire customer.missed if the customer never actually answered.
+        if (c.customer_missed_at && !c.customer_answered_at) {
           handleCallEvent('customer.missed', { ...c, lead_id: lead.id });
         }
         if (c.ended_at) {
+          // Only fire agent.missed if the agent never actually answered.
           if (!c.agent_answered_at) handleCallEvent('agent.missed', { ...c, lead_id: lead.id });
           handleCallEvent('call.hangup', { ...c, lead_id: lead.id });
         }
@@ -307,7 +321,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
   function resetCallSignalForNewAttempt() {
     wasAgentAnsweredRef.current = false;
     wasCustomerAnsweredRef.current = false;
-    lastSeenSigRef.current = null;
+    lastSeenSigsRef.current = new Set();
   }
 
   async function postStartCall() {
