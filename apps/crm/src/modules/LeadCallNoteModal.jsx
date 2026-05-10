@@ -384,34 +384,48 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
         const data = await res.json();
         const since = sessionStartIsoRef.current;
         const all = Array.isArray(data.calls) ? data.calls : [];
-        // Only consider rows that received any activity during THIS session.
-        // We filter by updated_at (NOT started_at) because Tata's click-to-call
-        // splits one logical call into two rows by leg (agent leg with a
-        // numeric provider_call_id, customer leg with a hex one). The
-        // customer-leg row may have been created before this session started
-        // — its events for the CURRENT call still arrive and bump updated_at.
-        // Falling back to started_at would drop the customer-leg row and
-        // strand the modal at customer_ringing.
+        // A timestamp value qualifies as "from this attempt's session" if
+        // it occurred at-or-after sessionStartIso. Used both for filtering
+        // rows and for filtering individual columns within the merge.
+        const fresh = (ts) => ts && (!since || ts >= since);
+
+        // Row-level filter: include a row if it has any session-relevant
+        // signal — either its own start, or one of the per-leg timestamps
+        // that fired during this session (covers Tata's leg-fragmentation
+        // where a customer-leg row was created before sessionStartIso but
+        // received customer_answered_at within the session).
+        //
+        // CRITICAL: do NOT filter by updated_at alone. A stale row from a
+        // previous attempt can have its updated_at bumped by a late PCA
+        // arrival or catch-all webhook touch — that does not make its
+        // stale agent_answered_at suddenly relevant to the current attempt.
         const calls = (since
-          ? all.filter(c => {
-              const stamp = c.updated_at || c.started_at;
-              return stamp && stamp >= since;
-            })
+          ? all.filter(c =>
+              fresh(c.started_at) || fresh(c.agent_answered_at) ||
+              fresh(c.customer_answered_at) || fresh(c.customer_missed_at) ||
+              fresh(c.ended_at)
+            )
           : all
         ).slice(0, 6);
         if (cancelled || calls.length === 0) return;
 
-        // Merge signals across all recent fragments for this lead.
+        // Per-column freshness in the merge: each timestamp must itself be
+        // from this session. Without this, a row included for one fresh
+        // column would leak its other (stale) columns into the merge.
         const merged = {
           id:                   calls[0].id,
           status:               calls[0].status,
-          agent_answered_at:    calls.find(c => c.agent_answered_at)?.agent_answered_at    || null,
-          customer_answered_at: calls.find(c => c.customer_answered_at)?.customer_answered_at || null,
-          customer_missed_at:   calls.find(c => c.customer_missed_at)?.customer_missed_at   || null,
-          ended_at:             calls.find(c => c.ended_at)?.ended_at             || null,
-          recording_url:        calls.find(c => c.recording_url)?.recording_url   || null,
-          duration_sec:         calls.find(c => c.duration_sec != null && Number(c.duration_sec) > 0)?.duration_sec || null,
-          hangup_by:            calls.find(c => c.hangup_by)?.hangup_by || null,
+          agent_answered_at:    calls.find(c => fresh(c.agent_answered_at))?.agent_answered_at    || null,
+          customer_answered_at: calls.find(c => fresh(c.customer_answered_at))?.customer_answered_at || null,
+          customer_missed_at:   calls.find(c => fresh(c.customer_missed_at))?.customer_missed_at   || null,
+          ended_at:             calls.find(c => fresh(c.ended_at))?.ended_at             || null,
+          // recording_url, duration_sec, hangup_by lack their own timestamps
+          // so we trust them only when their host row also has at least one
+          // fresh timestamp signal (proving the row participated in this
+          // attempt — not just got its updated_at bumped by a late event).
+          recording_url:        calls.find(c => c.recording_url && (fresh(c.agent_answered_at) || fresh(c.customer_answered_at) || fresh(c.customer_missed_at) || fresh(c.ended_at) || fresh(c.started_at)))?.recording_url || null,
+          duration_sec:         calls.find(c => c.duration_sec != null && Number(c.duration_sec) > 0 && (fresh(c.agent_answered_at) || fresh(c.customer_answered_at) || fresh(c.customer_missed_at) || fresh(c.ended_at) || fresh(c.started_at)))?.duration_sec || null,
+          hangup_by:            calls.find(c => c.hangup_by && (fresh(c.agent_answered_at) || fresh(c.customer_answered_at) || fresh(c.customer_missed_at) || fresh(c.ended_at) || fresh(c.started_at)))?.hangup_by || null,
         };
 
         // Process answered events first so the *.missed guards can short-circuit.
