@@ -198,15 +198,23 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
     }
 
     if (eventType === 'customer.missed') {
-      // Tata's "Call missed by Customer" trigger fires on the customer leg
-      // ending regardless of whether they picked up. If the customer DID
-      // answer first, this event is actually telling us the customer hung up
-      // — repurpose it as a hangup signal so we move into the form window
-      // even when the dedicated /hangup webhook didn't fire.
+      // Tata fires "Call missed by Customer" right after customer.answered
+      // (within ~1 s) on every click-to-call, even when the customer picked
+      // up. We can't trust this event as a hangup signal at low elapsed
+      // times. If the customer DID answer:
+      //   – elapsed < 8 s  → spurious post-answer fire, IGNORE
+      //   – elapsed ≥ 8 s  → likely the customer hung up after a real call,
+      //                       move into form_window (used as a fallback when
+      //                       the dedicated /hangup webhook isn't firing).
       if (customerAnswered) {
-        if (phase !== 'form_window' && phase !== 'form_reason_card') {
-          setCallPhase('form_window');
-          setFormTimerSecs(prev => (prev > 0 ? prev : FORM_WINDOW_SECS));
+        const ans = call?.customer_answered_at ? new Date(call.customer_answered_at).getTime() : null;
+        const miss = call?.customer_missed_at ? new Date(call.customer_missed_at).getTime() : Date.now();
+        const elapsed = ans ? (miss - ans) : 0;
+        if (elapsed >= 8000) {
+          if (phase !== 'form_window' && phase !== 'form_reason_card') {
+            setCallPhase('form_window');
+            setFormTimerSecs(prev => (prev > 0 ? prev : FORM_WINDOW_SECS));
+          }
         }
         return;
       }
