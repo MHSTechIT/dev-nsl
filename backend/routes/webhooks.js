@@ -129,6 +129,48 @@ function makeTataHandler(routeKind) {
     let leadId = null;
     try { leadId = await resolveLeadId(event, req.body); } catch (e) { /* non-fatal */ }
 
+    // 3b. Re-link Tata's webhook to the original /calls/start row.
+    //
+    // Tata click-to-call webhooks arrive with their own provider_call_id
+    // (their internal call_id), which doesn't match the UUID we stored when
+    // /calls/start ran. Without re-linking, every webhook would INSERT a new
+    // row and a single logical call ends up split across 3+ rows in the DB.
+    //
+    // Strategy: if no row exists yet for this Tata provider_call_id AND we
+    // have a leadId, look for a recent (last 5 min) calls row for this lead
+    // whose provider_call_id is either NULL or doesn't look like a Tata-style
+    // ID. Adopt that row's provider_call_id to Tata's so subsequent webhooks
+    // for the same call all converge on it.
+    try {
+      if (leadId) {
+        const existing = await pool.query(
+          `SELECT id, provider_call_id FROM calls
+             WHERE provider_call_id = $1
+             LIMIT 1`,
+          [event.provider_call_id]
+        );
+        if (existing.rows.length === 0) {
+          // No row yet for this Tata id — try to adopt a recent unmatched
+          // /calls/start row for this lead.
+          await pool.query(
+            `UPDATE calls
+                SET provider_call_id = $2,
+                    updated_at = NOW()
+              WHERE id = (
+                SELECT id FROM calls
+                 WHERE lead_id = $1
+                   AND started_at > NOW() - INTERVAL '5 minutes'
+                   AND status NOT IN ('ended','missed','failed')
+                   AND (provider_call_id IS NULL OR provider_call_id !~ '^[0-9.]+$')
+                 ORDER BY started_at DESC
+                 LIMIT 1
+              )`,
+            [leadId, event.provider_call_id]
+          );
+        }
+      }
+    } catch (_) { /* non-fatal — fall through to upsert */ }
+
     // 4. Upsert calls row by provider_call_id
     let callRow = null;
     try {

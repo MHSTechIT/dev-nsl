@@ -275,18 +275,37 @@ function normalizeWebhookEvent(payload) {
     payload.from || payload.caller_id || payload.FromNumber || payload.from_number || null;
 
   // Tata's hangup payload may indicate which side disconnected the call.
-  // Field names vary across versions / event types — try every plausible key,
-  // then normalize the value to either 'agent' | 'customer' | null. Both raw
-  // and normalized values are returned so the caller can pick.
-  const hangup_by_raw =
-    payload.hangup_by || payload.hangup_cause || payload.disconnected_by ||
-    payload.terminated_by || payload.who_hung_up || payload.end_reason ||
-    payload.hangup_side || payload.hangupBy || null;
+  // Real Tata webhook payloads use these keys (verified against live data):
+  //   reason_key                   e.g. "Call Disconnected By Callee" / "Caller"
+  //   hangup_cause_key             e.g. "NORMAL_CLEARING", "INTERWORKING"
+  //   hangup_cause_description     human-readable cause
+  //   hangup_cause_code            Q.850 numeric code
+  // Plus the legacy / hypothetical names below as fallbacks. We collect
+  // every candidate string and scan all of them so a "Callee" / "Caller"
+  // wording in any field still classifies correctly.
+  const candidates = [
+    payload.reason_key,
+    payload.hangup_cause_description,
+    payload.hangup_cause_key,
+    payload.hangup_by,
+    payload.hangup_cause,
+    payload.disconnected_by,
+    payload.terminated_by,
+    payload.who_hung_up,
+    payload.end_reason,
+    payload.hangup_side,
+    payload.hangupBy,
+  ].filter(v => v != null).map(v => String(v));
+  const hangup_by_raw = candidates[0] || null;
   let hangup_by = null;
-  if (hangup_by_raw) {
-    const v = String(hangup_by_raw).toLowerCase();
-    if (v.includes('customer') || v.includes('callee') || v.includes('client')) hangup_by = 'customer';
-    else if (v.includes('agent') || v.includes('caller')) hangup_by = 'agent';
+  for (const v of candidates) {
+    const lower = v.toLowerCase();
+    if (lower.includes('callee') || lower.includes('customer') || lower.includes('client')) {
+      hangup_by = 'customer'; break;
+    }
+    if (lower.includes('caller') || lower.includes('agent')) {
+      hangup_by = 'agent'; break;
+    }
   }
 
   return {

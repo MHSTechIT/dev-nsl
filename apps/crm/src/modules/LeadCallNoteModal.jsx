@@ -150,15 +150,33 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
   // end-signals don't leak into the current attempt's aggregation.
   const sessionStartIsoRef = useRef(null);
   const activeCallIdRef    = useRef(lead?.last_call_id || null);
+  // Set while a /calls/start POST is in flight. Prevents accidentally firing
+  // two parallel Tata calls if a stale agent.missed and a fresh customer.missed
+  // both want to retry within the same tick.
+  const startingCallRef    = useRef(false);
+  // Set once when the modal advances the parent (onSaved). Prevents the
+  // 1.5-s dnp_alert/auto_paused timer from racing with a manual DNP click
+  // and double-advancing to the next-next lead.
+  const savedRef           = useRef(false);
   useEffect(() => { callPhaseRef.current = callPhase; },             [callPhase]);
   useEffect(() => { agentAttemptsRef.current = agentAttempts; },     [agentAttempts]);
   useEffect(() => { customerAttemptRef.current = customerAttempt; }, [customerAttempt]);
   useEffect(() => { activeCallIdRef.current = activeCallId; },       [activeCallId]);
 
   /* If the modal opened mid-call (parent already kicked off the dial), skip
-     the extension prompt and reflect ringing immediately. */
+     the extension prompt and reflect ringing immediately. Also seed
+     sessionStartIsoRef so the polling fallback doesn't aggregate signals
+     from previous completed calls for this lead. */
   useEffect(() => {
-    if (lead?.last_call_id && callPhase === 'idle') setCallPhase('agent_ringing_1');
+    if (lead?.last_call_id && callPhase === 'idle') {
+      // Use last_call_started_at if the parent provided it, else 60 s back
+      // as a conservative window for "this call".
+      const fallback = lead.last_call_started_at
+        ? new Date(new Date(lead.last_call_started_at).getTime() - 2000).toISOString()
+        : new Date(Date.now() - 60000).toISOString();
+      sessionStartIsoRef.current = fallback;
+      setCallPhase('agent_ringing_1');
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lead?.last_call_id]);
 
@@ -218,9 +236,13 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
       //       → defer the retry decision 3 s; if customer.answered arrives
       //          during the wait, cancel the retry entirely.
       if (customerAnswered) {
-        const ans = call?.customer_answered_at ? new Date(call.customer_answered_at).getTime() : null;
-        const miss = call?.customer_missed_at ? new Date(call.customer_missed_at).getTime() : Date.now();
-        const elapsed = ans ? (miss - ans) : 0;
+        // Need BOTH timestamps to compute the elapsed gap reliably. Falling
+        // back to Date.now() for a missing miss-timestamp would inflate the
+        // gap and falsely fire form_window for stale events. If the gap
+        // can't be computed, treat as spurious post-answer and ignore.
+        const ans  = call?.customer_answered_at ? new Date(call.customer_answered_at).getTime() : null;
+        const miss = call?.customer_missed_at   ? new Date(call.customer_missed_at).getTime()   : null;
+        const elapsed = (ans != null && miss != null) ? (miss - ans) : 0;
         if (elapsed >= 8000) {
           if (phase !== 'form_window' && phase !== 'form_reason_card') {
             setCallPhase('form_window');
@@ -251,7 +273,13 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
     if (eventType === 'agent.missed') {
       // Agent already picked SmartFlow → not actually a miss; ignore.
       if (agentAnswered) return;
-      if (['form_window','form_reason_card','dnp_alert','auto_paused','customer_on_call'].includes(phase)) return;
+      // Suppress in any phase past the agent-decision point AND while waiting
+      // for the user's reason input (a stale agent.missed from a previous
+      // attempt shouldn't be allowed to bump the attempt counter or auto-pause
+      // the lead while the caller is mid-typing).
+      if (['form_window','form_reason_card','dnp_alert','auto_paused',
+           'customer_on_call','customer_ringing','recall_ringing',
+           'agent_reason_card'].includes(phase)) return;
       handleAgentMissed();
       return;
     }
@@ -397,23 +425,35 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
   }
 
   async function postStartCall() {
-    // Capture the moment we kick off this attempt. Polling only aggregates
-    // call rows that started at or after this timestamp so previous calls'
-    // end-signals (recording_url, ended_at, duration_sec) can't leak into
-    // the current attempt's state machine.
-    sessionStartIsoRef.current = new Date(Date.now() - 2000).toISOString();
-    const res = await fetch('/api/caller/calls/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
-      body: JSON.stringify({ lead_id: lead.id }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data?.message || data?.error || 'Failed to start call');
-    if (data?.call?.id) {
-      setActiveCallId(data.call.id);
-      activeCallIdRef.current = data.call.id;
+    // Reentrancy guard — if a previous /calls/start is still in flight, skip
+    // this one entirely. Otherwise back-to-back retries (e.g. a stale
+    // agent.missed and a customer.missed firing nearly simultaneously) would
+    // dial Tata twice and ring two phones for the same lead.
+    if (startingCallRef.current) return null;
+    startingCallRef.current = true;
+    try {
+      // Capture the moment we kick off this attempt. Polling only aggregates
+      // call rows that started at or after this timestamp so previous calls'
+      // end-signals (recording_url, ended_at, duration_sec) can't leak into
+      // the current attempt's state machine.
+      sessionStartIsoRef.current = new Date(Date.now() - 2000).toISOString();
+      const res = await fetch('/api/caller/calls/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+        body: JSON.stringify({ lead_id: lead.id }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.message || data?.error || 'Failed to start call');
+      // Backend returns { success, call_id, provider_call_id, stubbed }.
+      const newCallId = data?.call_id || data?.call?.id || null;
+      if (newCallId) {
+        setActiveCallId(newCallId);
+        activeCallIdRef.current = newCallId;
+      }
+      return data;
+    } finally {
+      startingCallRef.current = false;
     }
-    return data;
   }
 
   /* Caller clicked "Yes & Proceed" on the SmartFlow extension prompt. */
@@ -522,9 +562,25 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
     }
   }
 
+  /* Single-shot wrapper for onSaved. The dnp_alert / auto_paused setTimeout
+     paths can race with a manual DNP click; this guard ensures the parent
+     advances exactly once. */
+  function callOnSaved(outcome, opts) {
+    if (savedRef.current) return;
+    savedRef.current = true;
+    onSaved?.(outcome, opts);
+  }
+
   /* ── DNP / auto-paused auto-saves ─────────────────────────────────── */
   async function triggerDnp() {
     setCallPhase('dnp_alert');
+    // Cancel any pending customer-miss retry timer that might also be
+    // counting down; we're moving to DNP now.
+    if (customerMissedTimerRef.current) {
+      clearTimeout(customerMissedTimerRef.current);
+      customerMissedTimerRef.current = null;
+    }
+    const attempts = Math.max(1, customerAttemptRef.current);
     try {
       await fetch(`/api/caller/leads/${lead.id}/note`, {
         method: 'POST',
@@ -532,7 +588,11 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
         body: JSON.stringify({
           full_name: (fullName || lead.full_name || '').trim() || null,
           outcome:   'not_picked',
-          note:      'Auto-marked: customer did not pick after 2 attempts.',
+          note:      buildNoteWithDelays(
+            `Auto-marked: customer did not pick after ${attempts} attempt${attempts !== 1 ? 's' : ''}.`,
+            delayReasons,
+            agentReasons,
+          ),
           call_id:   activeCallIdRef.current || lead.last_call_id || null,
         }),
       });
@@ -541,7 +601,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
       method: 'POST', headers: { Authorization: `Bearer ${jwt}` },
     }).catch(() => {});
     // Brief moment to let the user see the alert before advancing
-    setTimeout(() => onSaved?.('not_picked', { autoAdvance: true }), 1500);
+    setTimeout(() => callOnSaved('not_picked', { autoAdvance: true }), 1500);
   }
 
   async function saveAutoPaused() {
@@ -564,7 +624,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
     fetch(`/api/caller/leads/${lead.id}/hangup`, {
       method: 'POST', headers: { Authorization: `Bearer ${jwt}` },
     }).catch(() => {});
-    setTimeout(() => onSaved?.('auto_paused', { autoAdvance: true }), 1800);
+    setTimeout(() => callOnSaved('auto_paused', { autoAdvance: true }), 1800);
   }
 
   /* ── Form derived state ───────────────────────────────────────────── */
@@ -613,6 +673,13 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
         body: JSON.stringify({
           full_name: fullName.trim() || null,
           outcome:   'not_picked',
+          // Preserve any agent-miss reasons + form-delay reasons so the
+          // saved record explains why this lead ended up DNP.
+          note:      buildNoteWithDelays(
+            (note || '').trim() || 'Caller marked as Did Not Pick.',
+            delayReasons,
+            agentReasons,
+          ),
           call_id:   activeCallIdRef.current || lead.last_call_id || null,
         }),
       });
@@ -622,7 +689,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${jwt}` },
       }).catch(() => {});
-      onSaved?.('not_picked', { autoAdvance: true });
+      callOnSaved('not_picked', { autoAdvance: true });
     } catch (e) {
       setError(e.message || 'Failed to save.');
     } finally {
@@ -681,7 +748,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
         headers: { 'Authorization': `Bearer ${jwt}` },
       }).catch(() => {});
 
-      onSaved?.(derivedOutcome, { autoAdvance: true });
+      callOnSaved(derivedOutcome, { autoAdvance: true });
     } catch (e) {
       setError(e.message || 'Failed to save.');
     } finally {
