@@ -205,7 +205,8 @@ function makeTataHandler(routeKind) {
         `UPDATE calls SET ${sets.join(', ')}
           WHERE provider_call_id = $1
           RETURNING id, lead_id, caller_id, status, recording_url, duration_sec, provider_call_id,
-                    agent_answered_at, customer_answered_at, customer_missed_at, ended_at, hangup_by`,
+                    agent_answered_at, customer_answered_at, customer_missed_at, ended_at, hangup_by,
+                    started_at`,
         params
       );
 
@@ -225,7 +226,8 @@ function makeTataHandler(routeKind) {
                    CASE WHEN $8 = 'customer-missed'   THEN NOW() ELSE NULL END,
                    $9)
            RETURNING id, lead_id, caller_id, status, recording_url, duration_sec, provider_call_id,
-                     agent_answered_at, customer_answered_at, customer_missed_at, ended_at, hangup_by`,
+                     agent_answered_at, customer_answered_at, customer_missed_at, ended_at, hangup_by,
+                     started_at`,
           [
             leadId, event.provider_call_id, event.status, event.duration_sec,
             event.recording_url, event.error_message, req.body,

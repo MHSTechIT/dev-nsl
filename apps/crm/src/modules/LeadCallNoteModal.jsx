@@ -158,6 +158,11 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
   // 1.5-s dnp_alert/auto_paused timer from racing with a manual DNP click
   // and double-advancing to the next-next lead.
   const savedRef           = useRef(false);
+  // Phase-timeout safety net — Tata's click-to-call doesn't reliably fire
+  // agent.missed / customer.missed webhooks when nobody picks up, so the
+  // state machine can stall in a ringing phase indefinitely. We synthesize
+  // the missed event after a ring-window expires.
+  const phaseTimeoutRef    = useRef(null);
   useEffect(() => { callPhaseRef.current = callPhase; },             [callPhase]);
   useEffect(() => { agentAttemptsRef.current = agentAttempts; },     [agentAttempts]);
   useEffect(() => { customerAttemptRef.current = customerAttempt; }, [customerAttempt]);
@@ -190,6 +195,15 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
      happened on the same call. */
   function handleCallEvent(eventType, call) {
     if (call && call.lead_id && call.lead_id !== lead.id) return;
+
+    // Stale-event filter — drop events from call rows started BEFORE the
+    // current attempt's session began. Without this, a delayed webhook from
+    // a previous attempt (or a fragment row whose Tata webhook arrives
+    // late) can corrupt the new attempt's state machine.
+    if (call?.started_at && sessionStartIsoRef.current
+        && call.started_at < sessionStartIsoRef.current) {
+      return;
+    }
 
     const sig = `${call?.id || ''}:${eventType}`;
     if (lastSeenSigsRef.current.has(sig)) return;
@@ -408,6 +422,60 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
     return () => { cancelled = true; clearInterval(id); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jwt, lead?.id, callPhase]);
+
+  /* Phase-timeout safety net — synthesize agent.missed / customer.missed
+     when a ringing phase runs longer than Tata's typical ring window with
+     no real webhook arriving. Timeouts are defensive only; if Tata fires
+     a real event sooner, the phase will have transitioned and this effect
+     will clean up the timer.
+
+     Ring windows used (covers Tata's typical timeout + buffer):
+       agent_ringing_*  / recall_ringing → 35 s  (Tata rings agent ~25-30 s)
+       customer_ringing                  → 50 s  (Tata rings customer ~30-45 s)
+  */
+  useEffect(() => {
+    if (phaseTimeoutRef.current) {
+      clearTimeout(phaseTimeoutRef.current);
+      phaseTimeoutRef.current = null;
+    }
+    const TIMEOUTS = {
+      agent_ringing_1: 35000,
+      agent_ringing_2: 35000,
+      recall_ringing:  35000,
+      customer_ringing: 50000,
+    };
+    const ms = TIMEOUTS[callPhase];
+    if (!ms) return;
+    phaseTimeoutRef.current = setTimeout(() => {
+      phaseTimeoutRef.current = null;
+      const p = callPhaseRef.current;
+      // Build a synthetic call object with a unique id so the dedup signature
+      // doesn't collide with any real event for the same call.
+      const synthetic = {
+        id:        `synthetic-timeout-${Date.now()}`,
+        lead_id:   lead.id,
+        // Don't include started_at — the stale-event filter shouldn't
+        // mistakenly drop our synthetic event.
+      };
+      if (p === 'customer_ringing') {
+        // Customer leg never picked up after agent answered → simulate the
+        // customer.missed Tata trigger so retry/DNP runs.
+        handleCallEvent('customer.missed', synthetic);
+      } else if (p === 'agent_ringing_1' || p === 'agent_ringing_2'
+                 || p === 'recall_ringing') {
+        // Agent's SmartFlow leg never picked up → simulate the agent.missed
+        // signal so handleAgentMissed runs (auto-redial / reason card).
+        handleCallEvent('agent.missed', synthetic);
+      }
+    }, ms);
+    return () => {
+      if (phaseTimeoutRef.current) {
+        clearTimeout(phaseTimeoutRef.current);
+        phaseTimeoutRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [callPhase]);
 
   /* 30-s form-fill countdown. */
   useEffect(() => {
