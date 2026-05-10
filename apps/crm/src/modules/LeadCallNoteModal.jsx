@@ -145,6 +145,10 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
   const wasCustomerAnsweredRef = useRef(false);
   const lastSeenSigsRef    = useRef(new Set());
   const customerMissedTimerRef = useRef(null);
+  // Earliest started_at we accept signals from in the polling fallback.
+  // Set every time we kick off a fresh /calls/start so old completed calls'
+  // end-signals don't leak into the current attempt's aggregation.
+  const sessionStartIsoRef = useRef(null);
   const activeCallIdRef    = useRef(lead?.last_call_id || null);
   useEffect(() => { callPhaseRef.current = callPhase; },             [callPhase]);
   useEffect(() => { agentAttemptsRef.current = agentAttempts; },     [agentAttempts]);
@@ -313,7 +317,16 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
         });
         if (!res.ok) return;
         const data = await res.json();
-        const calls = Array.isArray(data.calls) ? data.calls.slice(0, 6) : [];
+        const since = sessionStartIsoRef.current;
+        const all = Array.isArray(data.calls) ? data.calls : [];
+        // Only consider rows from THIS attempt's session. Without this,
+        // a previous completed call's recording_url / ended_at would leak
+        // into the merged signals and prematurely fire form_window the
+        // moment a new attempt begins.
+        const calls = (since
+          ? all.filter(c => c.started_at && c.started_at >= since)
+          : all
+        ).slice(0, 6);
         if (cancelled || calls.length === 0) return;
 
         // Merge signals across all recent fragments for this lead.
@@ -376,6 +389,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
     wasAgentAnsweredRef.current = false;
     wasCustomerAnsweredRef.current = false;
     lastSeenSigsRef.current = new Set();
+    sessionStartIsoRef.current = new Date(Date.now() - 2000).toISOString();
     if (customerMissedTimerRef.current) {
       clearTimeout(customerMissedTimerRef.current);
       customerMissedTimerRef.current = null;
@@ -383,6 +397,11 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
   }
 
   async function postStartCall() {
+    // Capture the moment we kick off this attempt. Polling only aggregates
+    // call rows that started at or after this timestamp so previous calls'
+    // end-signals (recording_url, ended_at, duration_sec) can't leak into
+    // the current attempt's state machine.
+    sessionStartIsoRef.current = new Date(Date.now() - 2000).toISOString();
     const res = await fetch('/api/caller/calls/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
