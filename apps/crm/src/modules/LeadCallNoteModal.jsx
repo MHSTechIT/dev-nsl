@@ -127,7 +127,15 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
        dnp_alert         — centered overlay "Lead moved to DNP", auto-saves
        auto_paused       — centered overlay "5 attempts hit, moving on", auto-saves
   */
-  const [callPhase, setCallPhase] = useState('idle');
+  // Initial phase decided by whether the parent already kicked off a call:
+  //   – No last_call_id → fresh start. Land directly on ext_check overlay
+  //     ("Is your SmartFlow extension turned on?"). The legacy idle banner
+  //     with its own Start Auto Call button is never shown.
+  //   – last_call_id present → auto-advance flow (post-DNP/Complete). Skip
+  //     ext_check entirely and reflect the in-flight call as agent_ringing_1.
+  const [callPhase, setCallPhase] = useState(() =>
+    lead?.last_call_id ? 'agent_ringing_1' : 'ext_check'
+  );
   const [agentAttempts, setAgentAttempts]     = useState(0);   // SmartFlow misses this session (0..5)
   const [customerAttempt, setCustomerAttempt] = useState(1);   // 1 or 2 (whole-call retry)
   const [agentReasons, setAgentReasons]       = useState([]);  // appended every reason submit
@@ -147,8 +155,18 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
   const customerMissedTimerRef = useRef(null);
   // Earliest started_at we accept signals from in the polling fallback.
   // Set every time we kick off a fresh /calls/start so old completed calls'
-  // end-signals don't leak into the current attempt's aggregation.
-  const sessionStartIsoRef = useRef(null);
+  // end-signals don't leak into the current attempt's aggregation. When the
+  // modal opens mid-call (auto-advance flow), seed it from the existing
+  // call's started_at so polling picks up the in-flight signals straight
+  // away. Otherwise (fresh start) it stays null until confirmExtensionAndStart
+  // runs after Yes & Proceed.
+  const sessionStartIsoRef = useRef(
+    lead?.last_call_id
+      ? (lead.last_call_started_at
+          ? new Date(new Date(lead.last_call_started_at).getTime() - 2000).toISOString()
+          : new Date(Date.now() - 60000).toISOString())
+      : null
+  );
   const activeCallIdRef    = useRef(lead?.last_call_id || null);
   // Set while a /calls/start POST is in flight. Prevents accidentally firing
   // two parallel Tata calls if a stale agent.missed and a fresh customer.missed
@@ -168,24 +186,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
   useEffect(() => { customerAttemptRef.current = customerAttempt; }, [customerAttempt]);
   useEffect(() => { activeCallIdRef.current = activeCallId; },       [activeCallId]);
 
-  /* If the modal opened mid-call (parent already kicked off the dial), skip
-     the extension prompt and reflect ringing immediately. Also seed
-     sessionStartIsoRef so the polling fallback doesn't aggregate signals
-     from previous completed calls for this lead. */
-  useEffect(() => {
-    if (lead?.last_call_id && callPhase === 'idle') {
-      // Use last_call_started_at if the parent provided it, else 60 s back
-      // as a conservative window for "this call".
-      const fallback = lead.last_call_started_at
-        ? new Date(new Date(lead.last_call_started_at).getTime() - 2000).toISOString()
-        : new Date(Date.now() - 60000).toISOString();
-      sessionStartIsoRef.current = fallback;
-      setCallPhase('agent_ringing_1');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lead?.last_call_id]);
-
-  /* Reduce a typed call event into a phase transition. Read from refs so the
+/* Reduce a typed call event into a phase transition. Read from refs so the
      callback (registered once at mount) sees fresh values.
 
      Tata occasionally fires "Call missed by Customer" even when the customer
@@ -595,12 +596,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
     }
   }
 
-  /* "Start Auto Call" button on the idle banner. */
-  function startAutoCall() {
-    setCallPhase('ext_check');
-  }
-
-  /* Agent missed the SmartFlow ring. attempt 1 → silent auto-redial,
+/* Agent missed the SmartFlow ring. attempt 1 → silent auto-redial,
      attempt ≥ 2 → reason card (after 5 reason loops, auto-pause and advance). */
   async function handleAgentMissed() {
     const attempts = agentAttemptsRef.current + 1;
@@ -954,8 +950,6 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
           phase={callPhase}
           formTimerSecs={formTimerSecs}
           totalWindow={FORM_WINDOW_SECS}
-          starting={recalling}
-          onStart={startAutoCall}
           customerAttempt={customerAttempt}
         />
 
@@ -1203,7 +1197,7 @@ function RadioRow({ options, value, onChange, wrap }) {
 /* Yellow status banner — the in-flight call message at the top of the modal.
    Action prompts (extension check, reason cards, DNP alert) live in the
    centered overlay rendered separately. */
-function BannerStatus({ phase, formTimerSecs, totalWindow, starting, onStart, customerAttempt }) {
+function BannerStatus({ phase, formTimerSecs, totalWindow, customerAttempt }) {
   const cardBase = {
     marginBottom: 16, padding: '14px 18px',
     borderRadius: 12, border: '1.5px dashed #F59E0B',
@@ -1220,25 +1214,11 @@ function BannerStatus({ phase, formTimerSecs, totalWindow, starting, onStart, cu
     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>{children}</div>
   );
 
-  if (phase === 'idle') {
-    return (
-      <div style={cardBase}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-          <span>Ready to start auto call.</span>
-          <button type="button" onClick={onStart} disabled={starting}
-            style={{
-              padding: '8px 18px', borderRadius: 50, border: 'none',
-              background: starting ? 'rgba(245,158,11,0.55)' : '#F59E0B',
-              color: '#fff', fontFamily: 'Outfit, sans-serif', fontWeight: 800, fontSize: '0.84rem',
-              cursor: starting ? 'wait' : 'pointer', whiteSpace: 'nowrap',
-              boxShadow: starting ? 'none' : '0 4px 12px rgba(245,158,11,0.35)',
-            }}>
-            {starting ? 'Calling…' : '▶ Start Auto Call'}
-          </button>
-        </div>
-      </div>
-    );
-  }
+  // 'idle' phase intentionally renders nothing — the modal initializes
+  // directly to ext_check (fresh start) or agent_ringing_1 (auto-advance),
+  // so the in-modal Start Auto Call button has been removed permanently.
+  // The parent's "Start Auto-Call" button is now the sole entry point;
+  // it opens the modal which lands on the SmartFlow extension overlay.
   if (phase === 'agent_ringing_1') {
     // When this is the SECOND whole-call attempt to the customer (i.e. the
     // first attempt's customer leg never picked up), the wording focuses on
