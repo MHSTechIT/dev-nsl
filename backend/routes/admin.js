@@ -226,6 +226,104 @@ router.post('/leads/delete', async (req, res) => {
   }
 });
 
+/* ── GET /api/admin/settings?source=meta ──
+   Returns the per-source admin settings stored on webinar_config (just the
+   alert phone number for now). */
+router.get('/settings', async (req, res) => {
+  const source = getSource(req);
+  try {
+    const { rows } = await pool.query(
+      'SELECT alert_phone_number FROM webinar_config WHERE source = $1',
+      [source]
+    );
+    res.json({
+      source,
+      alert_phone_number: rows[0]?.alert_phone_number || '',
+    });
+  } catch (err) {
+    console.error('Get settings error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch settings' });
+  }
+});
+
+/* ── PUT /api/admin/settings ──
+   Body: { source, alert_phone_number }
+   Saves the WATI alert recipient phone for the given source. */
+router.put('/settings', async (req, res) => {
+  const source = getSource(req);
+  let { alert_phone_number } = req.body || {};
+  if (typeof alert_phone_number !== 'string') {
+    return res.status(422).json({ error: 'alert_phone_number must be a string' });
+  }
+  // Strip everything except digits; allow blank to clear.
+  alert_phone_number = alert_phone_number.replace(/\D/g, '');
+  if (alert_phone_number && !/^\d{10,15}$/.test(alert_phone_number)) {
+    return res.status(422).json({ error: 'alert_phone_number must be 10–15 digits' });
+  }
+  try {
+    await pool.query(
+      'UPDATE webinar_config SET alert_phone_number = $1, updated_at = NOW() WHERE source = $2',
+      [alert_phone_number || null, source]
+    );
+    res.json({ success: true, alert_phone_number });
+  } catch (err) {
+    console.error('Update settings error:', err.message);
+    res.status(500).json({ error: 'Failed to save settings' });
+  }
+});
+
+/* ── POST /api/admin/settings/test-alert ──
+   Triggers an immediate dry-run of the alert scheduler so admin can verify
+   the WATI key + phone are wired up. Body: { source } */
+router.post('/settings/test-alert', async (req, res) => {
+  const source = getSource(req);
+  try {
+    const { runOnce } = require('../utils/leadsAlertScheduler');
+    const result = await runOnce();
+    res.json({ ok: true, result: result.find(r => r.source === source) || null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ── POST /api/admin/settings/send-test-template ──
+   Bypasses all scheduler conditions and fires ONE WATI template to the
+   saved phone right now. Used to verify the WATI integration end-to-end.
+   Body: { source, template_name? }. Default template = 'leads_alert'.
+   Returns the full WATI response so the admin can see whether WATI
+   accepted or rejected the call. */
+router.post('/settings/send-test-template', async (req, res) => {
+  const source = getSource(req);
+  const templateName = (req.body?.template_name || 'leads_alert').trim();
+  try {
+    const { rows } = await pool.query(
+      'SELECT alert_phone_number FROM webinar_config WHERE source = $1',
+      [source]
+    );
+    const phone = rows[0]?.alert_phone_number;
+    if (!phone) {
+      return res.status(422).json({ error: 'No phone saved for this source. Save a number first.' });
+    }
+    const wati = require('../utils/watiClient');
+    if (!wati.isConfigured()) {
+      return res.status(503).json({ error: 'WATI_API_KEY is not set in backend env vars.' });
+    }
+    const result = await wati.sendTemplate({ phone, templateName });
+    res.json({
+      ok:        result.ok,
+      phone,
+      template:  templateName,
+      status:    result.status,
+      urlUsed:   result.urlUsed,
+      body:      result.body,
+      error:     result.error,
+      attempts:  result.attempts,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 /* ── POST /api/admin/sync-sheet ── */
 router.post('/sync-sheet', async (_req, res) => {
   const result = await syncLeadsToSheet();

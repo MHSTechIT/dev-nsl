@@ -773,10 +773,17 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
       if (!followUpAtLocal)               return 'Pick a follow-up date and time.';
       return null;
     }
-    if (!confirmedRange) return 'Pick the patient’s confirmed sugar range.';
-    if (!rangeFor)       return 'Pick whether the value is for personal or family use.';
-    if (!patientAge)     return 'Pick the patient age range.';
-    if (!takesMedicine)  return 'Pick whether the patient takes medicine.';
+    if (!confirmedRange)        return 'Pick the patient’s confirmed sugar range.';
+    if (!rangeFor)              return 'Pick whether the value is for personal or family use.';
+    if (!patientAge)            return 'Pick the patient age range.';
+    if (!takesMedicine)         return 'Pick whether the patient takes medicine.';
+    if (!otherLanguages)        return 'Pick whether the patient speaks other languages.';
+    if (!workingProfessional)   return 'Pick the patient’s occupation.';
+    if (!location)              return 'Pick the patient’s location.';
+    if (!alreadyPaid)           return 'Pick whether the patient has already paid.';
+    if (!webinarAttended)       return 'Pick whether the patient attended the webinar.';
+    if (!availableForWebinar)   return 'Pick whether the patient is available for the next webinar.';
+    if (!nextBatchJoining)      return 'Pick whether the patient is joining the next batch.';
     return null;
   }
 
@@ -1000,32 +1007,32 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
             <RadioRow options={MEDICINE} value={takesMedicine} onChange={setTakesMedicine} />
           </FieldRow>
 
-          <FieldRow label="8. Other Languages" hint="(optional)">
+          <FieldRow label="8. Other Languages" mandatory={detailsMandatory} hint={detailsMandatory ? null : '(optional)'}>
             <RadioRow options={YES_NO} value={otherLanguages} onChange={setOtherLanguages} />
           </FieldRow>
 
-          <FieldRow label="9. Working Professional" hint="(optional)">
+          <FieldRow label="9. Working Professional" mandatory={detailsMandatory} hint={detailsMandatory ? null : '(optional)'}>
             <SelectField value={workingProfessional} onChange={setWorkingProfessional}
               options={WORKING_PROFESSIONAL} placeholder="Select occupation…" />
           </FieldRow>
 
-          <FieldRow label="10. Location" hint="(optional)">
+          <FieldRow label="10. Location" mandatory={detailsMandatory} hint={detailsMandatory ? null : '(optional)'}>
             <SelectField value={location} onChange={setLocation} options={LOCATIONS} placeholder="Select location…" />
           </FieldRow>
 
-          <FieldRow label="11. Already Paid" hint="(optional)">
+          <FieldRow label="11. Already Paid" mandatory={detailsMandatory} hint={detailsMandatory ? null : '(optional)'}>
             <RadioRow options={YES_NO} value={alreadyPaid} onChange={setAlreadyPaid} />
           </FieldRow>
 
-          <FieldRow label="12. Webinar Attended" hint="(optional)">
+          <FieldRow label="12. Webinar Attended" mandatory={detailsMandatory} hint={detailsMandatory ? null : '(optional)'}>
             <RadioRow options={YES_NO} value={webinarAttended} onChange={setWebinarAttended} />
           </FieldRow>
 
-          <FieldRow label="13. Available for Webinar" hint="(optional)">
+          <FieldRow label="13. Available for Webinar" mandatory={detailsMandatory} hint={detailsMandatory ? null : '(optional)'}>
             <RadioRow options={YES_NO} value={availableForWebinar} onChange={setAvailableForWebinar} />
           </FieldRow>
 
-          <FieldRow label="14. Next Batch Joining" hint="(optional)">
+          <FieldRow label="14. Next Batch Joining" mandatory={detailsMandatory} hint={detailsMandatory ? null : '(optional)'}>
             <RadioRow options={YES_NO} value={nextBatchJoining} onChange={setNextBatchJoining} />
           </FieldRow>
 

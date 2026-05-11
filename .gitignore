@@ -43,3 +43,5 @@ backend/coverage/
 *.env.prod.check
 *.env.verify
 *.env.vercel.local
+
+.vercel

@@ -373,6 +373,26 @@ const _sourceMigration = Promise.all([_webinarTableMigration, _clickMigration]).
   `)
 ).catch(err => console.error('[Migration] source dimension error:', err.message));
 
+// Auto-migrate: alert phone + alert log for leads-alert scheduler
+const _alertMigration = pool.query(`
+  ALTER TABLE webinar_config ADD COLUMN IF NOT EXISTS alert_phone_number TEXT;
+  CREATE TABLE IF NOT EXISTS alert_log (
+    id            BIGSERIAL PRIMARY KEY,
+    webinar_id    UUID,
+    source        TEXT NOT NULL DEFAULT 'meta',
+    template_name TEXT NOT NULL,
+    sent_to       TEXT,
+    sent_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    success       BOOLEAN NOT NULL DEFAULT FALSE,
+    response      JSONB,
+    UNIQUE (webinar_id, template_name)
+  );
+  CREATE INDEX IF NOT EXISTS idx_alert_log_webinar ON alert_log (webinar_id, sent_at DESC);
+`);
+if (_alertMigration && typeof _alertMigration.catch === 'function') {
+  _alertMigration.catch(err => console.error('[Migration] alert log error:', err.message));
+}
+
 // ── Security middleware ──
 app.use(helmet());
 app.use(cors({ origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173' }));

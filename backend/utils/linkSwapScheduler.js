@@ -85,12 +85,34 @@ async function runSwapsForSource(source) {
           newWebinarId = insertedRows[0]?.id;
         }
 
-        // Step 4: activate first WhatsApp link of new active webinar
+        // Step 4: pre-flight — make sure the new webinar actually has links
+        // configured. If empty, log a loud warning so it shows up in Render
+        // logs / monitoring instead of failing silently. The old link stays
+        // in webinar_config as a (stale) fallback until admin fixes it.
+        let linkCount = 0;
         if (newWebinarId) {
+          try {
+            const { rows: poolRows } = await pool.query(
+              `SELECT COUNT(*)::int AS cnt
+                 FROM whatsapp_links
+                WHERE webinar_id = $1 AND link_url <> ''`,
+              [newWebinarId]
+            );
+            linkCount = poolRows[0]?.cnt || 0;
+          } catch (_) { /* non-fatal */ }
+        }
+        if (linkCount === 0) {
+          console.error(
+            `[Scheduler:${source}] ⚠ TRANSITION HAPPENED but new webinar ${newWebinarId} ` +
+            `has NO WhatsApp links configured. webinar_config keeps the previous link as a ` +
+            `fallback. Admin needs to add links via CRM → Marketing → WhatsApp Links → ` +
+            `Current Webinar tab ASAP.`
+          );
+        } else if (newWebinarId) {
           await rotateLink(newWebinarId);
         }
 
-        console.log(`[Scheduler:${source}] Webinar transitioned:`, cfg.next_webinar_at, '→', cfg.backup_webinar_at);
+        console.log(`[Scheduler:${source}] Webinar transitioned:`, cfg.next_webinar_at, '→', cfg.backup_webinar_at, `(new pool: ${linkCount} link${linkCount === 1 ? '' : 's'})`);
       }
     }
 
