@@ -6,7 +6,7 @@ import { t } from '../translations';
 import CountdownTimer, { stopTick } from '../components/CountdownTimer';
 import { trackEvent } from '../utils/trackEvent';
 import Confetti from '../components/Confetti';
-import TrustBar from '../components/TrustBar';
+import NextWebinarCard from '../components/NextWebinarCard';
 
 /* ── Live social proof messages ───────────────────────────────────────── */
 const LIVE_MSGS = [
@@ -543,7 +543,9 @@ export default function Screen1A() {
             </m.div>
             <m.div {...cardAnim(4)}>
               {ctaButton}
-              <TrustBar />
+              <div style={{ marginTop: 12 }}>
+                <NextWebinarCard />
+              </div>
             </m.div>
           </div>
 
@@ -686,7 +688,9 @@ export default function Screen1A() {
       {!isDesktop && (
         <div style={{ position: 'fixed', bottom: 0, left: 0, right: 0, maxWidth: 480, margin: '0 auto', padding: '12px 16px 20px', background: 'transparent', zIndex: 30 }}>
           {ctaButton}
-          <TrustBar />
+          <div style={{ marginTop: 8 }}>
+            <NextWebinarCard />
+          </div>
         </div>
       )}
 
