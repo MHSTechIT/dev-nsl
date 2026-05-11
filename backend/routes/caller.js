@@ -10,6 +10,7 @@ const router  = express.Router();
 const pool    = require('../db');
 const callerSse = require('../utils/callerSse');
 const { callerAuth } = require('../middleware/callerAuth');
+const tataInboundSync = require('../utils/tataInboundSync');
 
 router.use(callerAuth);
 
@@ -347,6 +348,19 @@ router.get('/calls/missed-inbound', async (req, res) => {
   } catch (err) {
     console.error('caller/calls/missed-inbound error:', err.message);
     res.status(500).json({ error: 'Failed to fetch missed inbound calls' });
+  }
+});
+
+/* ── POST /api/caller/calls/sync-inbound ──
+   Manually triggers a Tata CDR poll. Useful from the Missed Calls page to
+   force-refresh when the customer reports they just called. Returns the
+   poll result so the frontend can show "synced 3 new" or the error. */
+router.post('/calls/sync-inbound', async (_req, res) => {
+  try {
+    const result = await tataInboundSync.syncOnce({ lookbackMinutes: 60 });
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 

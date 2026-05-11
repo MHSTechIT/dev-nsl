@@ -322,6 +322,113 @@ function normalizeWebhookEvent(payload) {
   };
 }
 
+/**
+ * Pull recent inbound call records from Tata Smartflo. Used by the
+ * scheduled poller to detect missed customer calls that didn't arrive
+ * via webhook (Smartflo dashboards don't always expose webhook config).
+ *
+ * Tata's CDR endpoint name varies by plan / generation:
+ *   /v1/call/records          – most common
+ *   /v1/cdr                   – older accounts
+ *   /v1/call/cdr              – some Smartflo deployments
+ * We try them in order until one returns a JSON body with a calls array.
+ *
+ * @param {object} opts
+ * @param {number} [opts.lookbackMinutes=10]  – fetch calls started within this window
+ * @returns {Promise<{ ok: boolean, endpoint?: string, calls: any[], raw?: any, error?: string }>}
+ */
+async function fetchInboundMissedCalls({ lookbackMinutes = 10 } = {}) {
+  const apiKey = process.env.TATA_TELE_API_KEY || '';
+  if (!apiKey) return { ok: false, error: 'TATA_TELE_API_KEY not set', calls: [] };
+
+  const now      = new Date();
+  const since    = new Date(now.getTime() - lookbackMinutes * 60 * 1000);
+  const fmtTata  = d => d.toISOString().slice(0, 19).replace('T', ' '); // "YYYY-MM-DD HH:MM:SS"
+  const fmtDate  = d => d.toISOString().slice(0, 10);                   // "YYYY-MM-DD"
+
+  // Candidate endpoint shapes ordered by likelihood for Smartflo accounts.
+  // Each entry: { path, params } — params will be URL-encoded.
+  const variants = [
+    { path: '/v1/call/records', params: { from_date: fmtTata(since), to_date: fmtTata(now), call_type: 'inbound' } },
+    { path: '/v1/call/records', params: { from_date: fmtDate(since), to_date: fmtDate(now), direction: 'inbound' } },
+    { path: '/v1/call/records', params: { from_date: fmtDate(since), to_date: fmtDate(now) } },
+    { path: '/v1/cdr',          params: { from_date: fmtTata(since), to_date: fmtTata(now), direction: 'inbound' } },
+    { path: '/v1/call/cdr',     params: { from_date: fmtTata(since), to_date: fmtTata(now), direction: 'inbound' } },
+  ];
+
+  const attempts = [];
+  for (const v of variants) {
+    const qs  = new URLSearchParams(v.params).toString();
+    const url = `${BASE_URL.replace(/\/$/, '')}${v.path}?${qs}`;
+    try {
+      const res = await fetch(url, {
+        headers: { Authorization: apiKey, Accept: 'application/json' },
+      });
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = { raw: text }; }
+      attempts.push({ url, status: res.status, sample: typeof data === 'object' ? JSON.stringify(data).slice(0, 200) : null });
+
+      // Tata responses we've observed: { results: [...], count: N }, { data: [...] }, or [{...}, ...]
+      const calls =
+        (Array.isArray(data?.results) && data.results) ||
+        (Array.isArray(data?.data) && data.data) ||
+        (Array.isArray(data?.calls) && data.calls) ||
+        (Array.isArray(data) && data) ||
+        null;
+
+      if (calls && !smartfloIsFailure(res.status, data)) {
+        // Filter to inbound + missed (some Tata responses don't honor the direction filter)
+        const inbound = calls.filter(c => {
+          const dir = String(c.direction || c.call_type || c.type || '').toLowerCase();
+          return dir.includes('in') || (!c.direction && c.from); // tolerate missing direction
+        });
+        const missed = inbound.filter(c => {
+          const status = String(c.status || c.call_status || c.disposition || '').toLowerCase();
+          const answered = c.answered_at || c.answered_seconds || c.bill_duration || c.duration;
+          // Treat as missed if explicitly marked OR call had no bill_duration (rang but unanswered)
+          return /miss|fail|noanswer|no-answer|cancel|reject|abandon/.test(status)
+              || (!answered || Number(answered) === 0);
+        });
+        return { ok: true, endpoint: v.path, calls: missed, raw: data, attempts };
+      }
+    } catch (e) {
+      attempts.push({ url, error: e.message });
+    }
+  }
+  return { ok: false, error: 'no Tata CDR endpoint responded with a parseable calls list', calls: [], attempts };
+}
+
+/**
+ * Map one Tata CDR row → fields we INSERT into our `calls` table. Tata's
+ * field names vary across accounts — try every common alias.
+ */
+function normalizeCdrRow(row) {
+  const uuid =
+    row.uuid || row.call_id || row.callId || row.id || row.reference_id ||
+    row.ref_id || row.refId || null;
+  const fromRaw   = row.caller_id_number || row.client_number || row.from || row.callerIdNumber || row.from_number || row.source || '';
+  const toRaw     = row.called_number || row.did_number || row.destination_number || row.to || row.to_number || row.destination || '';
+  // Tata's CDR splits the timestamp into two fields: `date` (YYYY-MM-DD) and
+  // `time` (HH:MM:SS). When present, combine them; else fall back to the
+  // single-field variants. All values get treated as IST then converted by pg.
+  let startedAt =
+    row.created_at || row.start_time || row.startTime || row.call_start || row.end_stamp || null;
+  if (!startedAt && row.date && row.time) startedAt = `${row.date} ${row.time}+05:30`;
+  else if (!startedAt && row.date)        startedAt = `${row.date}T00:00:00+05:30`;
+  const durSec    = row.duration_sec || row.duration || row.bill_duration || row.call_duration || null;
+  const recording = row.recording_url || row.recordingUrl || row.recording || null;
+  return {
+    provider_call_id: uuid ? String(uuid) : null,
+    phone10:          String(fromRaw).replace(/\D/g, '').slice(-10),
+    to_did:           String(toRaw).replace(/\D/g, '').slice(-10),
+    started_at:       startedAt,
+    duration_sec:     durSec != null ? Number(durSec) : null,
+    recording_url:    recording || null,
+    raw_payload:      row,
+  };
+}
+
 module.exports = {
   isConfigured,
   resolveApiKey,
@@ -329,4 +436,6 @@ module.exports = {
   hangup,
   verifyWebhookSignature,
   normalizeWebhookEvent,
+  fetchInboundMissedCalls,
+  normalizeCdrRow,
 };

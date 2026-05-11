@@ -34,7 +34,37 @@ export default function MissedCallsModule({ jwt }) {
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState('');
   const [search, setSearch]   = useState('');
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState('');
   const sseRef = useRef(null);
+
+  async function handleSync() {
+    if (!jwt) return;
+    setSyncing(true);
+    setSyncMsg('');
+    try {
+      const res = await fetch('/api/caller/calls/sync-inbound', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${jwt}` },
+      });
+      const data = await res.json();
+      if (data.error) {
+        setSyncMsg('⚠ ' + data.error);
+      } else if (data.upserted > 0) {
+        setSyncMsg(`✓ ${data.upserted} new missed call${data.upserted === 1 ? '' : 's'} synced.`);
+      } else {
+        setSyncMsg('✓ No new missed calls.');
+      }
+      // Re-fetch the list to show any new rows
+      // eslint-disable-next-line no-use-before-define
+      fetchCalls();
+    } catch (e) {
+      setSyncMsg('⚠ ' + (e.message || 'Sync failed'));
+    } finally {
+      setSyncing(false);
+      setTimeout(() => setSyncMsg(''), 5000);
+    }
+  }
 
   const fetchCalls = useCallback(async () => {
     if (!jwt) {
@@ -95,20 +125,49 @@ export default function MissedCallsModule({ jwt }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-      {/* Search */}
-      <div className="bg-white rounded-card shadow-card" style={{ padding: 16 }}>
-        <div style={{ position: 'relative' }}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(91,33,182,0.5)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)' }}>
-            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-          </svg>
-          <input
-            type="text"
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="Search missed calls by name or phone…"
-            style={{ width: '100%', height: '2.4rem', padding: '0 12px 0 34px', borderRadius: 6, border: '1px solid rgba(209,196,240,0.7)', background: 'rgba(237,234,248,0.30)', fontFamily: 'Outfit,sans-serif', fontSize: '0.86rem', color: '#3B0764', outline: 'none', boxSizing: 'border-box' }}
-          />
+      {/* Search + Sync */}
+      <div className="bg-white rounded-card shadow-card" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+          <div style={{ flex: 1, position: 'relative' }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(91,33,182,0.5)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)' }}>
+              <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            <input
+              type="text"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Search missed calls by name or phone…"
+              style={{ width: '100%', height: '2.4rem', padding: '0 12px 0 34px', borderRadius: 6, border: '1px solid rgba(209,196,240,0.7)', background: 'rgba(237,234,248,0.30)', fontFamily: 'Outfit,sans-serif', fontSize: '0.86rem', color: '#3B0764', outline: 'none', boxSizing: 'border-box' }}
+            />
+          </div>
+          <button
+            type="button"
+            onClick={handleSync}
+            disabled={syncing}
+            title="Pull recent missed calls from Tata Smartflo"
+            style={{
+              height: '2.4rem', padding: '0 14px', borderRadius: 6, border: 'none',
+              background: syncing ? 'rgba(91,33,182,0.45)' : '#5B21B6',
+              color: '#fff', fontFamily: 'Outfit,sans-serif', fontWeight: 700, fontSize: '0.82rem',
+              cursor: syncing ? 'wait' : 'pointer',
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: syncing ? 'spin 1s linear infinite' : 'none' }}>
+              <polyline points="23 4 23 10 17 10"/>
+              <polyline points="1 20 1 14 7 14"/>
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+            </svg>
+            {syncing ? 'Syncing…' : 'Sync now'}
+          </button>
         </div>
+        {syncMsg && (
+          <div style={{ fontSize: '0.78rem', color: syncMsg.startsWith('⚠') ? '#DC2626' : '#047857', fontFamily: 'Outfit, sans-serif' }}>
+            {syncMsg}
+          </div>
+        )}
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
       </div>
 
       {error && (
