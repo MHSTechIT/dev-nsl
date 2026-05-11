@@ -8,7 +8,7 @@ export function stopTick() {
   // no-op — tick sound removed
 }
 
-export default function CountdownTimer({ floating = false }) {
+export default function CountdownTimer({ floating = false, bare = false }) {
   const { state } = useFunnel();
   const lang = state.lang;
   const [parts, setParts] = useState(getCountdownParts(state.webinarConfig.next_webinar_at));
@@ -45,8 +45,8 @@ export default function CountdownTimer({ floating = false }) {
         { val: parts.sec,  label: t.screen1A.sec[lang] },
       ];
 
-  return (
-    <div className={`rounded-card p-4 ${isNear ? 'animate-pulse' : ''}`} style={{ background: isUrgent ? 'rgba(254,242,242,0.75)' : 'rgba(255,255,255,0.55)', backdropFilter: 'blur(24px) saturate(180%)', WebkitBackdropFilter: 'blur(24px) saturate(180%)', border: isUrgent ? '1px solid rgba(239,68,68,0.35)' : '1px solid rgba(139,92,246,0.18)', boxShadow: isUrgent ? '0 4px 24px rgba(239,68,68,0.15)' : '0 4px 24px rgba(91,33,182,0.10)', transition: 'all 0.5s' }}>
+  const inner = (
+    <>
       <p className="font-sans text-center text-xs font-semibold mb-4 tracking-widest uppercase" style={{ color: '#5b3fa0' }}>
         {isNear ? t.screen1A.nearStart[lang] : t.screen1A.timerLabel[lang]}
       </p>
@@ -69,10 +69,16 @@ export default function CountdownTimer({ floating = false }) {
           </div>
         ))}
       </div>
+    </>
+  );
 
-      {/* Workshop date now lives in the bottom footer of Screen1A, not inside
-          the countdown card. Keep the marker comment so future merges remind
-          us where to find it. */}
+  if (bare) {
+    return <div className={isNear ? 'animate-pulse' : ''}>{inner}</div>;
+  }
+
+  return (
+    <div className={`rounded-card p-4 ${isNear ? 'animate-pulse' : ''}`} style={{ background: 'rgba(255,255,255,0.55)', backdropFilter: 'blur(24px) saturate(180%)', WebkitBackdropFilter: 'blur(24px) saturate(180%)', border: '1px solid rgba(139,92,246,0.18)', boxShadow: '0 4px 24px rgba(91,33,182,0.10)', transition: 'all 0.5s' }}>
+      {inner}
     </div>
   );
 }

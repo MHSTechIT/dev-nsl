@@ -7,7 +7,6 @@ import CountdownTimer, { stopTick } from '../components/CountdownTimer';
 import { trackEvent } from '../utils/trackEvent';
 import { gtagPageView, gtagAddToCart } from '../utils/gtag';
 import Confetti from '../components/Confetti';
-import NextWebinarCard from '../components/NextWebinarCard';
 
 /* ── Live social proof messages ───────────────────────────────────────── */
 const LIVE_MSGS = [
@@ -325,6 +324,19 @@ export default function Screen1A() {
     transition: 'all 180ms',
   };
 
+  /* ── Workshop date label for the CTA ── */
+  const workshopDateLabel = (() => {
+    const iso = state.webinarConfig?.current_webinar_date
+             || state.webinarConfig?.next_webinar_date
+             || state.webinarConfig?.backup_webinar_at;
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    const date = d.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric' });
+    const time = d.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: 'numeric', minute: '2-digit', hour12: true }).replace(/\s/g, '');
+    return `${date}, ${time} IST`;
+  })();
+
   /* ── Shared: CTA button (used in both layouts) ── */
   const ctaButton = (
     <div style={{ position: 'relative' }}>
@@ -342,16 +354,31 @@ export default function Screen1A() {
         transition={{ repeat: Infinity, duration: 1.8, ease: 'easeInOut' }}
         style={{
           position: 'relative', zIndex: 1,
-          width: '100%', height: '3.5rem',
+          width: '100%', minHeight: '3.5rem',
+          padding: workshopDateLabel ? '10px 16px' : 0,
           background: 'linear-gradient(135deg, #7C3AED 0%, #5B21B6 100%)',
           border: 'none', borderRadius: 50,
           color: '#fff', fontFamily: 'Outfit, sans-serif',
           fontWeight: 700, fontSize: '1.1rem',
           cursor: 'pointer', display: 'flex',
-          alignItems: 'center', justifyContent: 'center', gap: 8,
+          flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center', gap: 2,
+          lineHeight: 1.15,
         }}
       >
-        {t.screen1A.cta.english}
+        <span>{t.screen1A.cta.english}</span>
+        {workshopDateLabel && (
+          <span style={{
+            fontFamily: 'Outfit, sans-serif',
+            fontWeight: 600,
+            fontSize: '0.72rem',
+            letterSpacing: '0.04em',
+            opacity: 0.92,
+            textTransform: 'uppercase',
+          }}>
+            Workshop: {workshopDateLabel}
+          </span>
+        )}
       </m.button>
     </div>
   );
@@ -546,9 +573,6 @@ export default function Screen1A() {
             </m.div>
             <m.div {...cardAnim(4)}>
               {ctaButton}
-              <div style={{ marginTop: 12 }}>
-                <NextWebinarCard />
-              </div>
             </m.div>
           </div>
 
@@ -568,13 +592,14 @@ export default function Screen1A() {
               <h1 className="heading-shine" style={{ fontFamily: '"Montserrat", sans-serif', fontWeight: 900, fontSize: 'clamp(1.45rem, 7vw, 1.9rem)', lineHeight: 1.15, textTransform: 'uppercase', letterSpacing: '0.01em', marginBottom: 10 }}>
                 REVERSE DIABETES<br />WITHOUT TABLETS
               </h1>
-              <p style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.9rem', color: '#3b1f6e', lineHeight: 1.55, fontWeight: 500 }}>
+              <p style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.9rem', color: '#3b1f6e', lineHeight: 1.55, fontWeight: 500, marginBottom: 18 }}>
                 {t.screen1A.subheadline.english}
               </p>
+              <div style={{ borderTop: '1px solid rgba(139,92,246,0.18)', paddingTop: 16 }}>
+                <CountdownTimer bare />
+              </div>
             </div>
           </m.div>
-
-          <m.div {...cardAnim(2)}><CountdownTimer /></m.div>
 
           <m.div {...cardAnim(3)}>
             <SocialProofCard visibleMsgs={visibleMsgs} seatInfo={seatInfo} />
@@ -691,9 +716,6 @@ export default function Screen1A() {
       {!isDesktop && (
         <div style={{ position: 'fixed', bottom: 0, left: 0, right: 0, maxWidth: 480, margin: '0 auto', padding: '12px 16px 20px', background: 'transparent', zIndex: 30 }}>
           {ctaButton}
-          <div style={{ marginTop: 8 }}>
-            <NextWebinarCard />
-          </div>
         </div>
       )}
 
