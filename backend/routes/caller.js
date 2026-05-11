@@ -289,4 +289,65 @@ router.get('/leads/events', (req, res) => {
   });
 });
 
+/* ── GET /api/caller/calls/missed-inbound ──
+   Customers who called the caller's Tata DID but weren't connected (or rang
+   without anyone picking up). Includes:
+     – calls linked to a lead assigned to this caller (status=missed/failed
+       OR a stale 'ringing' row older than 2 min)
+     – calls with no matching lead (caller_id NULL) — surfaced to every CRM
+       as an 'Unknown caller' that any agent can claim.
+
+   Sorted newest-first so fresh missed calls always appear at the top. */
+router.get('/calls/missed-inbound', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT c.id, c.lead_id, c.caller_id, c.provider_call_id, c.status,
+              c.direction, c.started_at, c.ended_at, c.duration_sec, c.recording_url,
+              c.hangup_by, c.raw_payload,
+              l.full_name AS lead_full_name,
+              l.whatsapp_number AS lead_phone,
+              l.email AS lead_email,
+              l.sugar_level AS lead_sugar_level
+         FROM calls c
+         LEFT JOIN leads l ON l.id = c.lead_id
+        WHERE c.direction = 'inbound'
+          AND (c.caller_id = $1 OR c.caller_id IS NULL)
+          AND (
+            c.status IN ('missed','failed')
+            OR (c.status = 'ringing' AND c.started_at < NOW() - INTERVAL '2 minutes')
+            OR (c.status = 'ended' AND c.agent_answered_at IS NULL)
+          )
+        ORDER BY c.started_at DESC NULLS LAST
+        LIMIT 200`,
+      [req.caller.id]
+    );
+
+    // Best-effort "caller phone" from raw_payload for unknown rows
+    const out = rows.map(r => {
+      const raw = r.raw_payload || {};
+      const phoneRaw = r.lead_phone
+        || raw.caller_id_number || raw.callerIdNumber || raw.from || raw.From || null;
+      const phone10 = phoneRaw ? String(phoneRaw).replace(/\D/g, '').slice(-10) : null;
+      return {
+        id:              r.id,
+        lead_id:         r.lead_id,
+        is_known:        !!r.lead_id,
+        full_name:       r.lead_full_name || 'Unknown caller',
+        phone:           phone10,
+        email:           r.lead_email,
+        sugar_level:     r.lead_sugar_level,
+        status:          r.status,
+        started_at:      r.started_at,
+        duration_sec:    r.duration_sec,
+        recording_url:   r.recording_url,
+        hangup_by:       r.hangup_by,
+      };
+    });
+    res.json({ calls: out, total: out.length });
+  } catch (err) {
+    console.error('caller/calls/missed-inbound error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch missed inbound calls' });
+  }
+});
+
 module.exports = router;

@@ -4,6 +4,7 @@ import AssignedLeadsModule     from './modules/AssignedLeadsModule';
 import UntouchedLeadsModule    from './modules/UntouchedLeadsModule';
 import CompletedLeadsModule    from './modules/CompletedLeadsModule';
 import NotPickedLeadsModule    from './modules/NotPickedLeadsModule';
+import MissedCallsModule       from './modules/MissedCallsModule';
 import IncomingCallToast       from './components/IncomingCallToast';
 
 const PAGES = [
@@ -40,6 +41,16 @@ const PAGES = [
     ),
   },
   {
+    id: 'missed_calls',
+    label: 'Missed Calls',
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
+        <polyline points="14 2 18 6 22 2"/>
+      </svg>
+    ),
+  },
+  {
     id: 'untouched',
     label: 'Untouched',
     icon: (
@@ -53,10 +64,11 @@ const PAGES = [
 ];
 
 const PAGE_TITLES = {
-  assigned:   { title: 'Assigned Leads',   subtitle: 'Leads assigned to you for follow-up' },
-  untouched:  { title: 'Untouched',        subtitle: "Leads you haven't contacted yet" },
-  completed:  { title: 'Completed Leads',  subtitle: 'Leads you have already handled' },
-  not_picked: { title: 'Not Picked',       subtitle: "Calls that didn't connect" },
+  assigned:     { title: 'Assigned Leads',   subtitle: 'Leads assigned to you for follow-up' },
+  untouched:    { title: 'Untouched',        subtitle: "Leads you haven't contacted yet" },
+  completed:    { title: 'Completed Leads',  subtitle: 'Leads you have already handled' },
+  not_picked:   { title: 'Not Picked',       subtitle: "Calls that didn't connect" },
+  missed_calls: { title: 'Missed Calls',     subtitle: "Customers who called you but weren't picked up" },
 };
 
 export default function CallerShell({ callerName: nameProp, callerRole: roleProp }) {
@@ -279,10 +291,11 @@ export default function CallerShell({ callerName: nameProp, callerRole: roleProp
       </div>
 
       {/* ── Active page ── */}
-      {activePage === 'assigned'   && <AssignedLeadsModule  jwt={jwt} externalHighlightId={externalHighlightId} />}
-      {activePage === 'untouched'  && <UntouchedLeadsModule jwt={jwt} />}
-      {activePage === 'completed'  && <CompletedLeadsModule jwt={jwt} />}
-      {activePage === 'not_picked' && <NotPickedLeadsModule jwt={jwt} />}
+      {activePage === 'assigned'     && <AssignedLeadsModule  jwt={jwt} externalHighlightId={externalHighlightId} />}
+      {activePage === 'untouched'    && <UntouchedLeadsModule jwt={jwt} />}
+      {activePage === 'completed'    && <CompletedLeadsModule jwt={jwt} />}
+      {activePage === 'not_picked'   && <NotPickedLeadsModule jwt={jwt} />}
+      {activePage === 'missed_calls' && <MissedCallsModule    jwt={jwt} />}
 
       {/* ── Floating incoming-call toasts (top-right, persists across tabs) ── */}
       <IncomingCallToast jwt={jwt} onOpenLead={handleOpenLead} />

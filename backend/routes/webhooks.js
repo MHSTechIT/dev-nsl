@@ -327,8 +327,10 @@ router.post('/tata/dialplan', express.json(), async (req, res) => {
     const body = req.body || {};
     const phoneRaw = body.caller_id_number || body.callerIdNumber || body.from || '';
     const phone10  = String(phoneRaw).replace(/\D/g, '').slice(-10);
-    console.log('[webhooks/tata/dialplan] inbound call:', { phone10, uuid: body.uuid });
+    const uuid     = body.uuid || body.call_id || body.callId || null;
+    console.log('[webhooks/tata/dialplan] inbound call:', { phone10, uuid });
 
+    let leadRow = null;
     if (phone10) {
       try {
         const { rows } = await pool.query(
@@ -339,18 +341,49 @@ router.post('/tata/dialplan', express.json(), async (req, res) => {
             LIMIT 1`,
           [phone10]
         );
-        if (rows.length && rows[0].assigned_user_id) {
-          callerSse.pushTo(rows[0].assigned_user_id, {
-            type: 'call.incoming',
-            lead_id:    rows[0].id,
-            full_name:  rows[0].full_name,
-            phone:      phone10,
-            uuid:       body.uuid || null,
-          });
-        }
+        if (rows.length) leadRow = rows[0];
       } catch (e) {
         console.error('[webhooks/tata/dialplan] lookup error:', e.message);
       }
+    }
+
+    // Log the inbound call so the Missed Calls page has data to show. If a
+    // matched lead has an assigned caller, the row is owned by that caller;
+    // otherwise it's unowned (caller_id NULL) — surfaces to all CRMs as
+    // an "Unknown caller" entry the team can claim.
+    if (uuid) {
+      try {
+        await pool.query(
+          `INSERT INTO calls
+             (lead_id, caller_id, provider_call_id, direction, status, raw_payload)
+           VALUES ($1, $2, $3, 'inbound', 'ringing', $4)
+           ON CONFLICT (provider, provider_call_id) DO NOTHING`,
+          [leadRow?.id || null, leadRow?.assigned_user_id || null, uuid, body]
+        );
+      } catch (e) {
+        // Falls through gracefully if the unique (provider, provider_call_id)
+        // index doesn't exist; the row just won't be deduped.
+        try {
+          await pool.query(
+            `INSERT INTO calls (lead_id, caller_id, provider_call_id, direction, status, raw_payload)
+             VALUES ($1, $2, $3, 'inbound', 'ringing', $4)`,
+            [leadRow?.id || null, leadRow?.assigned_user_id || null, uuid, body]
+          );
+        } catch (e2) {
+          console.error('[webhooks/tata/dialplan] insert error:', e2.message);
+        }
+      }
+    }
+
+    // SSE notify the assigned caller (if any) so their CRM can pop the card
+    if (leadRow?.assigned_user_id) {
+      callerSse.pushTo(leadRow.assigned_user_id, {
+        type: 'call.incoming',
+        lead_id:    leadRow.id,
+        full_name:  leadRow.full_name,
+        phone:      phone10,
+        uuid,
+      });
     }
 
     // Empty body → Tata uses the default dialplan
