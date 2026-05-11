@@ -8,14 +8,14 @@ import DateTimePicker from '../admin/DateTimePicker';
    by typed SSE events the backend emits per Tata webhook trigger.
    ────────────────────────────────────────────────────────────────────────── */
 
-const RANGES = [
+export const RANGES = [
   { value: '250+',         label: '250+' },
   { value: '200-250',      label: '200–250' },
   { value: '100-200',      label: '100–200' },
   { value: 'no_diabetes',  label: 'No Diabetes' },
 ];
 
-const AGE_BUCKETS = [
+export const AGE_BUCKETS = [
   { value: '0-18',     label: '0–18' },
   { value: '19-24',    label: '19–24' },
   { value: '25-34',    label: '25–34' },
@@ -24,17 +24,17 @@ const AGE_BUCKETS = [
   { value: 'above-54', label: 'Above 54' },
 ];
 
-const RANGE_FOR  = [{ value: 'personal', label: 'Personal' }, { value: 'family', label: 'For Family' }];
-const MEDICINE   = [{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }];
-const YES_NO     = [{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }];
+export const RANGE_FOR  = [{ value: 'personal', label: 'Personal' }, { value: 'family', label: 'For Family' }];
+export const MEDICINE   = [{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }];
+export const YES_NO     = [{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }];
 
-const HBA1C = [
+export const HBA1C = [
   { value: 'gt_7_5',    label: 'HbA1c > 7.5' },
   { value: '6_5_to_7_5', label: 'HbA1c 6.5 – 7.5' },
   { value: '5_7_to_6_5', label: 'HbA1c 5.7 – 6.5' },
 ];
 
-const WORKING_PROFESSIONAL = [
+export const WORKING_PROFESSIONAL = [
   'Business', 'Daily Wages', 'Unemployed', 'House Wife', 'Private',
   'IT', 'Retired', 'Student', 'Working Professional', 'Government', 'Not Working',
 ].map(label => ({ value: label.toLowerCase().replace(/\s+/g, '_'), label }));
@@ -62,7 +62,7 @@ const LOCATIONS_RAW = [
   'thiruthani','thiruvanandhapuram','thrichy','thricy','tirupattur','trichi','trivhy','ulunthurpettai',
   'vadachennai','vandhavasi','virudachalam','viruthachalam','vithunagar','pondicherry',
 ];
-const LOCATIONS = Array.from(new Set(LOCATIONS_RAW.map(s => s.trim().toLowerCase())))
+export const LOCATIONS = Array.from(new Set(LOCATIONS_RAW.map(s => s.trim().toLowerCase())))
   .sort()
   .map(v => ({ value: v, label: v.replace(/\b\w/g, c => c.toUpperCase()) }));
 

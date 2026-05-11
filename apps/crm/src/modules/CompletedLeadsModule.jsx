@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import EditCallNoteModal from './EditCallNoteModal';
 
 /* ──────────────────────────────────────────────────────────────────────────
    Completed Leads — leads the caller has marked done OR follow-up-scheduled
@@ -276,6 +277,7 @@ export default function CompletedLeadsModule({ jwt }) {
                 jwt={jwt}
                 expanded={expandedId === l.id}
                 onToggle={() => setExpandedId(expandedId === l.id ? null : l.id)}
+                onSaved={fetchLeads}
               />
             ))}
           </div>
@@ -287,7 +289,8 @@ export default function CompletedLeadsModule({ jwt }) {
 
 /* ── Subcomponents ── */
 
-function LeadRow({ lead, jwt, expanded, onToggle }) {
+function LeadRow({ lead, jwt, expanded, onToggle, onSaved }) {
+  const [editing, setEditing] = useState(false);
   const isFollowUp     = lead.last_note_outcome === 'follow_up';
   const isNotInterested = lead.last_note_outcome === 'not_interested';
   const isNotPicked    = lead.last_note_outcome === 'not_picked';
@@ -362,7 +365,31 @@ function LeadRow({ lead, jwt, expanded, onToggle }) {
       </div>
 
       {expanded && (
-        <div style={{ padding: '6px 18px 18px', display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16, fontFamily: 'Outfit, sans-serif', background: 'rgba(237,234,248,0.30)' }}>
+        <div style={{ padding: '6px 18px 18px', fontFamily: 'Outfit, sans-serif', background: 'rgba(237,234,248,0.30)' }}>
+          {/* Edit-button bar — top-right of the expanded panel */}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}>
+            <button
+              type="button"
+              onClick={() => setEditing(true)}
+              title="Edit these call details"
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                height: 30, padding: '0 12px', borderRadius: 6, border: 'none',
+                background: '#5B21B6', color: '#fff',
+                fontFamily: 'Outfit, sans-serif', fontWeight: 700, fontSize: '0.78rem',
+                cursor: 'pointer',
+                boxShadow: '0 2px 8px rgba(91,33,182,0.30)',
+              }}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 20h9"/>
+                <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+              </svg>
+              Edit
+            </button>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16 }}>
           {/* LEFT — every form field, in the same order as the call-note form */}
           <DetailGroup title="Call details">
             <Detail label="3. Confirm Range" value={
@@ -385,10 +412,6 @@ function LeadRow({ lead, jwt, expanded, onToggle }) {
             <Detail label="12. Webinar Attended"     value={valOrDash(lead.last_note_webinar_attended, YES_NO_LABEL)} />
             <Detail label="13. Available for Webinar" value={valOrDash(lead.last_note_available_for_webinar, YES_NO_LABEL)} />
             <Detail label="14. Next Batch Joining"   value={valOrDash(lead.last_note_next_batch_joining, YES_NO_LABEL)} />
-            {/* Diet — kept for old data only (the field was removed from the form). */}
-            {lead.last_note_diet_status && (
-              <Detail label="Diet (legacy)" value={DIET_LABEL[lead.last_note_diet_status] || lead.last_note_diet_status} />
-            )}
 
             {/* 15. Note */}
             <div style={{ marginTop: 8 }}>
@@ -429,7 +452,17 @@ function LeadRow({ lead, jwt, expanded, onToggle }) {
             <Detail label="Duration" value={dur || '—'} />
             <Detail label="Started"  value={fmtDate(lead.last_call_started_at)} />
           </DetailGroup>
+          </div>
         </div>
+      )}
+
+      {editing && (
+        <EditCallNoteModal
+          jwt={jwt}
+          lead={lead}
+          onClose={() => setEditing(false)}
+          onSaved={() => { setEditing(false); onSaved?.(); }}
+        />
       )}
     </div>
   );
