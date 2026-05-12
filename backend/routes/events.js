@@ -31,15 +31,26 @@ router.post('/events', async (req, res) => {
 
   const source = ALLOWED_SOURCES.has(req.body?.source) ? req.body.source : 'meta';
   const ts = webinar_at ? new Date(webinar_at) : null;
-  // Capture the active webinar's id (scoped to this source) so analytics
-  // survive deadline edits.
+  // Resolve webinar_id by FIRST trying to match the timestamp the frontend
+  // sent (so events stay glued to the webinar the visitor actually saw, even
+  // after a new webinar becomes active). Only fall back to the current
+  // active webinar when no match is found.
   let webinar_id = null;
   try {
-    const { rows } = await pool.query(
-      'SELECT id FROM webinars WHERE is_active = TRUE AND source = $1 LIMIT 1',
-      [source]
-    );
-    webinar_id = rows[0]?.id ?? null;
+    if (ts && !isNaN(ts)) {
+      const { rows } = await pool.query(
+        'SELECT id FROM webinars WHERE source = $1 AND date_time = $2 LIMIT 1',
+        [source, ts]
+      );
+      webinar_id = rows[0]?.id ?? null;
+    }
+    if (!webinar_id) {
+      const { rows } = await pool.query(
+        'SELECT id FROM webinars WHERE is_active = TRUE AND source = $1 ORDER BY date_time DESC LIMIT 1',
+        [source]
+      );
+      webinar_id = rows[0]?.id ?? null;
+    }
   } catch (_) { /* webinars table may not exist yet — safe to skip */ }
 
   pool.query(

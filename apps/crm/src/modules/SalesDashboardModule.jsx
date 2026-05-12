@@ -1,9 +1,19 @@
 import { useState } from 'react';
-import SalesLeadsTable      from './SalesLeadsTable';
-import SalesLeadsLogicView  from './SalesLeadsLogicView';
-import CallerWorkloadView   from './CallerWorkloadView';
+import SalesLeadsTable        from './SalesLeadsTable';
+import SalesLeadsLogicView    from './SalesLeadsLogicView';
+import CallerWorkloadView     from './CallerWorkloadView';
+import SalesPerformanceView   from './SalesPerformanceView';
 
 const TABS = [
+  {
+    id: 'performance',
+    label: 'Performance',
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="3 17 9 11 13 15 21 7"/><polyline points="14 7 21 7 21 14"/>
+      </svg>
+    ),
+  },
   {
     id: 'leads',
     label: 'Leads',
@@ -40,7 +50,7 @@ const TABS = [
 ];
 
 export default function SalesDashboardModule({ token }) {
-  const [tab, setTab] = useState('leads');
+  const [tab, setTab] = useState('performance');
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -77,9 +87,10 @@ export default function SalesDashboardModule({ token }) {
         })}
       </div>
 
-      {tab === 'leads'    && <SalesLeadsTable     token={token} />}
-      {tab === 'logic'    && <SalesLeadsLogicView token={token} />}
-      {tab === 'workload' && <CallerWorkloadView  token={token} />}
+      {tab === 'performance' && <SalesPerformanceView token={token} />}
+      {tab === 'leads'       && <SalesLeadsTable      token={token} />}
+      {tab === 'logic'       && <SalesLeadsLogicView  token={token} />}
+      {tab === 'workload'    && <CallerWorkloadView   token={token} />}
     </div>
   );
 }

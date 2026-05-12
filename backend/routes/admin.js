@@ -484,14 +484,41 @@ router.get('/dashboard', async (req, res) => {
 
     // Sessions list = every webinar (this source) that has at least one
     // click_event tied to it.
+    //
+    // Per-webinar metrics:
+    //   • visitors      = raw page_visited events (page-loads, not unique)
+    //   • registrations = COUNT(leads where webinar_id = w.id) — reliable
+    //                     because each lead row corresponds to one real
+    //                     human form-submit. Avoids the click_events
+    //                     "current-active webinar" attribution drift.
+    //   • wa_clicks     = COUNT(leads where wa_clicked = TRUE) — also lead-
+    //                     based, so it's always ≤ registrations.
     const { rows: sessions } = await pool.query(
       `SELECT w.id           AS webinar_id,
               w.date_time    AS webinar_at,
               w.name,
-              w.is_active
+              w.is_active,
+              COALESCE(ce_agg.visitors, 0)::int      AS visitors,
+              COALESCE(lead_agg.regs, 0)::int        AS registrations,
+              COALESCE(lead_agg.wa_uniq, 0)::int     AS wa_clicks
          FROM webinars w
+         LEFT JOIN (
+           SELECT webinar_id,
+                  SUM(CASE WHEN event_name = 'page_visited' THEN 1 ELSE 0 END) AS visitors
+             FROM click_events
+            WHERE webinar_id IS NOT NULL
+            GROUP BY webinar_id
+         ) ce_agg ON ce_agg.webinar_id = w.id
+         LEFT JOIN (
+           SELECT webinar_id,
+                  COUNT(*)                                     AS regs,
+                  SUM(CASE WHEN wa_clicked THEN 1 ELSE 0 END)  AS wa_uniq
+             FROM leads
+            WHERE webinar_id IS NOT NULL
+            GROUP BY webinar_id
+         ) lead_agg ON lead_agg.webinar_id = w.id
         WHERE w.source = $1
-          AND EXISTS (SELECT 1 FROM click_events ce WHERE ce.webinar_id = w.id)
+          AND EXISTS (SELECT 1 FROM click_events ce2 WHERE ce2.webinar_id = w.id)
         ORDER BY w.date_time DESC
         LIMIT 50`,
       [source]
@@ -500,13 +527,49 @@ router.get('/dashboard', async (req, res) => {
     const counts = {};
     for (const row of rows) counts[row.event_name] = row.count;
 
+    // Lead-based unique count of WhatsApp clickers — matches the per-webinar
+    // wa_clicks field so the Reg → WA drop-off box uses consistent math
+    // instead of inflated event counts. Scoped to the same filter window as
+    // event counts above (by leads.created_at).
+    const leadFilterClauses = ['l.source = $1'];
+    const leadFilterParams  = [source];
+    if (from) {
+      leadFilterParams.push(new Date(from + 'T00:00:00+05:30'));
+      leadFilterClauses.push(`l.created_at >= $${leadFilterParams.length}`);
+    }
+    if (to) {
+      leadFilterParams.push(new Date(to + 'T23:59:59+05:30'));
+      leadFilterClauses.push(`l.created_at <= $${leadFilterParams.length}`);
+    }
+    if (webinar_id) {
+      leadFilterParams.push(webinar_id);
+      leadFilterClauses.push(`l.webinar_id = $${leadFilterParams.length}`);
+    }
+    try {
+      const { rows: leadCounts } = await pool.query(
+        `SELECT COUNT(*) FILTER (WHERE l.wa_clicked = TRUE)::int AS wa_unique_leads,
+                COUNT(*)::int                                    AS lead_registrations
+           FROM leads l
+          WHERE ${leadFilterClauses.join(' AND ')}`,
+        leadFilterParams
+      );
+      counts.wa_unique_leads    = leadCounts[0]?.wa_unique_leads    ?? 0;
+      counts.lead_registrations = leadCounts[0]?.lead_registrations ?? 0;
+    } catch (_) {
+      counts.wa_unique_leads    = 0;
+      counts.lead_registrations = 0;
+    }
+
     res.json({
       counts,
       sessions: sessions.map(r => ({
-        webinar_id: r.webinar_id,
-        webinar_at: r.webinar_at,
-        name:       r.name,
-        is_active:  r.is_active,
+        webinar_id:    r.webinar_id,
+        webinar_at:    r.webinar_at,
+        name:          r.name,
+        is_active:     r.is_active,
+        visitors:      r.visitors,
+        registrations: r.registrations,
+        wa_clicks:     r.wa_clicks,
       })),
     });
   } catch (err) {
@@ -859,6 +922,209 @@ router.get('/caller-workload', async (req, res) => {
   }
 });
 
+/* ── GET /api/admin/sales-performance?from=YYYY-MM-DD&to=YYYY-MM-DD&salesperson_id=<uuid> ──
+   Per-salesperson dashboard aggregating lead counts (assigned/hot/warm/
+   touched/untouched/enrolled) and call activity (total/incoming/outgoing/
+   connected/duration). Trend data (`*_prev`) comes from a same-span window
+   shifted back so the frontend can show ▲/▼ arrows.
+
+   Defaults: from = to = today (IST). */
+router.get('/sales-performance', async (req, res) => {
+  const istNow = new Date(Date.now() + 5.5 * 3600 * 1000);
+  const todayYmd = istNow.toISOString().slice(0, 10);
+  const fromYmd = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || '') ? req.query.from : todayYmd;
+  const toYmd   = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to || '')   ? req.query.to   : fromYmd;
+  const salespersonId = req.query.salesperson_id || null;
+
+  // Current window
+  const dayStart = new Date(`${fromYmd}T00:00:00+05:30`).toISOString();
+  const dayEnd   = new Date(`${toYmd}T23:59:59.999+05:30`).toISOString();
+
+  // Previous window of the same span (inclusive day count)
+  const spanDays = Math.max(1, Math.round(
+    (new Date(`${toYmd}T00:00:00+05:30`) - new Date(`${fromYmd}T00:00:00+05:30`)) / 86_400_000
+  ) + 1);
+  const prevToDate = new Date(`${fromYmd}T00:00:00+05:30`);
+  prevToDate.setDate(prevToDate.getDate() - 1);
+  const prevFromDate = new Date(prevToDate);
+  prevFromDate.setDate(prevFromDate.getDate() - (spanDays - 1));
+  const prevStart = new Date(prevFromDate.setHours(0, 0, 0, 0)).toISOString();
+  const prevEnd   = new Date(prevToDate.setHours(23, 59, 59, 999)).toISOString();
+
+  const params = [dayStart, dayEnd, prevStart, prevEnd];
+  let salespersonFilter = '';
+  if (salespersonId) {
+    params.push(salespersonId);
+    salespersonFilter = `WHERE cb.caller_id = $${params.length}`;
+  }
+
+  try {
+    // Predicted-enrollments coefficient: enrolled-hot / total-hot over last 30 days, globally.
+    const ratioRes = await pool.query(`
+      SELECT
+        COALESCE(SUM(CASE WHEN last_note_outcome = 'completed' AND lead_score >= 4 THEN 1 ELSE 0 END), 0)::float
+        / NULLIF(SUM(CASE WHEN lead_score >= 4 THEN 1 ELSE 0 END), 0) AS ratio
+      FROM leads
+      WHERE assigned_at >= NOW() - INTERVAL '30 days'
+    `);
+    const hotToEnrollRatio = ratioRes.rows[0]?.ratio ?? 0;
+
+    const { rows } = await pool.query(`
+      WITH w AS (
+        SELECT $1::timestamptz AS d_start, $2::timestamptz AS d_end,
+               $3::timestamptz AS p_start, $4::timestamptz AS p_end
+      ),
+      caller_base AS (
+        SELECT u.id AS caller_id, u.full_name AS name, u.role
+          FROM crm_users u
+         WHERE u.is_active = TRUE
+           AND u.role IN ('junior_caller','senior_caller','team_leader','manager')
+      ),
+      lead_agg AS (
+        SELECT l.assigned_user_id AS caller_id,
+               COUNT(*) FILTER (WHERE l.assigned_at >= w.d_start AND l.assigned_at <= w.d_end)::int AS assigned,
+               COUNT(*) FILTER (WHERE l.lead_score >= 4 AND l.assigned_at >= w.d_start AND l.assigned_at <= w.d_end)::int AS hot,
+               COUNT(*) FILTER (WHERE l.lead_score IN (2,3) AND l.assigned_at >= w.d_start AND l.assigned_at <= w.d_end)::int AS warm,
+               COUNT(*) FILTER (WHERE l.last_note_at IS NOT NULL AND l.last_note_at >= w.d_start AND l.last_note_at <= w.d_end AND l.assigned_at >= w.d_start AND l.assigned_at <= w.d_end)::int AS touched,
+               COUNT(*) FILTER (WHERE l.last_note_at IS NULL AND l.assigned_at < NOW() - INTERVAL '24 hours')::int AS untouched_aged,
+               COUNT(*) FILTER (WHERE l.last_note_outcome = 'completed' AND l.completed_at >= w.d_start AND l.completed_at <= w.d_end)::int AS enrolled
+          FROM leads l CROSS JOIN w
+         WHERE l.assigned_user_id IS NOT NULL
+         GROUP BY l.assigned_user_id
+      ),
+      lead_prev AS (
+        SELECT l.assigned_user_id AS caller_id,
+               COUNT(*) FILTER (WHERE l.last_note_outcome = 'completed' AND l.completed_at >= w.p_start AND l.completed_at <= w.p_end)::int AS enrolled_prev,
+               COUNT(*) FILTER (WHERE l.assigned_at >= w.p_start AND l.assigned_at <= w.p_end)::int AS assigned_prev
+          FROM leads l CROSS JOIN w
+         WHERE l.assigned_user_id IS NOT NULL
+         GROUP BY l.assigned_user_id
+      ),
+      call_agg AS (
+        SELECT c.caller_id,
+               COUNT(*)::int AS total_calls,
+               COUNT(*) FILTER (WHERE c.direction = 'inbound')::int  AS incoming,
+               COUNT(*) FILTER (WHERE c.direction = 'outbound')::int AS outgoing,
+               COUNT(*) FILTER (WHERE c.duration_sec > 0)::int       AS connected,
+               COALESCE(SUM(c.duration_sec), 0)::int                 AS total_duration_sec,
+               MAX(c.started_at)                                     AS last_call_at
+          FROM calls c CROSS JOIN w
+         WHERE c.caller_id IS NOT NULL
+           AND c.started_at >= w.d_start AND c.started_at <= w.d_end
+         GROUP BY c.caller_id
+      ),
+      call_prev AS (
+        SELECT c.caller_id,
+               COUNT(*)::int AS total_calls_prev
+          FROM calls c CROSS JOIN w
+         WHERE c.caller_id IS NOT NULL
+           AND c.started_at >= w.p_start AND c.started_at <= w.p_end
+         GROUP BY c.caller_id
+      )
+      SELECT cb.caller_id, cb.name, cb.role,
+             COALESCE(la.assigned, 0)            AS assigned,
+             COALESCE(la.hot, 0)                 AS hot,
+             COALESCE(la.warm, 0)                AS warm,
+             COALESCE(la.touched, 0)             AS touched,
+             GREATEST(COALESCE(la.assigned, 0) - COALESCE(la.touched, 0), 0) AS untouched,
+             COALESCE(la.untouched_aged, 0)      AS untouched_aged,
+             COALESCE(ca.total_calls, 0)         AS total_calls,
+             COALESCE(ca.incoming, 0)            AS incoming,
+             COALESCE(ca.outgoing, 0)            AS outgoing,
+             COALESCE(ca.connected, 0)           AS connected,
+             COALESCE(ca.total_duration_sec, 0)  AS total_duration_sec,
+             ca.last_call_at                     AS last_call_at,
+             COALESCE(la.enrolled, 0)            AS enrolled,
+             COALESCE(lp.enrolled_prev, 0)       AS enrolled_prev,
+             COALESCE(cp.total_calls_prev, 0)    AS total_calls_prev
+        FROM caller_base cb
+        LEFT JOIN lead_agg  la ON la.caller_id = cb.caller_id
+        LEFT JOIN lead_prev lp ON lp.caller_id = cb.caller_id
+        LEFT JOIN call_agg  ca ON ca.caller_id = cb.caller_id
+        LEFT JOIN call_prev cp ON cp.caller_id = cb.caller_id
+        ${salespersonFilter}
+       ORDER BY enrolled DESC, name ASC
+    `, params);
+
+    // Compute derived percentages + team totals in JS to keep the SQL simple.
+    const pct = (num, den) => (den > 0 ? Math.round((num / den) * 1000) / 10 : 0);
+
+    const enrichedRows = rows.map(r => ({
+      ...r,
+      conversion_pct:      pct(r.enrolled, r.assigned),
+      connection_rate_pct: pct(r.connected, r.total_calls),
+      avg_duration_sec:    r.connected > 0 ? Math.round(r.total_duration_sec / r.connected) : 0,
+      conversion_pct_prev: pct(r.enrolled_prev, r.assigned_prev || 0),
+    }));
+
+    const sum = (k) => enrichedRows.reduce((s, r) => s + (r[k] || 0), 0);
+    const teamAssigned   = sum('assigned');
+    const teamConnected  = sum('connected');
+    const teamCalls      = sum('total_calls');
+    const teamDuration   = sum('total_duration_sec');
+    const teamEnrolled   = sum('enrolled');
+
+    const team_totals = {
+      assigned:            teamAssigned,
+      hot:                 sum('hot'),
+      warm:                sum('warm'),
+      touched:             sum('touched'),
+      untouched:           sum('untouched'),
+      untouched_aged:      sum('untouched_aged'),
+      total_calls:         teamCalls,
+      incoming:            sum('incoming'),
+      outgoing:            sum('outgoing'),
+      connected:           teamConnected,
+      total_duration_sec:  teamDuration,
+      enrolled:            teamEnrolled,
+      conversion_pct:      pct(teamEnrolled, teamAssigned),
+      connection_rate_pct: pct(teamConnected, teamCalls),
+      avg_duration_sec:    teamConnected > 0 ? Math.round(teamDuration / teamConnected) : 0,
+    };
+
+    res.json({
+      rows: enrichedRows,
+      team_totals,
+      hot_to_enroll_ratio: hotToEnrollRatio,
+      window: { from: fromYmd, to: toYmd, prev_from: prevStart.slice(0, 10), prev_to: prevEnd.slice(0, 10) },
+      generated_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('sales-performance error:', err.message);
+    res.status(500).json({ error: 'Failed to load sales performance.' });
+  }
+});
+
+/* ── GET /api/admin/calls?caller_id=<uuid>&limit=50 ──
+   Drill-down feed: recent calls for one salesperson with the linked lead's
+   name + phone for context. */
+router.get('/calls', async (req, res) => {
+  const callerId = req.query.caller_id;
+  const limit = Math.min(200, Math.max(1, parseInt(req.query.limit || '50', 10)));
+  if (!callerId) return res.status(400).json({ error: 'caller_id required' });
+
+  try {
+    const { rows } = await pool.query(`
+      SELECT c.id,
+             c.started_at,
+             c.direction,
+             c.status,
+             c.duration_sec,
+             l.full_name      AS lead_name,
+             l.whatsapp_number AS lead_phone
+        FROM calls c
+        LEFT JOIN leads l ON l.id = c.lead_id
+       WHERE c.caller_id = $1
+       ORDER BY c.started_at DESC
+       LIMIT $2
+    `, [callerId, limit]);
+    res.json({ calls: rows });
+  } catch (err) {
+    console.error('admin/calls error:', err.message);
+    res.status(500).json({ error: 'Failed to load calls.' });
+  }
+});
+
 /* ── POST /api/admin/leads/reassign ──
    Spread one caller's open leads across N teammates with custom counts.
    Body: {
@@ -973,7 +1239,7 @@ router.post('/leads/reassign', async (req, res) => {
     }
 
     const requested = distribution.reduce((s, d) => s + d.count, 0);
-    if (requested !== totalAvailable) {
+    if (requested > totalAvailable) {
       await client.query('ROLLBACK');
       return res.status(409).json({
         error: `Lead count changed: source has ${totalAvailable} lead${totalAvailable === 1 ? '' : 's'} but you allocated ${requested}. Please reload and retry.`,
@@ -981,6 +1247,7 @@ router.post('/leads/reassign', async (req, res) => {
         allocated: requested,
       });
     }
+    // requested < totalAvailable is allowed — leftover leads stay with the source caller.
 
     // Walk the queue and hand out chunks in the order admin specified.
     let cursor = 0;
@@ -999,7 +1266,8 @@ router.post('/leads/reassign', async (req, res) => {
 
     await client.query('COMMIT');
     res.json({
-      moved: totalAvailable,
+      moved: requested,
+      remaining: totalAvailable - requested,
       distribution: distribution.map(d => ({ to_caller_id: d.to_caller_id, count: d.count })),
     });
   } catch (err) {

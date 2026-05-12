@@ -91,7 +91,8 @@ export default function CallerWorkloadView({ token }) {
   const allTickedHaveCount = Object.values(allocs).every(a => !a.ticked || a.count >= 1);
   const canSubmit = !!reassigning
     && tickedCount > 0
-    && allocatedTotal === reassigning.total
+    && allocatedTotal >= 1
+    && allocatedTotal <= reassigning.total
     && allTickedHaveCount;
 
   async function confirmReassign() {
@@ -117,7 +118,10 @@ export default function CallerWorkloadView({ token }) {
       // Build toast like "Moved 99 leads → dhana 50, keerthi 30, prasana 19"
       const nameById = Object.fromEntries(callers.map(c => [c.id, c.full_name]));
       const breakdown = distribution.map(d => `${nameById[d.to_caller_id] || '?'} ${d.count}`).join(', ');
-      setToast(`Moved ${data.moved} lead${data.moved === 1 ? '' : 's'} → ${breakdown}`);
+      const stayed = data.remaining > 0
+        ? ` (${data.remaining} stay with ${reassigning.fromCaller.full_name})`
+        : '';
+      setToast(`Moved ${data.moved} lead${data.moved === 1 ? '' : 's'} → ${breakdown}${stayed}`);
       closeReassign();
       load();
     } catch (e) {
@@ -333,12 +337,16 @@ export default function CallerWorkloadView({ token }) {
             }}>
               <span style={{ color: canSubmit ? '#047857' : '#B91C1C' }}>
                 {canSubmit
-                  ? `✓ Distributing ${allocatedTotal} / ${reassigning.total} leads`
+                  ? remaining > 0
+                    ? `✓ Distributing ${allocatedTotal} / ${reassigning.total} — ${remaining} will stay with ${reassigning.fromCaller.full_name}`
+                    : `✓ Distributing ${allocatedTotal} / ${reassigning.total} leads`
                   : tickedCount === 0
-                    ? `Pick at least one teammate (${reassigning.total} leads to distribute)`
-                    : remaining > 0
-                      ? `${allocatedTotal} / ${reassigning.total} — ${remaining} more to allocate`
-                      : `${allocatedTotal} / ${reassigning.total} — over by ${-remaining}`
+                    ? `Pick at least one teammate (${reassigning.total} leads available)`
+                    : allocatedTotal === 0
+                      ? `Enter a count for at least one teammate`
+                      : remaining < 0
+                        ? `${allocatedTotal} / ${reassigning.total} — over by ${-remaining}`
+                        : `${allocatedTotal} / ${reassigning.total}`
                 }
               </span>
             </div>

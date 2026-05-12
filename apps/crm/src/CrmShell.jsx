@@ -30,7 +30,7 @@ const MODULES = [
   },
   {
     id: 'sales',
-    label: 'Sales',
+    label: 'Web Reminder',
     icon: (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <line x1="18" y1="20" x2="18" y2="10"/>
@@ -46,7 +46,7 @@ const MODULES = [
 const MODULE_TITLES = {
   marketing: { title: 'Page Performance', subtitle: 'Marketing dashboard' },
   users:     { title: 'Users',            subtitle: 'Manage staff and access' },
-  sales:     { title: 'Sales',            subtitle: 'Revenue and pipeline metrics' },
+  sales:     { title: 'Web Reminder',     subtitle: 'Revenue and pipeline metrics' },
 };
 
 function ComingSoonPanel({ label }) {

@@ -337,18 +337,29 @@ export default function Screen1A() {
   /* ── Shared: CTA button (used in both layouts) ── */
   const ctaButton = (
     <div style={{ position: 'relative' }}>
+      {/* Outer wide back glow — slow ambient halo */}
       <m.div
-        animate={{ scale: [1, 1.08, 1], opacity: [0.55, 0.15, 0.55] }}
-        transition={{ repeat: Infinity, duration: 1.8, ease: 'easeInOut' }}
-        style={{ position: 'absolute', inset: 0, borderRadius: 50, background: 'rgba(139,92,246,0.55)', filter: 'blur(12px)', zIndex: 0 }}
+        animate={{ scale: [1, 1.22, 1], opacity: [0.55, 0.18, 0.55] }}
+        transition={{ repeat: Infinity, duration: 2, ease: 'easeInOut' }}
+        style={{ position: 'absolute', inset: -6, borderRadius: 50, background: 'rgba(139,92,246,0.65)', filter: 'blur(22px)', zIndex: 0, pointerEvents: 'none' }}
+      />
+      {/* Inner tight back glow — sharper edge */}
+      <m.div
+        animate={{ scale: [1, 1.12, 1], opacity: [0.85, 0.35, 0.85] }}
+        transition={{ repeat: Infinity, duration: 2, ease: 'easeInOut' }}
+        style={{ position: 'absolute', inset: 0, borderRadius: 50, background: 'rgba(167,139,250,0.55)', filter: 'blur(10px)', zIndex: 0, pointerEvents: 'none' }}
       />
       <m.button
         onClick={() => { stopTick(); trackEvent('cta_clicked', state.webinarConfig?.next_webinar_at); setExpanded(true); }}
         animate={{
-          scale: [1, 1.04, 1],
-          boxShadow: ['0 4px 20px rgba(91,33,182,0.45)', '0 6px 36px rgba(139,92,246,0.85)', '0 4px 20px rgba(91,33,182,0.45)'],
+          scale: [1, 1.06, 1],
+          boxShadow: [
+            '0 4px 20px rgba(91,33,182,0.45)',
+            '0 8px 48px rgba(167,139,250,0.95)',
+            '0 4px 20px rgba(91,33,182,0.45)',
+          ],
         }}
-        transition={{ repeat: Infinity, duration: 1.8, ease: 'easeInOut' }}
+        transition={{ repeat: Infinity, duration: 2, ease: [0.34, 1.56, 0.64, 1] }}
         style={{
           position: 'relative', zIndex: 1,
           width: '100%', minHeight: '3.5rem',

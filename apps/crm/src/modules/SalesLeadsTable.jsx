@@ -18,11 +18,14 @@ function fmtPhone(p) {
   return digits.startsWith('91') ? '+' + digits : '+91 ' + digits;
 }
 
+const PAGE_SIZE = 10;
+
 export default function SalesLeadsTable({ token }) {
   const [leads, setLeads]     = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState('');
   const [search, setSearch]   = useState('');
+  const [page, setPage]       = useState(1);
 
   const fetchLeads = useCallback(async () => {
     setLoading(true);
@@ -49,6 +52,13 @@ export default function SalesLeadsTable({ token }) {
     }
     return true;
   });
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const currentPage = Math.min(page, totalPages);
+  const pageStart = (currentPage - 1) * PAGE_SIZE;
+  const pageRows  = filtered.slice(pageStart, pageStart + PAGE_SIZE);
+
+  useEffect(() => { setPage(1); }, [search]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -101,7 +111,7 @@ export default function SalesLeadsTable({ token }) {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map(l => {
+                {pageRows.map(l => {
                   const sugar = SUGAR_BADGE[l.sugar_level] || { bg: '#F3F4F6', fg: '#4B5563' };
                   return (
                     <tr key={l.id} style={{ borderTop: '1px solid rgba(209,196,240,0.30)' }}>
@@ -126,9 +136,50 @@ export default function SalesLeadsTable({ token }) {
             </table>
           </div>
         )}
+
+        {!loading && filtered.length > 0 && (
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '12px 16px', borderTop: '1px solid rgba(209,196,240,0.30)',
+            fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', color: 'rgba(91,33,182,0.65)',
+            flexWrap: 'wrap', gap: 8,
+          }}>
+            <span>
+              Showing <b style={{ color: '#3B0764' }}>{pageStart + 1}</b>–
+              <b style={{ color: '#3B0764' }}>{Math.min(pageStart + PAGE_SIZE, filtered.length)}</b> of{' '}
+              <b style={{ color: '#3B0764' }}>{filtered.length}</b>
+            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <PageBtn disabled={currentPage === 1} onClick={() => setPage(p => Math.max(1, p - 1))}>‹ Prev</PageBtn>
+              <span style={{ padding: '0 10px', fontWeight: 700, color: '#3B0764' }}>
+                Page {currentPage} / {totalPages}
+              </span>
+              <PageBtn disabled={currentPage === totalPages} onClick={() => setPage(p => Math.min(totalPages, p + 1))}>Next ›</PageBtn>
+            </div>
+          </div>
+        )}
       </div>
 
     </div>
+  );
+}
+
+function PageBtn({ children, disabled, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        padding: '6px 12px', borderRadius: 8,
+        border: '1px solid rgba(91,33,182,0.20)',
+        background: disabled ? 'rgba(237,234,248,0.50)' : '#fff',
+        color: disabled ? 'rgba(91,33,182,0.35)' : '#5B21B6',
+        fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', fontWeight: 600,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+      }}
+    >
+      {children}
+    </button>
   );
 }
 

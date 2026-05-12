@@ -64,8 +64,8 @@ const Icons = {
 const STAT_BOXES = [
   {
     key: 'page_visited',
-    label: 'Page Visits',
-    sub: 'Total site visitors',
+    label: 'Page Views',
+    sub: 'Counts every page load (not unique people)',
     icon: Icons.eye,
     color: '#0891B2',
     bg: 'rgba(8,145,178,0.08)',
@@ -165,13 +165,27 @@ const DROPOFF_BOXES = [
   },
   {
     label: 'Registration → WhatsApp',
-    entered: (c) => c.registration_submitted || 0,
-    acted:   (c) => c.wa_join_clicked || 0,
+    // Lead-based: each registration is one human, each WA click is one
+    // human (wa_clicked boolean), so the ratio is real.
+    entered: (c) => c.lead_registrations || 0,
+    acted:   (c) => c.wa_unique_leads || 0,
   },
 ];
 
-/* ── Helper: format ISO → readable date ── */
+/* ── Helper: format ISO → readable date ──
+   The stored time is the registration deadline (typically 23:59 IST), not
+   the actual workshop start, so we deliberately omit the time component to
+   avoid showing a misleading "11:59 pm" on every card. */
 function fmtSession(iso) {
+  if (!iso) return '';
+  return new Date(iso).toLocaleDateString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    day: 'numeric', month: 'short', year: 'numeric',
+  });
+}
+/* Date + time variant — used only by the webinar dropdown where the deadline
+   distinction is unambiguous. */
+function fmtSessionWithTime(iso) {
   if (!iso) return '';
   return new Date(iso).toLocaleString('en-IN', {
     timeZone: 'Asia/Kolkata',
@@ -441,6 +455,70 @@ function CustomSelect({ value, onChange, options, placeholder }) {
   );
 }
 
+/* ── Per-webinar performance card ── */
+function WebinarPerfCard({ session }) {
+  const label = session.name
+    ? session.name.replace(/^AWS-/, 'AWS - ')
+    : fmtSession(session.webinar_at);
+
+  const metrics = [
+    { label: 'Page Views',    value: session.visitors      || 0, color: '#0891B2', bg: 'rgba(8,145,178,0.08)' },
+    { label: 'Registrations', value: session.registrations || 0, color: '#2563EB', bg: 'rgba(37,99,235,0.08)' },
+    { label: 'WhatsApp',      value: session.wa_clicks     || 0, color: '#16A34A', bg: 'rgba(22,163,74,0.08)' },
+  ];
+
+  return (
+    <div className="webinar-perf-card" style={{
+      display: 'grid',
+      gridTemplateColumns: 'minmax(120px, 1.2fr) repeat(3, minmax(0, 1fr))',
+      alignItems: 'center', gap: 12,
+      borderRadius: 14,
+      border: '1px solid rgba(147,51,234,0.14)',
+      background: '#fff',
+      padding: '12px 16px',
+      boxShadow: '0 2px 10px rgba(91,33,182,0.06)',
+    }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+        <div style={{
+          fontFamily: 'Outfit, sans-serif', fontSize: '0.92rem', fontWeight: 800,
+          color: '#3B0764', lineHeight: 1.15,
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>
+          {label}
+        </div>
+        {session.name && (
+          <div style={{
+            fontFamily: 'Outfit, sans-serif', fontSize: '0.68rem', fontWeight: 500,
+            color: 'rgba(91,33,182,0.55)',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>
+            {fmtSession(session.webinar_at)}
+          </div>
+        )}
+      </div>
+      {metrics.map(m => (
+        <div key={m.label} style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2,
+          background: m.bg, borderRadius: 10, padding: '8px 10px',
+        }}>
+          <div style={{
+            fontFamily: 'Outfit, sans-serif', fontSize: '1.25rem', fontWeight: 800,
+            color: m.color, lineHeight: 1,
+          }}>
+            {m.value.toLocaleString()}
+          </div>
+          <div style={{
+            fontFamily: 'Outfit, sans-serif', fontSize: '0.65rem', fontWeight: 600,
+            color: 'rgba(91,33,182,0.60)', textTransform: 'uppercase', letterSpacing: '0.04em',
+          }}>
+            {m.label}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /* ══════════════════ Main component ══════════════════ */
 export default function HomeDashboard({ token, source = 'meta' }) {
   const [counts, setCounts]       = useState({});
@@ -453,6 +531,7 @@ export default function HomeDashboard({ token, source = 'meta' }) {
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo]   = useState('');
   const [webinarAt, setWebinarAt] = useState('');
+  const [showAllWebinars, setShowAllWebinars] = useState(false);
 
   const fetchDashboard = useCallback(async () => {
     setError('');
@@ -530,6 +609,9 @@ export default function HomeDashboard({ token, source = 'meta' }) {
         @media (max-width: 380px) {
           .dash-stat-grid { grid-template-columns: repeat(2, 1fr) !important; }
           .dash-dropoff-grid { grid-template-columns: repeat(2, 1fr) !important; }
+        }
+        @media (max-width: 640px) {
+          .webinar-perf-card { grid-template-columns: 1fr !important; gap: 8px !important; }
         }
       `}</style>
 
@@ -625,7 +707,7 @@ export default function HomeDashboard({ token, source = 'meta' }) {
                 })
                 .map(s => ({
                   value: s.webinar_at || s,
-                  label: s.name ? s.name.replace(/^AWS-/, 'AWS - ') : fmtSession(s.webinar_at || s),
+                  label: s.name ? s.name.replace(/^AWS-/, 'AWS - ') : fmtSessionWithTime(s.webinar_at || s),
                 })),
             ]}
           />
@@ -642,6 +724,36 @@ export default function HomeDashboard({ token, source = 'meta' }) {
           {error}
         </div>
       )}
+
+      {/* ── Per-webinar performance cards ── */}
+      {!loading && sessions.length > 0 && (() => {
+        const visible = showAllWebinars ? sessions : sessions.slice(0, 3);
+        return (
+          <div style={{ marginBottom: 28 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+              <h3 style={{ margin: 0, fontSize: '0.92rem', fontWeight: 800, color: '#3B0764' }}>
+                Per-Webinar Performance
+              </h3>
+              {sessions.length > 3 && (
+                <button
+                  onClick={() => setShowAllWebinars(v => !v)}
+                  style={{
+                    height: '1.9rem', padding: '0 12px', borderRadius: 8, border: 'none',
+                    background: 'rgba(91,33,182,0.08)', color: '#5B21B6',
+                    fontFamily: 'Outfit, sans-serif', fontSize: '0.76rem', fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {showAllWebinars ? 'Show less' : `See all (${sessions.length})`}
+                </button>
+              )}
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {visible.map(s => <WebinarPerfCard key={s.webinar_id} session={s} />)}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ── Stat grid ── */}
       <div className="dash-stat-grid" style={{
