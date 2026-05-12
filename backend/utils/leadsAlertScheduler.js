@@ -30,14 +30,18 @@ const wati = require('./watiClient');
 
 const SOURCES = ['meta', 'yt'];
 
-/** Window definitions in hours. Order matters — first match wins. */
+/** Window definitions in hours. Order matters — first match wins.
+ *  `leads_alert` is the broad "any time before 12h" first-warning window —
+ *  fires once per current webinar as soon as the upcoming slot is detected
+ *  incomplete, regardless of how far away the deadline is. Tighter windows
+ *  fire as escalating reminders as the deadline approaches. */
 const ALERT_WINDOWS = [
-  { name: 'leads_alert',         lt: 24,  gt: 12 },
-  { name: 'leads_alert_12hrs',   lt: 12,  gt: 8  },
-  { name: 'leads_alret_8hrs',    lt: 8,   gt: 4  },
-  { name: 'leads_alret_4hrs',    lt: 4,   gt: 2  },
-  { name: 'leads_alert_2hrs',    lt: 2,   gt: 1  },
-  { name: 'leads_alert_1hr',     lt: 1,   gt: 0  },
+  { name: 'leads_alert',         lt: Infinity, gt: 12 },
+  { name: 'leads_alert_12hrs',   lt: 12,       gt: 8  },
+  { name: 'leads_alret_8hrs',    lt: 8,        gt: 4  },
+  { name: 'leads_alret_4hrs',    lt: 4,        gt: 2  },
+  { name: 'leads_alert_2hrs',    lt: 2,        gt: 1  },
+  { name: 'leads_alert_1hr',     lt: 1,        gt: 0  },
 ];
 
 async function checkSource(source) {
@@ -57,9 +61,10 @@ async function checkSource(source) {
   // 2. Hours to current deadline
   const hours = (new Date(cfg.next_webinar_at).getTime() - Date.now()) / 3_600_000;
   if (hours <= 0) return { source, skipped: 'deadline_passed' };
-  if (hours > 24) return { source, skipped: 'too_early' };
 
-  // 3. Find matching alert window
+  // 3. Find matching alert window. `leads_alert` (lt:Infinity, gt:12) catches
+  //    everything from "right now" down to 12h before the deadline, then
+  //    tighter templates take over as the cascade.
   const win = ALERT_WINDOWS.find(w => hours <= w.lt && hours > w.gt);
   if (!win) return { source, skipped: 'between_windows' };
 
@@ -125,7 +130,14 @@ async function runOnce() {
   const results = [];
   for (const src of SOURCES) {
     try {
-      results.push(await checkSource(src));
+      const r = await checkSource(src);
+      results.push(r);
+      // Log every decision so it's easy to see why an alert did or didn't fire.
+      if (r.sent) {
+        // success path already logs inside checkSource
+      } else if (r.skipped) {
+        console.log(`[leadsAlert:${src}] skipped — ${r.skipped}${r.template ? ` (${r.template})` : ''}`);
+      }
     } catch (e) {
       console.error(`[leadsAlert:${src}] error:`, e.message);
       results.push({ source: src, error: e.message });

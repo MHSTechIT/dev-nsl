@@ -13,7 +13,6 @@ import {
   pixelCompleteRegistration, pixelFormAbandoned,
 } from '../utils/pixel';
 import { trackEvent } from '../utils/trackEvent';
-import { gtagLead } from '../utils/gtag';
 
 const durationOptions = ['new', 'mid', 'long'];
 const HALF = 280; // ms per half-flip
@@ -200,7 +199,6 @@ export default function Screen3() {
 
       pixelLead({ full_name: fullName, email, whatsapp_number: phone });
       pixelCompleteRegistration({ lead_score: data.lead_score });
-      gtagLead();
       dispatch({ type: 'SET_FORM_FIELD', field: 'fullName', value: fullName });
       dispatch({ type: 'SET_FORM_FIELD', field: 'whatsappNumber', value: phone });
       dispatch({ type: 'SET_FORM_FIELD', field: 'email', value: email });

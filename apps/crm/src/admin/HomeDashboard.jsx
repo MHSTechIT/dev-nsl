@@ -63,6 +63,30 @@ const Icons = {
 /* ── Stat box definitions (funnel order) ── */
 const STAT_BOXES = [
   {
+    key: 'meta_link_clicks',
+    label: 'Meta Link Clicks',
+    sub: 'Server-side count from Meta — matches Ads Manager exactly',
+    icon: Icons.eye,
+    color: '#1877F2',
+    bg: 'rgba(24,119,242,0.10)',
+  },
+  {
+    key: 'meta_verified_visits',
+    label: 'Meta Visits (verified)',
+    sub: 'fbclid in landing URL — bulletproof, accumulating from now',
+    icon: Icons.eye,
+    color: '#2563EB',
+    bg: 'rgba(37,99,235,0.08)',
+  },
+  {
+    key: 'meta_landing_views',
+    label: 'Meta Landing (Pixel)',
+    sub: 'Lossy on iOS / ad blockers — kept for reference',
+    icon: Icons.eye,
+    color: '#3B82F6',
+    bg: 'rgba(59,130,246,0.06)',
+  },
+  {
     key: 'page_visited',
     label: 'Page Views',
     sub: 'Counts every page load (not unique people)',
@@ -456,21 +480,23 @@ function CustomSelect({ value, onChange, options, placeholder }) {
 }
 
 /* ── Per-webinar performance card ── */
-function WebinarPerfCard({ session }) {
+function WebinarPerfCard({ session, metaLandingViews, metaLinkClicks }) {
   const label = session.name
     ? session.name.replace(/^AWS-/, 'AWS - ')
     : fmtSession(session.webinar_at);
 
   const metrics = [
-    { label: 'Page Views',    value: session.visitors      || 0, color: '#0891B2', bg: 'rgba(8,145,178,0.08)' },
-    { label: 'Registrations', value: session.registrations || 0, color: '#2563EB', bg: 'rgba(37,99,235,0.08)' },
-    { label: 'WhatsApp',      value: session.wa_clicks     || 0, color: '#16A34A', bg: 'rgba(22,163,74,0.08)' },
+    { label: 'Meta Clicks',  value: metaLinkClicks                 || 0, color: '#1877F2', bg: 'rgba(24,119,242,0.10)', hint: 'From Meta — bulletproof' },
+    { label: 'Meta Visits',  value: session.meta_verified_visits   || 0, color: '#2563EB', bg: 'rgba(37,99,235,0.08)',  hint: 'fbclid verified' },
+    { label: 'Page Views',   value: session.visitors               || 0, color: '#0891B2', bg: 'rgba(8,145,178,0.08)' },
+    { label: 'Registrations',value: session.registrations          || 0, color: '#7C3AED', bg: 'rgba(124,58,237,0.08)', hint: session.meta_verified_regs ? `${session.meta_verified_regs} from Meta` : null },
+    { label: 'WhatsApp',     value: session.wa_clicks              || 0, color: '#16A34A', bg: 'rgba(22,163,74,0.08)',  hint: session.meta_verified_wa  ? `${session.meta_verified_wa} from Meta`  : null },
   ];
 
   return (
     <div className="webinar-perf-card" style={{
       display: 'grid',
-      gridTemplateColumns: 'minmax(120px, 1.2fr) repeat(3, minmax(0, 1fr))',
+      gridTemplateColumns: 'minmax(120px, 1.2fr) repeat(5, minmax(0, 1fr))',
       alignItems: 'center', gap: 12,
       borderRadius: 14,
       border: '1px solid rgba(147,51,234,0.14)',
@@ -513,6 +539,14 @@ function WebinarPerfCard({ session }) {
           }}>
             {m.label}
           </div>
+          {m.hint && (
+            <div style={{
+              fontFamily: 'Outfit, sans-serif', fontSize: '0.58rem', fontWeight: 600,
+              color: '#1877F2', marginTop: 1,
+            }}>
+              {m.hint}
+            </div>
+          )}
         </div>
       ))}
     </div>
@@ -532,6 +566,8 @@ export default function HomeDashboard({ token, source = 'meta' }) {
   const [customTo, setCustomTo]   = useState('');
   const [webinarAt, setWebinarAt] = useState('');
   const [showAllWebinars, setShowAllWebinars] = useState(false);
+  const [metaByWebinar, setMetaByWebinar] = useState({});      // { webinar_id: { landing_views, link_clicks } }
+  const [metaConfigured, setMetaConfigured] = useState(false);
 
   const fetchDashboard = useCallback(async () => {
     setError('');
@@ -563,7 +599,36 @@ export default function HomeDashboard({ token, source = 'meta' }) {
       });
       if (!res.ok) throw new Error('Failed to fetch');
       const json = await res.json();
-      setCounts(json.counts || {});
+      const baseCounts = json.counts || {};
+
+      // Fan out a Meta fetch with the same filter context — the response
+      // gives the filtered total + per-webinar map. Failure is non-fatal.
+      const metaParams = new URLSearchParams();
+      metaParams.set('source', source);
+      if (params.get('from'))       metaParams.set('from', params.get('from'));
+      if (params.get('to'))         metaParams.set('to', params.get('to'));
+      if (params.get('webinar_at')) metaParams.set('webinar_at', params.get('webinar_at'));
+      try {
+        const metaRes = await fetch(`/api/admin/meta-insights?${metaParams}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (metaRes.ok) {
+          const m = await metaRes.json();
+          setMetaConfigured(!!m.configured);
+          const map = {};
+          for (const w of (m.webinars || [])) {
+            map[w.webinar_id] = {
+              landing_views: w.landing_views || 0,
+              link_clicks:   w.link_clicks   || 0,
+            };
+          }
+          setMetaByWebinar(map);
+          baseCounts.meta_landing_views = m.total_landing_views || 0;
+          baseCounts.meta_link_clicks   = m.total_link_clicks   || 0;
+        }
+      } catch (_) { /* Meta is best-effort */ }
+
+      setCounts(baseCounts);
       setSessions(json.sessions || []);
       const now = new Date();
       setLastUpdated(now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }));
@@ -731,9 +796,20 @@ export default function HomeDashboard({ token, source = 'meta' }) {
         return (
           <div style={{ marginBottom: 28 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-              <h3 style={{ margin: 0, fontSize: '0.92rem', fontWeight: 800, color: '#3B0764' }}>
-                Per-Webinar Performance
-              </h3>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <h3 style={{ margin: 0, fontSize: '0.92rem', fontWeight: 800, color: '#3B0764' }}>
+                  Per-Webinar Performance
+                </h3>
+                {metaConfigured && (
+                  <span title="Meta Marketing API connected" style={{
+                    fontSize: '0.62rem', fontWeight: 700, color: '#1877F2',
+                    background: 'rgba(24,119,242,0.10)', padding: '2px 8px', borderRadius: 50,
+                    textTransform: 'uppercase', letterSpacing: '0.05em',
+                  }}>
+                    Meta linked
+                  </span>
+                )}
+              </div>
               {sessions.length > 3 && (
                 <button
                   onClick={() => setShowAllWebinars(v => !v)}
@@ -749,7 +825,14 @@ export default function HomeDashboard({ token, source = 'meta' }) {
               )}
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {visible.map(s => <WebinarPerfCard key={s.webinar_id} session={s} />)}
+              {visible.map(s => (
+                <WebinarPerfCard
+                  key={s.webinar_id}
+                  session={s}
+                  metaLandingViews={metaByWebinar[s.webinar_id]?.landing_views || 0}
+                  metaLinkClicks={metaByWebinar[s.webinar_id]?.link_clicks   || 0}
+                />
+              ))}
             </div>
           </div>
         );
@@ -763,7 +846,7 @@ export default function HomeDashboard({ token, source = 'meta' }) {
       }}>
         {loading
           ? Array.from({ length: 9 }).map((_, i) => <SkeletonBox key={i} />)
-          : STAT_BOXES.map(box => <StatBox key={box.key} box={box} counts={counts} />)
+          : STAT_BOXES.filter(box => box.key !== 'meta_landing_views' || metaConfigured).map(box => <StatBox key={box.key} box={box} counts={counts} />)
         }
       </div>
 

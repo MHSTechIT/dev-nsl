@@ -4,7 +4,6 @@ import { m } from 'framer-motion';
 import { useFunnel } from '../context/FunnelContext';
 import { t } from '../translations';
 import { trackEvent } from '../utils/trackEvent';
-import { gtagLead } from '../utils/gtag';
 
 const slideIn = {
   initial: { opacity: 0, y: 12 },
@@ -147,7 +146,6 @@ export default function Screen4() {
       });
 
       trackEvent('registration_submitted', state.webinarConfig?.next_webinar_at);
-      gtagLead();
       setSubmitting(false);
       if (data.lead_id) localStorage.setItem('mhs_lead_id', data.lead_id);
       const waBase = import.meta.env.VITE_WHATSAPP_URL || '/whatsapp';

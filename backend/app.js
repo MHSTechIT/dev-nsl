@@ -288,6 +288,11 @@ const _clickMigration = pool.query(`
   -- webinar_at alone is brittle because admins can edit the deadline.
   ALTER TABLE click_events ADD COLUMN IF NOT EXISTS webinar_id UUID REFERENCES webinars(id) ON DELETE SET NULL;
   CREATE INDEX IF NOT EXISTS idx_click_events_webinar_id ON click_events (webinar_id);
+  -- Bulletproof Meta attribution: TRUE when the visit URL contained an
+  -- fbclid or utm_source=meta. Used by the dashboard to count verified
+  -- Meta-driven visits without relying on the lossy Meta Pixel.
+  ALTER TABLE click_events ADD COLUMN IF NOT EXISTS is_meta BOOLEAN NOT NULL DEFAULT FALSE;
+  CREATE INDEX IF NOT EXISTS idx_click_events_is_meta ON click_events (webinar_id, is_meta);
 `);
 if (_clickMigration && typeof _clickMigration.catch === 'function') {
   _clickMigration.catch(err => console.error('[Migration] click_events error:', err.message));
@@ -374,8 +379,12 @@ const _sourceMigration = Promise.all([_webinarTableMigration, _clickMigration]).
 ).catch(err => console.error('[Migration] source dimension error:', err.message));
 
 // Auto-migrate: alert phone + alert log for leads-alert scheduler
+//   + meta_campaign_ids (selected Meta Ads campaigns to scope landing-view
+//     analytics; stored as JSONB array of campaign-id strings, NULL = no
+//     filter = include every campaign in every account).
 const _alertMigration = pool.query(`
   ALTER TABLE webinar_config ADD COLUMN IF NOT EXISTS alert_phone_number TEXT;
+  ALTER TABLE webinar_config ADD COLUMN IF NOT EXISTS meta_campaign_ids JSONB;
   CREATE TABLE IF NOT EXISTS alert_log (
     id            BIGSERIAL PRIMARY KEY,
     webinar_id    UUID,

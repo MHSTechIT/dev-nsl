@@ -31,6 +31,9 @@ router.post('/events', async (req, res) => {
 
   const source = ALLOWED_SOURCES.has(req.body?.source) ? req.body.source : 'meta';
   const ts = webinar_at ? new Date(webinar_at) : null;
+  // Bulletproof Meta attribution: client sets this true when the funnel
+  // URL contained fbclid or utm_source=meta. Doesn't depend on Meta Pixel.
+  const isMeta = req.body?.is_meta === true;
   // Resolve webinar_id by FIRST trying to match the timestamp the frontend
   // sent (so events stay glued to the webinar the visitor actually saw, even
   // after a new webinar becomes active). Only fall back to the current
@@ -54,8 +57,8 @@ router.post('/events', async (req, res) => {
   } catch (_) { /* webinars table may not exist yet — safe to skip */ }
 
   pool.query(
-    'INSERT INTO click_events (event_name, webinar_at, webinar_id, source) VALUES ($1, $2, $3, $4)',
-    [event_name, ts && !isNaN(ts) ? ts : null, webinar_id, source]
+    'INSERT INTO click_events (event_name, webinar_at, webinar_id, source, is_meta) VALUES ($1, $2, $3, $4, $5)',
+    [event_name, ts && !isNaN(ts) ? ts : null, webinar_id, source, isMeta]
   ).catch(err => console.error('[events] insert error:', err.message));
 });
 

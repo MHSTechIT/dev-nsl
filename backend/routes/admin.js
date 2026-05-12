@@ -10,6 +10,14 @@ const { broadcast } = require('../utils/sseClients');
 const { syncLeadsToSheet } = require('../utils/leadsSheetSync');
 const { rotateLink }       = require('../utils/linkRotation');
 const { nextWebinarName, nextUpcomingWebinarName } = require('../utils/webinarName');
+const {
+  fetchLandingViewsByDay,
+  fetchLandingViewsByDayFiltered,
+  attributeViewsToWebinars,
+  metaConfigured,
+  fetchAllCampaigns,
+  clearMetaCache,
+} = require('../utils/metaInsights');
 
 router.use(adminAuth);
 
@@ -233,12 +241,13 @@ router.get('/settings', async (req, res) => {
   const source = getSource(req);
   try {
     const { rows } = await pool.query(
-      'SELECT alert_phone_number FROM webinar_config WHERE source = $1',
+      'SELECT alert_phone_number, meta_campaign_ids FROM webinar_config WHERE source = $1',
       [source]
     );
     res.json({
       source,
       alert_phone_number: rows[0]?.alert_phone_number || '',
+      meta_campaign_ids:  rows[0]?.meta_campaign_ids  || [],
     });
   } catch (err) {
     console.error('Get settings error:', err.message);
@@ -247,25 +256,64 @@ router.get('/settings', async (req, res) => {
 });
 
 /* ── PUT /api/admin/settings ──
-   Body: { source, alert_phone_number }
-   Saves the WATI alert recipient phone for the given source. */
+   Body: { source, alert_phone_number?, meta_campaign_ids? }
+   Saves admin preferences for the given source. Only the keys present in
+   the body get updated — omit a field to leave it untouched. */
 router.put('/settings', async (req, res) => {
   const source = getSource(req);
-  let { alert_phone_number } = req.body || {};
-  if (typeof alert_phone_number !== 'string') {
-    return res.status(422).json({ error: 'alert_phone_number must be a string' });
+  const updates = [];
+  const params  = [];
+
+  // alert_phone_number (optional)
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, 'alert_phone_number')) {
+    let phone = req.body.alert_phone_number;
+    if (typeof phone !== 'string') {
+      return res.status(422).json({ error: 'alert_phone_number must be a string' });
+    }
+    phone = phone.replace(/\D/g, '');
+    if (phone && !/^\d{10,15}$/.test(phone)) {
+      return res.status(422).json({ error: 'alert_phone_number must be 10–15 digits' });
+    }
+    params.push(phone || null);
+    updates.push(`alert_phone_number = $${params.length}`);
   }
-  // Strip everything except digits; allow blank to clear.
-  alert_phone_number = alert_phone_number.replace(/\D/g, '');
-  if (alert_phone_number && !/^\d{10,15}$/.test(alert_phone_number)) {
-    return res.status(422).json({ error: 'alert_phone_number must be 10–15 digits' });
+
+  // meta_campaign_ids (optional). Stored as JSONB array of campaign-id strings.
+  let campaignFilterTouched = false;
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, 'meta_campaign_ids')) {
+    const ids = req.body.meta_campaign_ids;
+    if (!Array.isArray(ids)) {
+      return res.status(422).json({ error: 'meta_campaign_ids must be an array' });
+    }
+    const cleaned = ids.filter(x => typeof x === 'string' && x.trim()).map(x => x.trim());
+    params.push(JSON.stringify(cleaned));
+    updates.push(`meta_campaign_ids = $${params.length}::jsonb`);
+    campaignFilterTouched = true;
   }
+
+  if (updates.length === 0) {
+    return res.status(400).json({ error: 'No updatable fields supplied' });
+  }
+
+  params.push(source);
   try {
     await pool.query(
-      'UPDATE webinar_config SET alert_phone_number = $1, updated_at = NOW() WHERE source = $2',
-      [alert_phone_number || null, source]
+      `UPDATE webinar_config SET ${updates.join(', ')}, updated_at = NOW() WHERE source = $${params.length}`,
+      params
     );
-    res.json({ success: true, alert_phone_number });
+    // If the admin changed the campaign filter, wipe the Meta cache so the
+    // very next /meta-insights call hits Facebook fresh — the dashboard
+    // reflects the new selection immediately instead of waiting 30 min.
+    if (campaignFilterTouched) clearMetaCache();
+    const { rows } = await pool.query(
+      'SELECT alert_phone_number, meta_campaign_ids FROM webinar_config WHERE source = $1',
+      [source]
+    );
+    res.json({
+      success: true,
+      alert_phone_number: rows[0]?.alert_phone_number || '',
+      meta_campaign_ids:  rows[0]?.meta_campaign_ids  || [],
+    });
   } catch (err) {
     console.error('Update settings error:', err.message);
     res.status(500).json({ error: 'Failed to save settings' });
@@ -498,21 +546,27 @@ router.get('/dashboard', async (req, res) => {
               w.date_time    AS webinar_at,
               w.name,
               w.is_active,
-              COALESCE(ce_agg.visitors, 0)::int      AS visitors,
-              COALESCE(lead_agg.regs, 0)::int        AS registrations,
-              COALESCE(lead_agg.wa_uniq, 0)::int     AS wa_clicks
+              COALESCE(ce_agg.visitors, 0)::int        AS visitors,
+              COALESCE(ce_agg.meta_visits, 0)::int     AS meta_verified_visits,
+              COALESCE(lead_agg.regs, 0)::int          AS registrations,
+              COALESCE(lead_agg.meta_regs, 0)::int     AS meta_verified_regs,
+              COALESCE(lead_agg.wa_uniq, 0)::int       AS wa_clicks,
+              COALESCE(lead_agg.meta_wa, 0)::int       AS meta_verified_wa
          FROM webinars w
          LEFT JOIN (
            SELECT webinar_id,
-                  SUM(CASE WHEN event_name = 'page_visited' THEN 1 ELSE 0 END) AS visitors
+                  SUM(CASE WHEN event_name = 'page_visited' THEN 1 ELSE 0 END) AS visitors,
+                  SUM(CASE WHEN event_name = 'page_visited' AND is_meta = TRUE THEN 1 ELSE 0 END) AS meta_visits
              FROM click_events
             WHERE webinar_id IS NOT NULL
             GROUP BY webinar_id
          ) ce_agg ON ce_agg.webinar_id = w.id
          LEFT JOIN (
            SELECT webinar_id,
-                  COUNT(*)                                     AS regs,
-                  SUM(CASE WHEN wa_clicked THEN 1 ELSE 0 END)  AS wa_uniq
+                  COUNT(*)                                                AS regs,
+                  COUNT(*) FILTER (WHERE fbclid IS NOT NULL OR utm_source = 'meta') AS meta_regs,
+                  SUM(CASE WHEN wa_clicked THEN 1 ELSE 0 END)             AS wa_uniq,
+                  SUM(CASE WHEN wa_clicked AND (fbclid IS NOT NULL OR utm_source = 'meta') THEN 1 ELSE 0 END) AS meta_wa
              FROM leads
             WHERE webinar_id IS NOT NULL
             GROUP BY webinar_id
@@ -547,29 +601,51 @@ router.get('/dashboard', async (req, res) => {
     }
     try {
       const { rows: leadCounts } = await pool.query(
-        `SELECT COUNT(*) FILTER (WHERE l.wa_clicked = TRUE)::int AS wa_unique_leads,
-                COUNT(*)::int                                    AS lead_registrations
+        `SELECT COUNT(*) FILTER (WHERE l.wa_clicked = TRUE)::int                                                 AS wa_unique_leads,
+                COUNT(*)::int                                                                                    AS lead_registrations,
+                COUNT(*) FILTER (WHERE l.fbclid IS NOT NULL OR l.utm_source = 'meta')::int                       AS meta_verified_regs,
+                COUNT(*) FILTER (WHERE l.wa_clicked = TRUE AND (l.fbclid IS NOT NULL OR l.utm_source = 'meta'))::int AS meta_verified_wa
            FROM leads l
           WHERE ${leadFilterClauses.join(' AND ')}`,
         leadFilterParams
       );
       counts.wa_unique_leads    = leadCounts[0]?.wa_unique_leads    ?? 0;
       counts.lead_registrations = leadCounts[0]?.lead_registrations ?? 0;
+      counts.meta_verified_regs = leadCounts[0]?.meta_verified_regs ?? 0;
+      counts.meta_verified_wa   = leadCounts[0]?.meta_verified_wa   ?? 0;
     } catch (_) {
       counts.wa_unique_leads    = 0;
       counts.lead_registrations = 0;
+      counts.meta_verified_regs = 0;
+      counts.meta_verified_wa   = 0;
+    }
+
+    // Verified Meta visits from click_events (same filter window as event counts).
+    try {
+      const { rows: metaVisits } = await pool.query(
+        `SELECT COUNT(*) FILTER (WHERE ce.event_name = 'page_visited' AND ce.is_meta = TRUE)::int AS meta_verified_visits
+           FROM click_events ce
+           ${where}`,
+        params
+      );
+      counts.meta_verified_visits = metaVisits[0]?.meta_verified_visits ?? 0;
+    } catch (_) {
+      counts.meta_verified_visits = 0;
     }
 
     res.json({
       counts,
       sessions: sessions.map(r => ({
-        webinar_id:    r.webinar_id,
-        webinar_at:    r.webinar_at,
-        name:          r.name,
-        is_active:     r.is_active,
-        visitors:      r.visitors,
-        registrations: r.registrations,
-        wa_clicks:     r.wa_clicks,
+        webinar_id:           r.webinar_id,
+        webinar_at:           r.webinar_at,
+        name:                 r.name,
+        is_active:            r.is_active,
+        visitors:             r.visitors,
+        meta_verified_visits: r.meta_verified_visits,
+        registrations:        r.registrations,
+        meta_verified_regs:   r.meta_verified_regs,
+        wa_clicks:            r.wa_clicks,
+        meta_verified_wa:     r.meta_verified_wa,
       })),
     });
   } catch (err) {
@@ -919,6 +995,255 @@ router.get('/caller-workload', async (req, res) => {
   } catch (err) {
     console.error('caller-workload error:', err.message);
     res.status(500).json({ error: 'Failed to load workload.' });
+  }
+});
+
+/* ── GET /api/admin/meta-debug ──
+   Diagnostic: asks Meta which ad accounts the configured token actually has
+   access to, and tests an insights call on each configured account. Helps
+   pin down which accounts are missing permissions vs which ones work. */
+router.get('/meta-debug', async (req, res) => {
+  const token = (process.env.META_ACCESS_TOKEN || '').trim();
+  const accounts = (process.env.META_AD_ACCOUNTS || '').trim().split(',').map(s => s.trim()).filter(Boolean);
+  if (!token) return res.json({ configured: false, error: 'META_ACCESS_TOKEN missing in .env' });
+
+  const out = { configured: true, configured_accounts: accounts, token_sees: [], probe: {} };
+
+  // 1) Which accounts does this token *actually* see?
+  try {
+    const r = await fetch(`https://graph.facebook.com/v23.0/me/adaccounts?fields=id,account_id,name,account_status&access_token=${encodeURIComponent(token)}`);
+    const j = await r.json();
+    if (j.error) {
+      out.token_sees_error = j.error.message;
+    } else {
+      out.token_sees = (j.data || []).map(a => ({ id: a.account_id, name: a.name, status: a.account_status }));
+    }
+  } catch (e) { out.token_sees_error = e.message; }
+
+  // 2) Probe each configured account directly. Two-step:
+  //    a) Try a metadata read — proves the token at least sees the account
+  //    b) Try an insights call — proves it has ads_read scope on the account
+  for (const accId of accounts) {
+    const tok = (process.env[`META_ACCESS_TOKEN_${accId}`] || token).trim();
+    const probe = { metadata: null, insights: null };
+
+    try {
+      const rm = await fetch(`https://graph.facebook.com/v23.0/act_${accId}?fields=id,name,account_status,business&access_token=${encodeURIComponent(tok)}`);
+      const jm = await rm.json();
+      probe.metadata = jm.error
+        ? { ok: false, message: jm.error.message, code: jm.error.code }
+        : { ok: true, name: jm.name, status: jm.account_status, business: jm.business?.name || null, business_id: jm.business?.id || null };
+    } catch (e) {
+      probe.metadata = { ok: false, message: e.message };
+    }
+
+    try {
+      const ri = await fetch(`https://graph.facebook.com/v23.0/act_${accId}/insights?fields=impressions&date_preset=last_7d&access_token=${encodeURIComponent(tok)}`);
+      const ji = await ri.json();
+      probe.insights = ji.error
+        ? { ok: false, message: ji.error.message, code: ji.error.code }
+        : { ok: true, rows: (ji.data || []).length };
+    } catch (e) {
+      probe.insights = { ok: false, message: e.message };
+    }
+
+    out.probe[accId] = probe;
+  }
+
+  // 3) Who owns this token?
+  try {
+    const r = await fetch(`https://graph.facebook.com/v23.0/me?fields=id,name&access_token=${encodeURIComponent(token)}`);
+    const j = await r.json();
+    out.token_owner = j.error ? { error: j.error.message } : { id: j.id, name: j.name };
+  } catch (e) {
+    out.token_owner = { error: e.message };
+  }
+
+  res.json(out);
+});
+
+/* ── GET /api/admin/meta-raw?from=YYYY-MM-DD&to=YYYY-MM-DD ──
+   Diagnostic: dumps every action_type + count Meta returns for the saved
+   campaign filter over the given date range, plus each account's
+   configured timezone. Lets us spot which metric the user is actually
+   comparing against in Ads Manager. */
+router.get('/meta-raw', async (req, res) => {
+  if (!metaConfigured()) return res.json({ configured: false });
+  const source = getSource(req);
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || '') ? req.query.from : null;
+  const to   = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to   || '') ? req.query.to   : null;
+  if (!from || !to) return res.status(400).json({ error: 'from and to (YYYY-MM-DD) required' });
+
+  const { rows } = await pool.query(
+    'SELECT meta_campaign_ids FROM webinar_config WHERE source = $1',
+    [source]
+  );
+  const campaignIds = Array.isArray(rows[0]?.meta_campaign_ids) ? rows[0].meta_campaign_ids : [];
+
+  const accounts = (process.env.META_AD_ACCOUNTS || '').split(',').map(s => s.trim()).filter(Boolean);
+  const out = { from, to, campaign_filter_count: campaignIds.length, accounts: {} };
+
+  for (const accId of accounts) {
+    const tok = (process.env[`META_ACCESS_TOKEN_${accId}`] || process.env.META_ACCESS_TOKEN || '').trim();
+    if (!tok) { out.accounts[accId] = { error: 'no token' }; continue; }
+
+    // 1) Account timezone
+    let timezone_name = null, timezone_offset_hours_utc = null;
+    try {
+      const r = await fetch(`https://graph.facebook.com/v23.0/act_${accId}?fields=timezone_name,timezone_offset_hours_utc&access_token=${encodeURIComponent(tok)}`);
+      const j = await r.json();
+      timezone_name = j.timezone_name; timezone_offset_hours_utc = j.timezone_offset_hours_utc;
+    } catch (_) { /* ignore */ }
+
+    // 2) Daily insights over the range — every action type
+    const u = new URL(`https://graph.facebook.com/v23.0/act_${accId}/insights`);
+    u.searchParams.set('level', 'account');
+    u.searchParams.set('fields', 'actions,inline_link_clicks,impressions,clicks');
+    u.searchParams.set('time_increment', '1');
+    u.searchParams.set('time_range', JSON.stringify({ since: from, until: to }));
+    u.searchParams.set('action_attribution_windows', JSON.stringify(['1d_view', '7d_click', '28d_click']));
+    if (campaignIds.length > 0) {
+      u.searchParams.set('filtering', JSON.stringify([{ field: 'campaign.id', operator: 'IN', value: campaignIds }]));
+    }
+    u.searchParams.set('access_token', tok);
+
+    try {
+      const r = await fetch(u.toString());
+      const j = await r.json();
+      if (j.error) {
+        out.accounts[accId] = { timezone_name, timezone_offset_hours_utc, error: j.error.message };
+        continue;
+      }
+      const action_totals = {};
+      let inline_link_clicks_total = 0, impressions_total = 0, clicks_total = 0;
+      for (const row of (j.data || [])) {
+        if (row.inline_link_clicks) inline_link_clicks_total += parseInt(row.inline_link_clicks, 10) || 0;
+        if (row.impressions)        impressions_total        += parseInt(row.impressions, 10) || 0;
+        if (row.clicks)             clicks_total             += parseInt(row.clicks, 10) || 0;
+        for (const a of (row.actions || [])) {
+          action_totals[a.action_type] = (action_totals[a.action_type] || 0) + (parseInt(a.value, 10) || 0);
+        }
+      }
+      out.accounts[accId] = {
+        timezone_name, timezone_offset_hours_utc,
+        days_returned: (j.data || []).length,
+        inline_link_clicks_total, impressions_total, clicks_total,
+        action_totals,
+      };
+    } catch (e) {
+      out.accounts[accId] = { timezone_name, timezone_offset_hours_utc, error: e.message };
+    }
+  }
+  res.json(out);
+});
+
+/* ── GET /api/admin/meta-campaigns ──
+   Returns every Meta Ads campaign across all configured accounts so the
+   admin can choose a subset to scope the landing-view dashboards. */
+router.get('/meta-campaigns', async (_req, res) => {
+  if (!metaConfigured()) return res.json({ configured: false, campaigns: [] });
+  try {
+    const campaigns = await fetchAllCampaigns();
+    res.json({ configured: true, campaigns });
+  } catch (err) {
+    console.error('meta-campaigns error:', err.message);
+    res.status(500).json({ error: 'Failed to load campaigns.' });
+  }
+});
+
+/* ── GET /api/admin/meta-insights?source=meta&from=YYYY-MM-DD&to=YYYY-MM-DD&webinar_at=<iso>&webinar_id=<uuid> ──
+   Returns Meta-attributed landing_page_view counts summed across every ad
+   account in META_AD_ACCOUNTS. A "landing view" = an ad click that
+   successfully loaded our funnel page.
+
+   Response shape:
+     {
+       configured: bool,
+       window: { from, to },
+       total_landing_views: int,                  // filtered sum (drives the stat box)
+       webinars: [{ webinar_id, name, landing_views }, …]   // per-webinar (always full 180-day attribution)
+     }
+
+   Filters:
+     • from / to     — narrow the fetched window (defaults to last 180 days)
+     • webinar_id    — restrict total to just that webinar
+     • webinar_at    — alternate way to pick a webinar (by its date_time)
+   The per-webinar `webinars` array is always built from the full 180-day
+   window so the per-card metrics stay stable when filters change. */
+router.get('/meta-insights', async (req, res) => {
+  if (!metaConfigured()) {
+    return res.json({ configured: false, webinars: [], total_landing_views: 0 });
+  }
+  const source = getSource(req);
+  const { from, to, webinar_at, webinar_id } = req.query;
+  const fmt = d => d.toISOString().slice(0, 10);
+
+  try {
+    const today = new Date();
+    const defaultFrom = new Date(today); defaultFrom.setDate(defaultFrom.getDate() - 180);
+    const fullFromYmd = fmt(defaultFrom);
+    const fullToYmd   = fmt(today);
+
+    const filterFromYmd = /^\d{4}-\d{2}-\d{2}$/.test(from || '') ? from : fullFromYmd;
+    const filterToYmd   = /^\d{4}-\d{2}-\d{2}$/.test(to   || '') ? to   : fullToYmd;
+
+    const { rows: webinars } = await pool.query(
+      `SELECT id AS webinar_id, name, date_time
+         FROM webinars
+        WHERE source = $1 AND date_time IS NOT NULL
+        ORDER BY date_time ASC`,
+      [source]
+    );
+
+    // Read the admin-selected campaign filter (per source). Empty/null
+    // means "include every campaign" — same as today's behaviour.
+    let selectedCampaignIds = [];
+    try {
+      const { rows } = await pool.query(
+        'SELECT meta_campaign_ids FROM webinar_config WHERE source = $1',
+        [source]
+      );
+      const stored = rows[0]?.meta_campaign_ids;
+      if (Array.isArray(stored)) selectedCampaignIds = stored;
+    } catch (_) { /* column may be missing on stale schemas */ }
+
+    // Both LPV and Link Clicks respect the dashboard's date-range filter
+    // and the saved campaign selection.
+    const dailyFiltered = await fetchLandingViewsByDayFiltered(filterFromYmd, filterToYmd, selectedCampaignIds);
+    const byWebinarLpv    = attributeViewsToWebinars(dailyFiltered.lpv,    webinars);
+    const byWebinarClicks = attributeViewsToWebinars(dailyFiltered.clicks, webinars);
+
+    function resolveWebinarTotal(map) {
+      if (webinar_id) return map[webinar_id] || 0;
+      if (webinar_at) {
+        const target = webinars.find(w => new Date(w.date_time).getTime() === new Date(webinar_at).getTime());
+        return target ? (map[target.webinar_id] || 0) : 0;
+      }
+      return null; // signal "sum the date range" to caller
+    }
+
+    function sumDaily(daily) {
+      return Object.values(daily).reduce((s, n) => s + n, 0);
+    }
+
+    const total_landing_views = resolveWebinarTotal(byWebinarLpv)    ?? sumDaily(dailyFiltered.lpv);
+    const total_link_clicks   = resolveWebinarTotal(byWebinarClicks) ?? sumDaily(dailyFiltered.clicks);
+
+    res.json({
+      configured: true,
+      window: { from: filterFromYmd, to: filterToYmd },
+      total_landing_views,
+      total_link_clicks,
+      webinars: webinars.map(w => ({
+        webinar_id:    w.webinar_id,
+        name:          w.name,
+        landing_views: byWebinarLpv[w.webinar_id]    || 0,
+        link_clicks:   byWebinarClicks[w.webinar_id] || 0,
+      })),
+    });
+  } catch (err) {
+    console.error('meta-insights error:', err.message);
+    res.status(500).json({ error: 'Failed to load Meta insights.' });
   }
 });
 
