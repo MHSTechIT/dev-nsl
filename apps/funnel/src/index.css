@@ -2,6 +2,38 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── CTA attention-grabbing pulse ──
+   CSS-driven so it works even if framer-motion is disabled by the OS
+   reduced-motion setting (some browsers/devices ignore the JS override).
+   Scale up to 1.10 + bright shadow burst, then rest for the second half
+   of the 2-second cycle. */
+@keyframes cta-pulse {
+  0%   { transform: scale(1);     box-shadow: 0 4px 20px rgba(91,33,182,0.45); }
+  22%  { transform: scale(1.10);  box-shadow: 0 14px 60px rgba(167,139,250,1); }
+  45%  { transform: scale(1);     box-shadow: 0 4px 20px rgba(91,33,182,0.45); }
+  100% { transform: scale(1);     box-shadow: 0 4px 20px rgba(91,33,182,0.45); }
+}
+@keyframes cta-pulse-glow {
+  0%   { transform: scale(1);     opacity: 0.55; }
+  22%  { transform: scale(1.28);  opacity: 0.15; }
+  45%  { transform: scale(1);     opacity: 0.55; }
+  100% { transform: scale(1);     opacity: 0.55; }
+}
+.cta-pulse {
+  animation: cta-pulse 2s ease-in-out infinite;
+  will-change: transform, box-shadow;
+}
+.cta-pulse-glow {
+  animation: cta-pulse-glow 2s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+/* CSS animations honour `prefers-reduced-motion` by default — force them
+   on for the CTA so the pulse always plays. */
+@media (prefers-reduced-motion: reduce) {
+  .cta-pulse,
+  .cta-pulse-glow { animation-duration: 2s !important; }
+}
+
 @layer base {
   * {
     -webkit-tap-highlight-color: transparent;

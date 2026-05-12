@@ -337,36 +337,18 @@ export default function Screen1A() {
   /* ── Shared: CTA button (used in both layouts) ── */
   const ctaButton = (
     <div style={{ position: 'relative' }}>
-      {/* Outer wide back glow — pulses with the button, then rests */}
-      <m.div
-        animate={{ scale: [1, 1.28, 1], opacity: [0.5, 0.15, 0.5] }}
-        transition={{ repeat: Infinity, duration: 0.9, repeatDelay: 1.1, ease: 'easeInOut' }}
+      {/* Back glow — pure CSS keyframes so it can't be disabled by JS engine quirks */}
+      <div
+        className="cta-pulse-glow"
         style={{ position: 'absolute', inset: -8, borderRadius: 50, background: 'rgba(139,92,246,0.70)', filter: 'blur(24px)', zIndex: 0, pointerEvents: 'none' }}
       />
-      {/* Inner tight back glow */}
-      <m.div
-        animate={{ scale: [1, 1.16, 1], opacity: [0.9, 0.35, 0.9] }}
-        transition={{ repeat: Infinity, duration: 0.9, repeatDelay: 1.1, ease: 'easeInOut' }}
+      <div
+        className="cta-pulse-glow"
         style={{ position: 'absolute', inset: 0, borderRadius: 50, background: 'rgba(167,139,250,0.65)', filter: 'blur(12px)', zIndex: 0, pointerEvents: 'none' }}
       />
-      <m.button
+      <button
         onClick={() => { stopTick(); trackEvent('cta_clicked', state.webinarConfig?.next_webinar_at); setExpanded(true); }}
-        animate={{
-          // Pop pattern: animate over 0.9s (visible swell + return), then
-          // PAUSE for 1.1s, then pop again. Total cycle = 2 s.
-          scale: [1, 1.10, 1],
-          boxShadow: [
-            '0 4px 20px rgba(91,33,182,0.45)',
-            '0 12px 56px rgba(167,139,250,1)',
-            '0 4px 20px rgba(91,33,182,0.45)',
-          ],
-        }}
-        transition={{
-          repeat: Infinity,
-          duration: 0.9,
-          repeatDelay: 1.1,
-          ease: 'easeInOut',
-        }}
+        className="cta-pulse"
         style={{
           position: 'relative', zIndex: 1,
           width: '100%', minHeight: '3.5rem',
@@ -394,7 +376,7 @@ export default function Screen1A() {
             Workshop: {workshopDateLabel}
           </span>
         )}
-      </m.button>
+      </button>
     </div>
   );
 
