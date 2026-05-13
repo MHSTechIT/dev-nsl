@@ -103,13 +103,15 @@ router.get('/leads', async (req, res) => {
 });
 
 /* ── GET /api/caller/leads/not-picked ──
-   Leads this caller marked as DNP (Did Not Pick) via the call-note modal. */
+   Leads this caller couldn't reach — either marked DNP (Did Not Pick) via
+   the call-note modal OR auto-paused after the 5-attempt SmartFlow cap.
+   Both buckets share the same "couldn't reach the customer" UX state. */
 router.get('/leads/not-picked', async (req, res) => {
   try {
     const { rows } = await pool.query(
       `${LEAD_SELECT}
         WHERE l.assigned_user_id = $1
-          AND l.last_note_outcome = 'not_picked'
+          AND l.last_note_outcome IN ('not_picked', 'auto_paused')
         ORDER BY l.last_note_at DESC NULLS LAST, l.created_at DESC`,
       [req.caller.id]
     );
@@ -141,6 +143,8 @@ router.post('/leads/reopen', async (req, res) => {
   try {
     let result;
     if (source === 'dnp') {
+      // Reopen both 'not_picked' and 'auto_paused' — both mean
+      // "we couldn't reach the customer" and the UX bucket is the same.
       result = await pool.query(
         `UPDATE leads
             SET last_note_outcome = NULL,
@@ -150,7 +154,7 @@ router.post('/leads/reopen', async (req, res) => {
                 completed_at      = NULL,
                 assigned_at       = NOW()
           WHERE assigned_user_id  = $1
-            AND last_note_outcome = 'not_picked'
+            AND last_note_outcome IN ('not_picked', 'auto_paused')
           RETURNING id`,
         [req.caller.id]
       );
@@ -217,7 +221,10 @@ router.get('/leads/completed', async (req, res) => {
 /* ── POST /api/caller/leads/:id/note ──
    Save the post-call form. Updates the lead's denormalized state and writes
    an immutable lead_call_notes row. Pushes SSE so both views update live. */
-const ALLOWED_OUTCOMES = ['completed', 'follow_up', 'not_interested', 'not_picked'];
+// 'auto_paused' = the auto-call workflow hit the 5-attempt SmartFlow cap on
+//                  the agent leg; lead is parked for retry later but the row
+//                  must be persisted so it leaves the active queue.
+const ALLOWED_OUTCOMES = ['completed', 'follow_up', 'not_interested', 'not_picked', 'auto_paused'];
 const ALLOWED_RANGES   = ['250+', '200-250', '100-200', 'no_diabetes'];
 const ALLOWED_AGES     = ['0-18', '19-24', '25-34', '35-44', '45-54', 'above-54'];
 
@@ -236,8 +243,10 @@ router.post('/leads/:id/note', async (req, res) => {
   if (!ALLOWED_OUTCOMES.includes(outcome)) {
     return res.status(422).json({ error: 'outcome must be one of: ' + ALLOWED_OUTCOMES.join(', ') });
   }
-  // 'not_picked' bypasses every other field check — caller didn't reach the lead.
-  if (outcome !== 'not_picked') {
+  // 'not_picked' and 'auto_paused' both mean the caller never reached the
+  // customer, so the discovery-field validations don't apply.
+  const NO_CONTACT_OUTCOMES = new Set(['not_picked', 'auto_paused']);
+  if (!NO_CONTACT_OUTCOMES.has(outcome)) {
     if (outcome === 'follow_up' && !follow_up_at) {
       return res.status(422).json({ error: 'follow_up_at required when outcome is follow_up' });
     }
@@ -293,7 +302,10 @@ router.post('/leads/:id/note', async (req, res) => {
       ]
     );
 
-    // Update denormalized columns on leads (and full_name if the caller edited it)
+    // Update denormalized columns on leads (and full_name if the caller edited it).
+    // Re-asserts assigned_user_id in WHERE to close the TOCTOU window between
+    // the ownership SELECT above and this UPDATE — a concurrent reassignment
+    // would otherwise let this caller mutate a lead they no longer own.
     const cleanName = typeof full_name === 'string' ? full_name.trim() : '';
     await client.query(
       `UPDATE leads
@@ -303,17 +315,32 @@ router.post('/leads/:id/note', async (req, res) => {
               completed_at          = CASE WHEN $2 IN ('completed','not_interested') THEN NOW() ELSE NULL END,
               last_note_interested  = $4,
               full_name             = COALESCE(NULLIF($5, ''), full_name)
-        WHERE id = $1`,
+        WHERE id = $1
+          AND assigned_user_id = $6`,
       [
         lead_id,
         outcome,
         outcome === 'follow_up' ? follow_up_at : null,
         interested === 'yes' || interested === 'no' ? interested : null,
         cleanName,
+        req.caller.id,
       ]
     );
 
     await client.query('COMMIT');
+
+    // Structured log — one JSON line per note save. Grep on Render with
+    // e.g. `lead_id=<uuid>` to trace a lead's lifecycle across callers.
+    console.log(JSON.stringify({
+      type:      'call_note_saved',
+      caller_id: req.caller.id,
+      lead_id,
+      outcome,
+      call_id:   call_id || null,
+      follow_up_at: outcome === 'follow_up' ? follow_up_at : null,
+      note_id:   noteRows[0].id,
+      at:        new Date().toISOString(),
+    }));
 
     // Push SSE so both Assigned and Completed pages can react
     callerSse.pushTo(req.caller.id, {

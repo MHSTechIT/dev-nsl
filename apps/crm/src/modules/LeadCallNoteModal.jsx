@@ -195,6 +195,22 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
   // the missed event after a ring-window expires.
   const phaseTimeoutRef    = useRef(null);
   useEffect(() => { callPhaseRef.current = callPhase; },             [callPhase]);
+
+  /* Structured log on every phase transition. One JSON line per change —
+     greppable in browser DevTools and forwarded to any client-side log
+     collector (e.g. Sentry breadcrumbs) so we can replay a stuck call. */
+  useEffect(() => {
+    try {
+      console.log(JSON.stringify({
+        type:             'call_phase',
+        lead_id:          lead?.id,
+        phase:            callPhase,
+        customer_attempt: customerAttemptRef.current,
+        agent_attempts:   agentAttemptsRef.current,
+        at:               new Date().toISOString(),
+      }));
+    } catch (_) { /* logging is best-effort */ }
+  }, [callPhase, lead?.id]);
   useEffect(() => { agentAttemptsRef.current = agentAttempts; },     [agentAttempts]);
   useEffect(() => { customerAttemptRef.current = customerAttempt; }, [customerAttempt]);
   useEffect(() => { activeCallIdRef.current = activeCallId; },       [activeCallId]);
@@ -233,7 +249,15 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
       wasAgentAnsweredRef.current = true;
       // Recall path / form-window: agent picking up means customer was already
       // on the call before the recall flow → jump straight to customer_on_call.
+      // Tata's click-to-call recall fires only agent.answered (no separate
+      // customer.answered) since the customer stayed on the line — so we
+      // flip the customer-answered flag here too. Without this, the next
+      // customer.missed / call.hangup would be treated as "customer never
+      // picked up" and the form_window timer would never appear on the
+      // second disconnect.
       if (phase === 'recall_ringing' || phase === 'form_window' || phase === 'form_reason_card') {
+        wasCustomerAnsweredRef.current = true;
+        setCustomerAnsweredOnce(true);
         setCallPhase('customer_on_call');
         return;
       }
@@ -274,18 +298,18 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
       //       → defer the retry decision 3 s; if customer.answered arrives
       //          during the wait, cancel the retry entirely.
       if (customerAnswered) {
-        // Need BOTH timestamps to compute the elapsed gap reliably. Falling
-        // back to Date.now() for a missing miss-timestamp would inflate the
-        // gap and falsely fire form_window for stale events. If the gap
-        // can't be computed, treat as spurious post-answer and ignore.
+        // Phantom filter: Tata fires a spurious customer.missed within ~1 s
+        // of customer.answered on click-to-call. If BOTH timestamps are
+        // present on this row AND the gap is short, it's the phantom →
+        // ignore. Otherwise (gap ≥ 8 s, OR customer_answered_at missing
+        // because this row is a recall that only carries agent.answered)
+        // treat as a real customer disconnect → fire form_window.
         const ans  = call?.customer_answered_at ? new Date(call.customer_answered_at).getTime() : null;
         const miss = call?.customer_missed_at   ? new Date(call.customer_missed_at).getTime()   : null;
-        const elapsed = (ans != null && miss != null) ? (miss - ans) : 0;
-        if (elapsed >= 8000) {
-          if (phase !== 'form_window' && phase !== 'form_reason_card') {
-            setCallPhase('form_window');
-            setFormTimerSecs(prev => (prev > 0 ? prev : FORM_WINDOW_SECS));
-          }
+        if (ans != null && miss != null && (miss - ans) < 8000) return;
+        if (phase !== 'form_window' && phase !== 'form_reason_card') {
+          setCallPhase('form_window');
+          setFormTimerSecs(prev => (prev > 0 ? prev : FORM_WINDOW_SECS));
         }
         return;
       }
@@ -705,7 +729,10 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
     }
   }
 
-  /* Manual Recall — caller chose to redial from inside the form window. */
+  /* Manual Recall — caller chose to redial from inside the form window.
+     Resets attempt counters (matches DNP first-press behavior): without
+     this reset, repeated Recalls during a tough lead can accidentally
+     trip the 5-attempt SmartFlow auto-pause cap. */
   async function handleRecall() {
     if (recalling) return;
     setDnpRetry(false);
@@ -737,6 +764,37 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
     if (savedRef.current) return;
     savedRef.current = true;
     onSaved?.(outcome, opts);
+  }
+
+  /* Guarded close handler — if the customer was on the call at any point,
+     the caller MUST capture an outcome before closing. Hitting X mid-call
+     hangs up the live leg and surfaces the standard 30-second form_window
+     so the caller fills the form and submits. Without this, abandoned
+     calls leave the lead at `last_note_outcome = NULL` indefinitely. */
+  const TERMINAL_PHASES = ['form_window','form_reason_card','dnp_alert','auto_paused'];
+  function handleCloseClick() {
+    const p = callPhaseRef.current;
+    // Already on a save-path or in the form — let the caller finish the
+    // existing flow rather than re-triggering form_window.
+    if (TERMINAL_PHASES.includes(p)) {
+      // form_window itself: do nothing — caller must submit. Other terminal
+      // phases auto-advance; ignoring the click here lets them complete.
+      return;
+    }
+    // Customer never connected (idle / ext_check / agent_ringing / customer_ringing
+    // pre-pickup) → allow normal close. customerAnsweredOnce is sticky:
+    // it flips true on the first customer.answered and stays true for the
+    // lifetime of this modal, so the state value at click time is reliable.
+    if (!customerAnsweredOnce) {
+      onClose?.();
+      return;
+    }
+    // Customer WAS on the call — hang up the live leg, force form_window.
+    fetch(`/api/caller/leads/${lead.id}/hangup`, {
+      method: 'POST', headers: { Authorization: `Bearer ${jwt}` },
+    }).catch(() => {});
+    setCallPhase('form_window');
+    setFormTimerSecs(FORM_WINDOW_SECS);
   }
 
   /* ── DNP / auto-paused auto-saves ─────────────────────────────────── */
@@ -935,7 +993,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
 
   return (
     <div
-      onClick={e => e.target === e.currentTarget && onClose()}
+      onClick={e => e.target === e.currentTarget && handleCloseClick()}
       style={{
         position: 'fixed', inset: 0, zIndex: 9000,
         background: 'rgba(15,0,40,0.45)',
@@ -1017,7 +1075,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
               </svg>
               {recalling ? 'Calling…' : 'Recall'}
             </button>
-            <button onClick={onClose} aria-label="Close"
+            <button onClick={handleCloseClick} aria-label="Close"
               style={{ width: 30, height: 30, borderRadius: 6, border: 'none', background: 'rgba(91,33,182,0.08)', color: '#5B21B6', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>

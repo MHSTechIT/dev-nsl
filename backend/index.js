@@ -10,6 +10,8 @@ const { startLinkSwapScheduler } = require('./utils/linkSwapScheduler');
 const { syncLeadsToSheet }        = require('./utils/leadsSheetSync');
 const { startScheduler: startTataInboundSync } = require('./utils/tataInboundSync');
 const { startScheduler: startLeadsAlert }       = require('./utils/leadsAlertScheduler');
+const { startStaleCallReaper }                  = require('./utils/staleCallReaper');
+const { startDailyReconciliation }              = require('./utils/dailyReconciliation');
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
@@ -34,4 +36,14 @@ app.listen(PORT, () => {
   });
 
   console.log('[Sheets Sync] Daily sync scheduled at 11:55 PM IST');
+
+  // Stale-call watchdog — marks calls rows stuck in initiated/ringing/answered
+  // for > 3 min as 'failed' and notifies the owning caller's CRM tab so the
+  // modal can self-recover.
+  startStaleCallReaper();
+
+  // Daily reconciliation report — logs (per-caller) leads sitting with
+  // last_note_outcome=NULL for > 24 h. Catches anything the save-on-close
+  // guard missed (tab crash, network drop, etc.).
+  startDailyReconciliation();
 });

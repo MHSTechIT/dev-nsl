@@ -245,6 +245,28 @@ function makeTataHandler(routeKind) {
 
     if (!callRow) return;
 
+    // Structured log — one line per webhook arrival per row update.
+    // Grep on Render with `provider_call_id=<id>` to trace a single call's
+    // full event sequence across both legs.
+    try {
+      console.log(JSON.stringify({
+        type:             'tata_webhook',
+        routeKind,
+        call_id:          callRow.id,
+        lead_id:          callRow.lead_id,
+        caller_id:        callRow.caller_id,
+        provider_call_id: callRow.provider_call_id,
+        status:           callRow.status,
+        agent_answered:   !!callRow.agent_answered_at,
+        customer_answered:!!callRow.customer_answered_at,
+        customer_missed:  !!callRow.customer_missed_at,
+        ended:            !!callRow.ended_at,
+        duration_sec:     callRow.duration_sec || null,
+        hangup_by:        callRow.hangup_by || null,
+        at:               new Date().toISOString(),
+      }));
+    } catch (_) { /* best-effort */ }
+
     // 5. Push SSE updates to the caller's CRM tab (if assigned).
     //    Always emit the legacy generic 'call.update' for backward compat,
     //    plus a typed event the new auto-call state machine reacts to.

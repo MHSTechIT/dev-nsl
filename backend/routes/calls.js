@@ -106,6 +106,19 @@ router.post('/calls/start', async (req, res) => {
       [callId, providerCallId, raw]
     );
 
+    // Structured log — one line per outbound dial attempt.
+    try {
+      console.log(JSON.stringify({
+        type:             'call_start',
+        caller_id:        req.caller.id,
+        lead_id,
+        call_id:          callId,
+        provider_call_id: providerCallId,
+        stubbed,
+        at:               new Date().toISOString(),
+      }));
+    } catch (_) { /* best-effort */ }
+
     res.json({
       success: true,
       call_id: callId,
