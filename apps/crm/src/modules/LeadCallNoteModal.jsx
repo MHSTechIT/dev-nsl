@@ -440,11 +440,18 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
         // previous attempt can have its updated_at bumped by a late PCA
         // arrival or catch-all webhook touch — that does not make its
         // stale agent_answered_at suddenly relevant to the current attempt.
+        //
+        // ALSO CRITICAL: do NOT include a row whose ONLY fresh signal is
+        // ended_at. That row is always a previous attempt's hangup arriving
+        // late — e.g. after the caller pressed DNP/Recall, the OLD call's
+        // hangup webhook lands AFTER sessionStartIso reset. Letting that
+        // ended_at into the merge causes the synthesis below to fire a
+        // phantom agent.missed (no fresh agent_answered_at anywhere) which
+        // jumps the phase from recall_ringing to agent_ringing_2.
         const calls = (since
           ? all.filter(c =>
               fresh(c.started_at) || fresh(c.agent_answered_at) ||
-              fresh(c.customer_answered_at) || fresh(c.customer_missed_at) ||
-              fresh(c.ended_at)
+              fresh(c.customer_answered_at) || fresh(c.customer_missed_at)
             )
           : all
         ).slice(0, 6);
