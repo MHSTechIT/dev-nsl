@@ -541,24 +541,38 @@ router.get('/dashboard', async (req, res) => {
     //                     "current-active webinar" attribution drift.
     //   • wa_clicks     = COUNT(leads where wa_clicked = TRUE) — also lead-
     //                     based, so it's always ≤ registrations.
+    // Option-C unique-visitor count merges visitor_ids that map to the
+    // same registered phone number. The `merged_id` CTE coalesces every
+    // visitor_id to its lead's phone if there's a matching lead row;
+    // otherwise it keeps the visitor_id as-is. Then we COUNT DISTINCT.
     const { rows: sessions } = await pool.query(
-      `SELECT w.id           AS webinar_id,
+      `WITH visit_identity AS (
+         SELECT ce.webinar_id,
+                ce.is_meta,
+                ce.event_name,
+                COALESCE(l.whatsapp_number, ce.visitor_id) AS merged_id
+           FROM click_events ce
+           LEFT JOIN leads l ON l.visitor_id = ce.visitor_id
+          WHERE ce.webinar_id IS NOT NULL
+       )
+       SELECT w.id           AS webinar_id,
               w.date_time    AS webinar_at,
               w.name,
               w.is_active,
-              COALESCE(ce_agg.visitors, 0)::int        AS visitors,
-              COALESCE(ce_agg.meta_visits, 0)::int     AS meta_verified_visits,
-              COALESCE(lead_agg.regs, 0)::int          AS registrations,
-              COALESCE(lead_agg.meta_regs, 0)::int     AS meta_verified_regs,
-              COALESCE(lead_agg.wa_uniq, 0)::int       AS wa_clicks,
-              COALESCE(lead_agg.meta_wa, 0)::int       AS meta_verified_wa
+              COALESCE(ce_agg.visitors, 0)::int           AS visitors,
+              COALESCE(ce_agg.unique_visitors, 0)::int    AS unique_visitors,
+              COALESCE(ce_agg.meta_visits, 0)::int        AS meta_verified_visits,
+              COALESCE(lead_agg.regs, 0)::int             AS registrations,
+              COALESCE(lead_agg.meta_regs, 0)::int        AS meta_verified_regs,
+              COALESCE(lead_agg.wa_uniq, 0)::int          AS wa_clicks,
+              COALESCE(lead_agg.meta_wa, 0)::int          AS meta_verified_wa
          FROM webinars w
          LEFT JOIN (
            SELECT webinar_id,
                   SUM(CASE WHEN event_name = 'page_visited' THEN 1 ELSE 0 END) AS visitors,
+                  COUNT(DISTINCT merged_id) FILTER (WHERE event_name = 'page_visited' AND merged_id IS NOT NULL) AS unique_visitors,
                   SUM(CASE WHEN event_name = 'page_visited' AND is_meta = TRUE THEN 1 ELSE 0 END) AS meta_visits
-             FROM click_events
-            WHERE webinar_id IS NOT NULL
+             FROM visit_identity
             GROUP BY webinar_id
          ) ce_agg ON ce_agg.webinar_id = w.id
          LEFT JOIN (
@@ -620,17 +634,24 @@ router.get('/dashboard', async (req, res) => {
       counts.meta_verified_wa   = 0;
     }
 
-    // Verified Meta visits from click_events (same filter window as event counts).
+    // Verified Meta visits + unique visitor counts (lead-phone merged)
+    // from click_events. Same filter window as event counts.
     try {
-      const { rows: metaVisits } = await pool.query(
-        `SELECT COUNT(*) FILTER (WHERE ce.event_name = 'page_visited' AND ce.is_meta = TRUE)::int AS meta_verified_visits
+      const { rows: r } = await pool.query(
+        `SELECT
+            COUNT(*) FILTER (WHERE ce.event_name = 'page_visited' AND ce.is_meta = TRUE)::int AS meta_verified_visits,
+            COUNT(DISTINCT COALESCE(l.whatsapp_number, ce.visitor_id))
+              FILTER (WHERE ce.event_name = 'page_visited' AND (ce.visitor_id IS NOT NULL OR l.whatsapp_number IS NOT NULL))::int AS unique_visitors
            FROM click_events ce
+           LEFT JOIN leads l ON l.visitor_id = ce.visitor_id
            ${where}`,
         params
       );
-      counts.meta_verified_visits = metaVisits[0]?.meta_verified_visits ?? 0;
+      counts.meta_verified_visits = r[0]?.meta_verified_visits ?? 0;
+      counts.unique_visitors      = r[0]?.unique_visitors      ?? 0;
     } catch (_) {
       counts.meta_verified_visits = 0;
+      counts.unique_visitors      = 0;
     }
 
     res.json({
@@ -641,6 +662,7 @@ router.get('/dashboard', async (req, res) => {
         name:                 r.name,
         is_active:            r.is_active,
         visitors:             r.visitors,
+        unique_visitors:      r.unique_visitors,
         meta_verified_visits: r.meta_verified_visits,
         registrations:        r.registrations,
         meta_verified_regs:   r.meta_verified_regs,

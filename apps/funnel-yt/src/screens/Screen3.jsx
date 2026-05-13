@@ -12,7 +12,7 @@ import {
   pixelInitiateRegistration, pixelLead,
   pixelCompleteRegistration, pixelFormAbandoned,
 } from '../utils/pixel';
-import { trackEvent } from '../utils/trackEvent';
+import { trackEvent, getVisitorId } from '../utils/trackEvent';
 
 const durationOptions = ['new', 'mid', 'long'];
 const HALF = 280; // ms per half-flip
@@ -191,7 +191,7 @@ export default function Screen3() {
     try {
       const res = await fetch('/api/leads', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ full_name: fullName.trim(), whatsapp_number: phone, email: email.trim().toLowerCase(), sugar_level: state.sugarLevel, diabetes_duration: state.diabetesDuration, language_pref: state.lang, source: state.source, ...state.utm }),
+        body: JSON.stringify({ full_name: fullName.trim(), whatsapp_number: phone, email: email.trim().toLowerCase(), sugar_level: state.sugarLevel, diabetes_duration: state.diabetesDuration, language_pref: state.lang, source: state.source, visitor_id: getVisitorId(), ...state.utm }),
       });
       const data = await res.json();
       if (res.status === 409) { setServerError(t.screen4.paused[lang]); setSubmitting(false); return; }

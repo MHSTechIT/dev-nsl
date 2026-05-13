@@ -87,9 +87,17 @@ const STAT_BOXES = [
     bg: 'rgba(59,130,246,0.06)',
   },
   {
+    key: 'unique_visitors',
+    label: 'Unique Visitors',
+    sub: 'Real people — merged by phone post-registration',
+    icon: Icons.eye,
+    color: '#0E7490',
+    bg: 'rgba(14,116,144,0.10)',
+  },
+  {
     key: 'page_visited',
     label: 'Page Views',
-    sub: 'Counts every page load (not unique people)',
+    sub: 'Total page loads (one person can fire many)',
     icon: Icons.eye,
     color: '#0891B2',
     bg: 'rgba(8,145,178,0.08)',
@@ -486,11 +494,11 @@ function WebinarPerfCard({ session, metaLandingViews, metaLinkClicks }) {
     : fmtSession(session.webinar_at);
 
   const metrics = [
-    { label: 'Meta Clicks',  value: metaLinkClicks                 || 0, color: '#1877F2', bg: 'rgba(24,119,242,0.10)', hint: 'From Meta — bulletproof' },
-    { label: 'Meta Visits',  value: session.meta_verified_visits   || 0, color: '#2563EB', bg: 'rgba(37,99,235,0.08)',  hint: 'fbclid verified' },
-    { label: 'Page Views',   value: session.visitors               || 0, color: '#0891B2', bg: 'rgba(8,145,178,0.08)' },
-    { label: 'Registrations',value: session.registrations          || 0, color: '#7C3AED', bg: 'rgba(124,58,237,0.08)', hint: session.meta_verified_regs ? `${session.meta_verified_regs} from Meta` : null },
-    { label: 'WhatsApp',     value: session.wa_clicks              || 0, color: '#16A34A', bg: 'rgba(22,163,74,0.08)',  hint: session.meta_verified_wa  ? `${session.meta_verified_wa} from Meta`  : null },
+    { label: 'Meta Clicks',     value: metaLinkClicks                 || 0, color: '#1877F2', bg: 'rgba(24,119,242,0.10)', hint: 'From Meta — bulletproof' },
+    { label: 'Unique Visitors', value: session.unique_visitors        || 0, color: '#0E7490', bg: 'rgba(14,116,144,0.10)', hint: 'Real people' },
+    { label: 'Page Views',      value: session.visitors               || 0, color: '#0891B2', bg: 'rgba(8,145,178,0.08)' },
+    { label: 'Registrations',   value: session.registrations          || 0, color: '#7C3AED', bg: 'rgba(124,58,237,0.08)', hint: session.meta_verified_regs ? `${session.meta_verified_regs} from Meta` : null },
+    { label: 'WhatsApp',        value: session.wa_clicks              || 0, color: '#16A34A', bg: 'rgba(22,163,74,0.08)',  hint: session.meta_verified_wa  ? `${session.meta_verified_wa} from Meta`  : null },
   ];
 
   return (

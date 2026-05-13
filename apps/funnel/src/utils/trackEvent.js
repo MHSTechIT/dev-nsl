@@ -8,6 +8,26 @@
  */
 
 const META_FLAG_KEY = 'mhs_is_meta';
+const VISITOR_ID_KEY = 'mhs_visitor_id';
+
+/**
+ * Returns a stable per-browser visitor id. Generated on first call and
+ * persisted in localStorage so it survives reloads, tab switches, and
+ * weeks-later return visits. Used by the dashboard to count UNIQUE
+ * people instead of total page-load events.
+ */
+export function getVisitorId() {
+  if (typeof window === 'undefined') return null;
+  try {
+    let id = localStorage.getItem(VISITOR_ID_KEY);
+    if (id) return id;
+    id = (window.crypto && typeof window.crypto.randomUUID === 'function')
+      ? window.crypto.randomUUID()
+      : 'v_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    localStorage.setItem(VISITOR_ID_KEY, id);
+    return id;
+  } catch (_) { return null; /* localStorage blocked in incognito */ }
+}
 
 /**
  * Detects if the visitor landed via a Meta ad. Checks the URL for
@@ -39,6 +59,7 @@ export function trackEvent(eventName, webinarAt) {
       event_name: eventName,
       webinar_at: webinarAt ?? null,
       is_meta: isFromMetaAd(),
+      visitor_id: getVisitorId(),
     }),
   }).catch(() => {}); // intentionally silent — never block the user
 }

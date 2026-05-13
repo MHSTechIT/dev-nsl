@@ -62,6 +62,13 @@ router.post('/leads', validators, async (req, res) => {
   const { full_name, whatsapp_number, email, sugar_level, diabetes_duration,
           language_pref, utm_source, utm_campaign, utm_content, fbclid } = req.body;
 
+  // Visitor ID from the client's localStorage. Lets us tie this lead to
+  // its pre-registration page_visited events for Option-C unique-visitor
+  // dedupe via the lead's phone number.
+  const visitor_id = typeof req.body.visitor_id === 'string'
+    ? req.body.visitor_id.slice(0, 64)
+    : null;
+
   const lead_score = computeLeadScore(sugar_level, diabetes_duration);
   const day = getISTDayOfWeek();
   const whatsapp_link = (day === 'Mon' || day === 'Tue')
@@ -82,14 +89,14 @@ router.post('/leads', validators, async (req, res) => {
     const { rows } = await pool.query(
       `INSERT INTO leads
         (full_name, whatsapp_number, email, sugar_level, diabetes_duration,
-         language_pref, lead_score, utm_source, utm_campaign, utm_content, fbclid, webinar_id, source)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+         language_pref, lead_score, utm_source, utm_campaign, utm_content, fbclid, webinar_id, source, visitor_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
        RETURNING id`,
       [
         full_name, whatsapp_number, email, sugar_level, diabetes_duration,
         language_pref, lead_score,
         utm_source || null, utm_campaign || null, utm_content || null, fbclid || null,
-        webinar_id, source,
+        webinar_id, source, visitor_id,
       ]
     );
 

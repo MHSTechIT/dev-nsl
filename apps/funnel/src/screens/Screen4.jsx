@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { m } from 'framer-motion';
 import { useFunnel } from '../context/FunnelContext';
 import { t } from '../translations';
-import { trackEvent } from '../utils/trackEvent';
+import { trackEvent, getVisitorId } from '../utils/trackEvent';
 
 const slideIn = {
   initial: { opacity: 0, y: 12 },
@@ -118,6 +118,7 @@ export default function Screen4() {
           sugar_level: state.sugarLevel,
           diabetes_duration: state.diabetesDuration || 'mid',
           language_pref: state.lang,
+          visitor_id: getVisitorId(),
           ...state.utm,
         }),
       });

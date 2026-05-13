@@ -10,6 +10,20 @@ import { detectSource } from './source';
  */
 
 const META_FLAG_KEY = 'mhs_is_meta';
+const VISITOR_ID_KEY = 'mhs_visitor_id';
+
+export function getVisitorId() {
+  if (typeof window === 'undefined') return null;
+  try {
+    let id = localStorage.getItem(VISITOR_ID_KEY);
+    if (id) return id;
+    id = (window.crypto && typeof window.crypto.randomUUID === 'function')
+      ? window.crypto.randomUUID()
+      : 'v_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    localStorage.setItem(VISITOR_ID_KEY, id);
+    return id;
+  } catch (_) { return null; }
+}
 
 function isFromMetaAd() {
   if (typeof window === 'undefined') return false;
@@ -35,6 +49,7 @@ export function trackEvent(eventName, webinarAt) {
       webinar_at: webinarAt ?? null,
       source: detectSource(),
       is_meta: isFromMetaAd(),
+      visitor_id: getVisitorId(),
     }),
   }).catch(() => {}); // intentionally silent — never block the user
 }

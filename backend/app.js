@@ -293,6 +293,17 @@ const _clickMigration = pool.query(`
   -- Meta-driven visits without relying on the lossy Meta Pixel.
   ALTER TABLE click_events ADD COLUMN IF NOT EXISTS is_meta BOOLEAN NOT NULL DEFAULT FALSE;
   CREATE INDEX IF NOT EXISTS idx_click_events_is_meta ON click_events (webinar_id, is_meta);
+  -- Anonymous visitor ID stored in the client's localStorage. Lets the
+  -- dashboard count UNIQUE people via COUNT(DISTINCT visitor_id) instead
+  -- of total page-load events. NULL on legacy events that fired before
+  -- this column existed.
+  ALTER TABLE click_events ADD COLUMN IF NOT EXISTS visitor_id TEXT;
+  CREATE INDEX IF NOT EXISTS idx_click_events_visitor_id ON click_events (webinar_id, visitor_id);
+  -- Mirror the visitor_id onto every lead row so we can merge a single
+  -- person's pre-registration visits + their lead together (Option C
+  -- cross-device dedupe via the lead's phone number).
+  ALTER TABLE leads ADD COLUMN IF NOT EXISTS visitor_id TEXT;
+  CREATE INDEX IF NOT EXISTS idx_leads_visitor_id ON leads (visitor_id);
 `);
 if (_clickMigration && typeof _clickMigration.catch === 'function') {
   _clickMigration.catch(err => console.error('[Migration] click_events error:', err.message));

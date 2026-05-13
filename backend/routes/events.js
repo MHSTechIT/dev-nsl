@@ -1,6 +1,25 @@
 const express = require('express');
+const crypto  = require('crypto');
 const router  = express.Router();
 const pool    = require('../db');
+
+/**
+ * Build a stable per-device fallback visitor_id when the client failed
+ * to provide one (incognito, ad-blocker, very-first-request race). Hash
+ * IP + user-agent into a short string so the same device gets the same
+ * fallback id across events even without localStorage.
+ *
+ * Prefixed `ipua_` so it can never collide with a localStorage UUID.
+ */
+function ipUaFallbackId(req) {
+  try {
+    const ip = (req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || req.ip || '').split(',')[0].trim();
+    const ua = (req.headers['user-agent'] || '').slice(0, 200);
+    if (!ip && !ua) return null;
+    const h = crypto.createHash('sha256').update(`${ip}|${ua}`).digest('hex').slice(0, 24);
+    return `ipua_${h}`;
+  } catch (_) { return null; }
+}
 
 const VALID_EVENTS = new Set([
   'page_visited',
@@ -34,6 +53,13 @@ router.post('/events', async (req, res) => {
   // Bulletproof Meta attribution: client sets this true when the funnel
   // URL contained fbclid or utm_source=meta. Doesn't depend on Meta Pixel.
   const isMeta = req.body?.is_meta === true;
+  // Anonymous visitor id. Primary source: client localStorage UUID.
+  // Fallback: hash of IP + user-agent (catches incognito / cleared storage).
+  // Cap at 64 chars to avoid abuse.
+  let visitorId = typeof req.body?.visitor_id === 'string'
+    ? req.body.visitor_id.slice(0, 64)
+    : null;
+  if (!visitorId) visitorId = ipUaFallbackId(req);
   // Resolve webinar_id by FIRST trying to match the timestamp the frontend
   // sent (so events stay glued to the webinar the visitor actually saw, even
   // after a new webinar becomes active). Only fall back to the current
@@ -57,8 +83,8 @@ router.post('/events', async (req, res) => {
   } catch (_) { /* webinars table may not exist yet — safe to skip */ }
 
   pool.query(
-    'INSERT INTO click_events (event_name, webinar_at, webinar_id, source, is_meta) VALUES ($1, $2, $3, $4, $5)',
-    [event_name, ts && !isNaN(ts) ? ts : null, webinar_id, source, isMeta]
+    'INSERT INTO click_events (event_name, webinar_at, webinar_id, source, is_meta, visitor_id) VALUES ($1, $2, $3, $4, $5, $6)',
+    [event_name, ts && !isNaN(ts) ? ts : null, webinar_id, source, isMeta, visitorId]
   ).catch(err => console.error('[events] insert error:', err.message));
 });
 
