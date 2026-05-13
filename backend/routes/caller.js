@@ -92,7 +92,7 @@ router.get('/leads', async (req, res) => {
           )
         ORDER BY
           (l.last_note_outcome = 'follow_up' AND l.follow_up_at <= NOW()) DESC NULLS LAST,
-          l.assigned_at ASC NULLS LAST, l.created_at ASC`,
+          l.assigned_at DESC NULLS LAST, l.created_at DESC`,
       [req.caller.id]
     );
     res.json({ leads: rows, total: rows.length });
@@ -117,6 +117,79 @@ router.get('/leads/not-picked', async (req, res) => {
   } catch (err) {
     console.error('caller/leads/not-picked error:', err.message);
     res.status(500).json({ error: 'Failed to fetch not-picked leads' });
+  }
+});
+
+/* ── POST /api/caller/leads/reopen ──
+   "Refill the Assigned bucket" — called from the queue-end modal after an
+   auto-call run finishes. Body: { source: 'dnp' | 'missed' }.
+
+     'dnp'    → leads this caller marked as 'not_picked'.
+     'missed' → leads linked to inbound-missed calls that hit either this
+                caller (caller_id match) or this caller's configured Tata
+                DIDs (tata_caller_id / tata_agent_number).
+
+   For each matched lead we clear last_note_outcome and re-stamp
+   assigned_at = NOW() so the Assigned Leads list (sorted assigned_at
+   DESC) bubbles them straight to the top. Returns { moved: <count> }. */
+router.post('/leads/reopen', async (req, res) => {
+  const source = (req.body?.source || '').trim();
+  if (source !== 'dnp' && source !== 'missed') {
+    return res.status(422).json({ error: 'source must be "dnp" or "missed"' });
+  }
+
+  try {
+    let result;
+    if (source === 'dnp') {
+      result = await pool.query(
+        `UPDATE leads
+            SET last_note_outcome = NULL,
+                last_note_interested = NULL,
+                last_note_at      = NULL,
+                follow_up_at      = NULL,
+                completed_at      = NULL,
+                assigned_at       = NOW()
+          WHERE assigned_user_id  = $1
+            AND last_note_outcome = 'not_picked'
+          RETURNING id`,
+        [req.caller.id]
+      );
+    } else {
+      // Resolve this caller's own DIDs (last-10) for matching unassigned
+      // inbound-missed rows — same approach the /missed-inbound endpoint uses.
+      const { rows: meRows } = await pool.query(
+        `SELECT
+           RIGHT(REGEXP_REPLACE(COALESCE(tata_caller_id, ''),    '\\D', '', 'g'), 10) AS caller_did,
+           RIGHT(REGEXP_REPLACE(COALESCE(tata_agent_number, ''), '\\D', '', 'g'), 10) AS agent_did
+           FROM crm_users WHERE id = $1`,
+        [req.caller.id]
+      );
+      const myDids = [meRows[0]?.caller_did, meRows[0]?.agent_did].filter(d => d && d.length === 10);
+
+      result = await pool.query(
+        `UPDATE leads
+            SET last_note_outcome = NULL,
+                last_note_interested = NULL,
+                last_note_at      = NULL,
+                follow_up_at      = NULL,
+                completed_at      = NULL,
+                assigned_at       = NOW(),
+                assigned_user_id  = COALESCE(assigned_user_id, $1)
+          WHERE id IN (
+            SELECT DISTINCT lead_id FROM calls
+             WHERE direction = 'inbound'
+               AND lead_id IS NOT NULL
+               AND status IN ('missed','failed')
+               AND (caller_id = $1 OR did_number = ANY($2::text[]))
+          )
+          RETURNING id`,
+        [req.caller.id, myDids]
+      );
+    }
+    res.json({ moved: result.rowCount, source });
+  } catch (err) {
+    console.error('caller/leads/reopen error:', err.message);
+    res.status(500).json({ error: 'Failed to reopen leads.' });
   }
 });
 

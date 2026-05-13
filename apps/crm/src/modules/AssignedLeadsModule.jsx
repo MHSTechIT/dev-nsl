@@ -66,6 +66,13 @@ export default function AssignedLeadsModule({ jwt, externalHighlightId }) {
   const [otherMinutes, setOtherMinutes]   = useState(10);
   const breakTimerRef = useRef(null);
 
+  // Queue-end refill modal — pops once the auto-call queue drains so the
+  // caller can refill the Assigned bucket from DNP or Missed Calls in one
+  // click instead of navigating between tabs.
+  const [queueEndOpen, setQueueEndOpen] = useState(false);
+  const [reopening, setReopening]       = useState(null); // 'dnp' | 'missed' | null
+  const [reopenToast, setReopenToast]   = useState('');
+
   async function triggerCall(lead) {
     const res = await fetch('/api/caller/calls/start', {
       method: 'POST',
@@ -138,6 +145,38 @@ export default function AssignedLeadsModule({ jwt, externalHighlightId }) {
     }
   }
 
+  /* Refill Assigned bucket from DNP or Missed Calls. Hits the new
+     POST /api/caller/leads/reopen endpoint with the chosen source, then
+     refetches so the moved leads show up at the top of the list. */
+  async function reopenFrom(source) {
+    if (reopening) return;
+    setReopening(source);
+    setReopenToast('');
+    try {
+      const res = await fetch('/api/caller/leads/reopen', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+        body: JSON.stringify({ source }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Reopen failed');
+      const label = source === 'dnp' ? 'DNP' : 'Missed Calls';
+      if (data.moved > 0) {
+        setReopenToast(`✓ ${data.moved} ${label} lead${data.moved === 1 ? '' : 's'} moved to the top of your queue.`);
+        await fetchLeads();
+      } else {
+        setReopenToast(`No ${label} leads to move right now.`);
+      }
+      setQueueEndOpen(false);
+      setTimeout(() => setReopenToast(''), 4000);
+    } catch (e) {
+      setReopenToast('⚠ ' + (e.message || 'Reopen failed'));
+      setTimeout(() => setReopenToast(''), 4000);
+    } finally {
+      setReopening(null);
+    }
+  }
+
   /* Tick down the break countdown every second. */
   useEffect(() => {
     if (!breakInfo) return undefined;
@@ -182,10 +221,13 @@ export default function AssignedLeadsModule({ jwt, externalHighlightId }) {
     setAutoQueue(prev => {
       const remaining = prev.slice(1);
       if (remaining.length === 0) {
-        // Reached the end of the queue
+        // Reached the end of the queue — pop the refill modal so the caller
+        // can pull DNP / Missed-Call rows back to the top in one click
+        // instead of leaving them stranded in other tabs.
         setAutoMode('off');
         setAutoIndex(0);
         setAutoTotal(0);
+        setQueueEndOpen(true);
         return [];
       }
       const next = remaining[0];
@@ -759,6 +801,102 @@ export default function AssignedLeadsModule({ jwt, externalHighlightId }) {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ── Queue-end refill modal ── */}
+      {queueEndOpen && (
+        <div
+          style={{
+            position: 'fixed', inset: 0, zIndex: 9600,
+            background: 'rgba(15,0,40,0.55)',
+            backdropFilter: 'blur(6px)', WebkitBackdropFilter: 'blur(6px)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: '0 16px', fontFamily: 'Outfit, sans-serif',
+          }}
+          onClick={() => !reopening && setQueueEndOpen(false)}
+        >
+          <div onClick={e => e.stopPropagation()} style={{
+            width: '100%', maxWidth: 420, background: '#fff', borderRadius: 22,
+            padding: '28px 24px', boxShadow: '0 24px 64px rgba(91,33,182,0.30)',
+          }}>
+            <div style={{ width: 56, height: 56, margin: '0 auto 14px', borderRadius: 16, background: 'rgba(5,150,105,0.10)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#059669" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="22 4 12 14.01 9 11.01"/>
+              </svg>
+            </div>
+            <h3 style={{ margin: 0, fontWeight: 800, fontSize: '1.10rem', color: '#3B0764', textAlign: 'center' }}>
+              Queue complete
+            </h3>
+            <p style={{ margin: '6px 0 18px', fontSize: '0.84rem', color: 'rgba(91,33,182,0.65)', textAlign: 'center' }}>
+              Will you take any more calls? Refill from DNP or Missed Calls and
+              start another round.
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <button
+                onClick={() => reopenFrom('dnp')}
+                disabled={!!reopening}
+                style={{
+                  height: '2.9rem', borderRadius: 12, border: 'none',
+                  background: reopening === 'dnp' ? 'rgba(91,33,182,0.45)' : '#5B21B6',
+                  color: '#fff', fontWeight: 700, fontSize: '0.92rem',
+                  cursor: reopening ? 'wait' : 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                  boxShadow: '0 4px 14px rgba(91,33,182,0.30)',
+                }}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" transform="rotate(135 12 12)"/>
+                  <line x1="2" y1="22" x2="22" y2="2"/>
+                </svg>
+                {reopening === 'dnp' ? 'Moving…' : 'DNP Calls'}
+              </button>
+              <button
+                onClick={() => reopenFrom('missed')}
+                disabled={!!reopening}
+                style={{
+                  height: '2.9rem', borderRadius: 12,
+                  border: '1px solid rgba(91,33,182,0.25)',
+                  background: reopening === 'missed' ? 'rgba(237,234,248,0.80)' : '#fff',
+                  color: '#5B21B6', fontWeight: 700, fontSize: '0.92rem',
+                  cursor: reopening ? 'wait' : 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                }}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
+                </svg>
+                {reopening === 'missed' ? 'Moving…' : 'Missed Calls'}
+              </button>
+              <button
+                onClick={() => setQueueEndOpen(false)}
+                disabled={!!reopening}
+                style={{
+                  height: '2.4rem', borderRadius: 8, border: 'none',
+                  background: 'transparent', color: 'rgba(91,33,182,0.65)',
+                  fontWeight: 600, fontSize: '0.84rem',
+                  cursor: reopening ? 'wait' : 'pointer', marginTop: 4,
+                }}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Reopen toast ── */}
+      {reopenToast && (
+        <div style={{
+          position: 'fixed', top: 20, left: '50%', transform: 'translateX(-50%)',
+          zIndex: 9500, background: '#fff', borderRadius: 12,
+          padding: '10px 16px', boxShadow: '0 8px 24px rgba(91,33,182,0.20)',
+          border: '1px solid rgba(91,33,182,0.15)',
+          fontFamily: 'Outfit, sans-serif', fontSize: '0.84rem', fontWeight: 600,
+          color: reopenToast.startsWith('⚠') ? '#DC2626' : '#3B0764',
+          maxWidth: 'calc(100vw - 32px)',
+        }}>
+          {reopenToast}
         </div>
       )}
 

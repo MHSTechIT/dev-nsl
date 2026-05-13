@@ -110,9 +110,13 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
   const [saving, setSaving]                       = useState(false);
   const [recalling, setRecalling]                 = useState(false);
   const [recallToast, setRecallToast]             = useState('');
-  // DNP button — first press = hang up + redial same lead one more time;
-  // second press = save as not_picked and let the parent advance.
+  // DNP press count:
+  //   0 → first press redials the same lead and shows the "Second call is
+  //       triggered" banner (treated as another customer-no-answer attempt,
+  //       NOT a caller hangup).
+  //   1 → second press saves the lead as not_picked and advances.
   const [cutCount, setCutCount]                   = useState(0);
+  const [dnpRetry, setDnpRetry]                   = useState(false);
   const [cuttingCall, setCuttingCall]             = useState(false);
 
   /* ── Auto-call state machine ──────────────────────────────────────────
@@ -663,22 +667,22 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
 
   /* DNP — fast-forward when the customer isn't picking up.
        First press : hang up the current Tata call → immediately redial the
-                     SAME lead (skip the natural ring-timeout wait).
-       Second press: save the lead as "not_picked" and let the parent
-                     advance to the next lead in the auto-queue. */
+                     SAME lead and show the "Second call is triggered" banner.
+                     This is treated as another customer-no-answer attempt,
+                     never as a caller hangup.
+       Second press: save the lead as "not_picked", move it to Do-Not-Picked,
+                     and let the parent auto-advance to the next lead. */
   async function handleCutCall() {
     if (cuttingCall) return;
     setCuttingCall(true);
     try {
       if (cutCount === 0) {
-        // Step 1 — hang up the live call (best-effort; ignore failure
-        // since Tata may already have ended the leg) then redial.
         try {
           await fetch(`/api/caller/leads/${lead.id}/hangup`, {
             method: 'POST',
             headers: { Authorization: `Bearer ${jwt}` },
           });
-        } catch (_) { /* non-fatal */ }
+        } catch (_) { /* non-fatal — Tata may have already ended the leg */ }
         resetCallSignalForNewAttempt();
         agentAttemptsRef.current = 0;
         setAgentAttempts(0);
@@ -686,14 +690,11 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
         setCustomerAttempt(1);
         setFormTimerSecs(0);
         setRecallToast('');
+        setDnpRetry(true);
         setCallPhase('recall_ringing');
         await postStartCall();
         setCutCount(1);
-        setRecallToast('Re-dialled. Press DNP again to mark as Did Not Pick.');
-        setTimeout(() => setRecallToast(''), 3500);
       } else {
-        // Step 2 — caller has decided this lead isn't picking up. Save as
-        // not_picked; the parent's onSaved auto-advances to the next lead.
         await triggerDnp();
       }
     } catch (e) {
@@ -707,6 +708,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
   /* Manual Recall — caller chose to redial from inside the form window. */
   async function handleRecall() {
     if (recalling) return;
+    setDnpRetry(false);
     resetCallSignalForNewAttempt();
     agentAttemptsRef.current = 0;
     setAgentAttempts(0);
@@ -979,7 +981,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
               disabled={cuttingCall}
               aria-label={cutCount === 0 ? 'DNP — redial' : 'DNP — mark and move on'}
               title={cutCount === 0
-                ? 'DNP — hang up and try this lead one more time'
+                ? 'DNP — hang up and redial this lead once more'
                 : 'DNP — mark as Did Not Pick and move to the next lead'}
               style={{
                 height: 30, padding: '0 12px', borderRadius: 6, border: 'none',
@@ -1036,6 +1038,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved }) {
           formTimerSecs={formTimerSecs}
           totalWindow={FORM_WINDOW_SECS}
           customerAttempt={customerAttempt}
+          dnpRetry={dnpRetry}
         />
 
         <div className="lcn-form-grid">
@@ -1293,7 +1296,7 @@ function RadioRow({ options, value, onChange, wrap }) {
 /* Yellow status banner — the in-flight call message at the top of the modal.
    Action prompts (extension check, reason cards, DNP alert) live in the
    centered overlay rendered separately. */
-function BannerStatus({ phase, formTimerSecs, totalWindow, customerAttempt }) {
+function BannerStatus({ phase, formTimerSecs, totalWindow, customerAttempt, dnpRetry }) {
   const cardBase = {
     marginBottom: 16, padding: '14px 18px',
     borderRadius: 6, border: '1.5px dashed #F59E0B',
@@ -1349,7 +1352,10 @@ function BannerStatus({ phase, formTimerSecs, totalWindow, customerAttempt }) {
     );
   }
   if (phase === 'recall_ringing') {
-    return <div style={cardBase}><Row>{dot}<span>Recall is triggered. Please pick the call.</span></Row></div>;
+    const msg = dnpRetry
+      ? 'Second call is triggered. Please pick the call.'
+      : 'Recall is triggered. Please pick the call.';
+    return <div style={cardBase}><Row>{dot}<span>{msg}</span></Row></div>;
   }
   if (phase === 'form_window') {
     const urgent = formTimerSecs <= 10;
