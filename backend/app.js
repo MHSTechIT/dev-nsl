@@ -307,6 +307,14 @@ const _callNotesMigration = pool.query(`
   ALTER TABLE leads ADD COLUMN IF NOT EXISTS follow_up_at      TIMESTAMPTZ;
   ALTER TABLE leads ADD COLUMN IF NOT EXISTS completed_at      TIMESTAMPTZ;
   CREATE INDEX IF NOT EXISTS idx_leads_followup ON leads (follow_up_at) WHERE last_note_outcome = 'follow_up';
+
+  -- "Next Batch" bucket: parked when the caller answers Q14
+  -- (next_batch_joining = 'yes'). Promoted back to the caller's Assigned
+  -- queue as a follow-up when admin starts a new batch (updates
+  -- next_webinar_at to a fresh future date).
+  ALTER TABLE leads ADD COLUMN IF NOT EXISTS next_batch_parked     BOOLEAN     NOT NULL DEFAULT FALSE;
+  ALTER TABLE leads ADD COLUMN IF NOT EXISTS next_batch_parked_at  TIMESTAMPTZ;
+  CREATE INDEX IF NOT EXISTS idx_leads_next_batch_parked ON leads (assigned_user_id) WHERE next_batch_parked = TRUE;
 `);
 if (_callNotesMigration && typeof _callNotesMigration.catch === 'function') {
   _callNotesMigration.catch(err => console.error('[Migration] lead_call_notes error:', err.message));

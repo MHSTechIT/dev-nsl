@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import Toast from '../components/Toast';
+import ReassignDistributionModal from '../admin/ReassignDistributionModal';
 
 /* ──────────────────────────────────────────────────────────────────────────
    Caller Workload — admin view of how many leads each caller has on their
@@ -24,9 +25,6 @@ export default function CallerWorkloadView({ token }) {
   const [error, setError]       = useState('');
   const [toast, setToast]       = useState('');
   const [reassigning, setReassigning] = useState(null);   // { fromCaller, scope, total }
-  // Per-destination allocations: { [callerId]: { ticked: bool, count: number } }
-  const [allocs, setAllocs]     = useState({});
-  const [submitting, setSubmitting] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -50,85 +48,14 @@ export default function CallerWorkloadView({ token }) {
   function openReassign(fromCaller, scope) {
     const total = scope === 'followups_for_date' ? fromCaller.followups_for_date : fromCaller.total_open;
     setReassigning({ fromCaller, scope, total });
-    setAllocs({});
   }
-  function closeReassign() { setReassigning(null); setAllocs({}); }
+  function closeReassign() { setReassigning(null); }
 
-  function toggleDest(callerId) {
-    setAllocs(prev => {
-      const cur = prev[callerId];
-      if (cur?.ticked) {
-        const { [callerId]: _, ...rest } = prev;
-        return rest;
-      }
-      return { ...prev, [callerId]: { ticked: true, count: 0 } };
-    });
-  }
-  function setCount(callerId, raw) {
-    const n = Math.max(0, Math.min(reassigning?.total ?? 0, parseInt(raw, 10) || 0));
-    setAllocs(prev => ({ ...prev, [callerId]: { ticked: true, count: n } }));
-  }
-  // Even split across all ticked teammates, with remainder distributed to the
-  // first few rows so totals always sum to the source total.
-  function autoAssign() {
-    if (!reassigning) return;
-    const tickedIds = Object.entries(allocs).filter(([_, a]) => a.ticked).map(([id]) => id);
-    if (tickedIds.length === 0) return;
-    const total = reassigning.total;
-    const base = Math.floor(total / tickedIds.length);
-    const remainder = total % tickedIds.length;
-    const next = { ...allocs };
-    tickedIds.forEach((id, i) => {
-      next[id] = { ticked: true, count: base + (i < remainder ? 1 : 0) };
-    });
-    setAllocs(next);
-  }
-
-  const activeOthers = callers.filter(c => c.is_active && c.id !== reassigning?.fromCaller?.id);
-  const allocatedTotal = Object.values(allocs).reduce((s, a) => s + (a.count || 0), 0);
-  const remaining = (reassigning?.total ?? 0) - allocatedTotal;
-  const tickedCount = Object.values(allocs).filter(a => a.ticked).length;
-  const allTickedHaveCount = Object.values(allocs).every(a => !a.ticked || a.count >= 1);
-  const canSubmit = !!reassigning
-    && tickedCount > 0
-    && allocatedTotal >= 1
-    && allocatedTotal <= reassigning.total
-    && allTickedHaveCount;
-
-  async function confirmReassign() {
-    if (!canSubmit) return;
-    setSubmitting(true);
-    try {
-      const distribution = Object.entries(allocs)
-        .filter(([_, a]) => a.ticked && a.count >= 1)
-        .map(([to_caller_id, a]) => ({ to_caller_id, count: a.count }));
-      const body = {
-        from_caller_id: reassigning.fromCaller.id,
-        scope: reassigning.scope,
-        distribution,
-      };
-      if (reassigning.scope === 'followups_for_date') body.date = date;
-      const res = await fetch('/api/admin/leads/reassign', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed.');
-      // Build toast like "Moved 99 leads → dhana 50, keerthi 30, prasana 19"
-      const nameById = Object.fromEntries(callers.map(c => [c.id, c.full_name]));
-      const breakdown = distribution.map(d => `${nameById[d.to_caller_id] || '?'} ${d.count}`).join(', ');
-      const stayed = data.remaining > 0
-        ? ` (${data.remaining} stay with ${reassigning.fromCaller.full_name})`
-        : '';
-      setToast(`Moved ${data.moved} lead${data.moved === 1 ? '' : 's'} → ${breakdown}${stayed}`);
-      closeReassign();
-      load();
-    } catch (e) {
-      setToast(e.message);
-    } finally {
-      setSubmitting(false);
-    }
+  function handleMoved({ moved, remaining, breakdown, fromName }) {
+    const stayed = remaining > 0 ? ` (${remaining} stay with ${fromName})` : '';
+    setToast(`Moved ${moved} lead${moved === 1 ? '' : 's'} → ${breakdown}${stayed}`);
+    closeReassign();
+    load();
   }
 
   return (
@@ -227,145 +154,18 @@ export default function CallerWorkloadView({ token }) {
         )}
       </div>
 
-      {/* Reassign modal — distribute custom counts across multiple callers */}
+      {/* Reassign modal — shared component (also used by Sales Performance) */}
       {reassigning && (
-        <div onClick={closeReassign} style={{
-          position: 'fixed', inset: 0, background: 'rgba(15,0,40,0.45)', backdropFilter: 'blur(4px)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, zIndex: 100,
-        }}>
-          <div onClick={e => e.stopPropagation()} style={{
-            background: '#fff', borderRadius: 16, padding: 24, maxWidth: 560, width: '100%',
-            maxHeight: '90vh', display: 'flex', flexDirection: 'column',
-            fontFamily: 'Outfit,sans-serif', boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
-          }}>
-            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 6 }}>
-              <h3 style={{ margin: 0, color: '#3B0764', fontSize: '1.05rem', fontWeight: 700 }}>
-                {reassigning.scope === 'all_open' ? 'Move all open leads' : 'Move date follow-ups'}
-              </h3>
-              <button
-                onClick={autoAssign}
-                disabled={tickedCount === 0}
-                title={tickedCount === 0 ? 'Tick at least one teammate first' : `Split ${reassigning.total} evenly across ${tickedCount} teammate${tickedCount === 1 ? '' : 's'}`}
-                style={{
-                  padding: '6px 12px', borderRadius: 8, border: 'none',
-                  background: tickedCount === 0 ? 'rgba(91,33,182,0.15)' : 'linear-gradient(135deg,#7C3AED,#5B21B6)',
-                  color: '#fff', fontFamily: 'Outfit,sans-serif', fontWeight: 700, fontSize: '0.78rem',
-                  cursor: tickedCount === 0 ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap',
-                  display: 'inline-flex', alignItems: 'center', gap: 5,
-                  boxShadow: tickedCount === 0 ? 'none' : '0 2px 8px rgba(91,33,182,0.30)',
-                }}
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
-                  <polyline points="7.5 4.21 12 6.81 16.5 4.21"/><polyline points="7.5 19.79 7.5 14.6 3 12"/><polyline points="21 12 16.5 14.6 16.5 19.79"/>
-                </svg>
-                Auto Assign
-              </button>
-            </div>
-            <p style={{ margin: '0 0 14px', fontSize: '0.84rem', color: 'rgba(91,33,182,0.70)' }}>
-              Distributing <strong>{reassigning.total} lead{reassigning.total === 1 ? '' : 's'}</strong>
-              {' '}from <strong>{reassigning.fromCaller.full_name}</strong>
-              {reassigning.scope === 'followups_for_date' && <> scheduled for <strong>{date}</strong></>}.
-              Tick teammates, then either type counts or click <strong>Auto Assign</strong> to split evenly.
-            </p>
-
-            {/* Destination list */}
-            <div style={{
-              flex: '1 1 auto', minHeight: 0, overflowY: 'auto',
-              border: '1px solid rgba(209,196,240,0.6)', borderRadius: 10,
-              padding: 4, marginBottom: 14,
-            }}>
-              {activeOthers.length === 0 ? (
-                <div style={{ padding: 20, textAlign: 'center', color: 'rgba(91,33,182,0.55)', fontSize: '0.85rem' }}>
-                  No other active callers available.
-                </div>
-              ) : activeOthers.map(c => {
-                const a = allocs[c.id];
-                const ticked = !!a?.ticked;
-                const roleB = ROLE_BADGE[c.role] || { bg: '#EDE9FE', fg: '#5B21B6', label: c.role };
-                return (
-                  <div key={c.id} style={{
-                    display: 'flex', alignItems: 'center', gap: 10,
-                    padding: '8px 10px', borderRadius: 8,
-                    background: ticked ? 'rgba(91,33,182,0.06)' : 'transparent',
-                  }}>
-                    <input
-                      type="checkbox"
-                      checked={ticked}
-                      onChange={() => toggleDest(c.id)}
-                      style={{ width: 16, height: 16, accentColor: '#5B21B6', cursor: 'pointer' }}
-                    />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                        <span style={{ fontWeight: 600, color: '#3B0764', fontSize: '0.88rem' }}>{c.full_name}</span>
-                        <span style={{ display: 'inline-block', padding: '2px 7px', borderRadius: 50, fontSize: '0.62rem', fontWeight: 700, background: roleB.bg, color: roleB.fg }}>{roleB.label}</span>
-                      </div>
-                      <div style={{ fontSize: '0.70rem', color: 'rgba(91,33,182,0.55)' }}>
-                        {c.total_open} currently open
-                      </div>
-                    </div>
-                    <input
-                      type="number"
-                      min="0"
-                      max={reassigning.total}
-                      value={ticked ? (a.count || 0) : ''}
-                      placeholder="0"
-                      disabled={!ticked}
-                      onChange={e => setCount(c.id, e.target.value)}
-                      onFocus={e => e.target.select()}
-                      style={{
-                        width: 80, height: 32, padding: '0 8px',
-                        borderRadius: 8, border: '1px solid rgba(209,196,240,0.7)',
-                        background: ticked ? '#fff' : 'rgba(237,234,248,0.5)',
-                        fontFamily: 'ui-monospace, monospace', fontSize: '0.86rem',
-                        textAlign: 'right', color: '#3B0764',
-                        cursor: ticked ? 'text' : 'not-allowed',
-                      }}
-                    />
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Live total */}
-            <div style={{
-              padding: '10px 14px', borderRadius: 10, marginBottom: 14,
-              background: canSubmit ? 'rgba(5,150,105,0.10)' : 'rgba(220,38,38,0.08)',
-              border: `1px solid ${canSubmit ? 'rgba(5,150,105,0.30)' : 'rgba(220,38,38,0.25)'}`,
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10,
-              fontSize: '0.84rem', fontWeight: 600,
-            }}>
-              <span style={{ color: canSubmit ? '#047857' : '#B91C1C' }}>
-                {canSubmit
-                  ? remaining > 0
-                    ? `✓ Distributing ${allocatedTotal} / ${reassigning.total} — ${remaining} will stay with ${reassigning.fromCaller.full_name}`
-                    : `✓ Distributing ${allocatedTotal} / ${reassigning.total} leads`
-                  : tickedCount === 0
-                    ? `Pick at least one teammate (${reassigning.total} leads available)`
-                    : allocatedTotal === 0
-                      ? `Enter a count for at least one teammate`
-                      : remaining < 0
-                        ? `${allocatedTotal} / ${reassigning.total} — over by ${-remaining}`
-                        : `${allocatedTotal} / ${reassigning.total}`
-                }
-              </span>
-            </div>
-
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <button onClick={closeReassign} disabled={submitting} style={{
-                padding: '8px 14px', borderRadius: 8, border: '1px solid rgba(91,33,182,0.20)',
-                background: '#fff', color: '#5B21B6', fontWeight: 600, fontSize: '0.84rem',
-                cursor: submitting ? 'not-allowed' : 'pointer',
-              }}>Cancel</button>
-              <button onClick={confirmReassign} disabled={!canSubmit || submitting} style={{
-                padding: '8px 14px', borderRadius: 8, border: 'none',
-                background: canSubmit ? '#5B21B6' : 'rgba(91,33,182,0.30)', color: '#fff',
-                fontWeight: 700, fontSize: '0.84rem',
-                cursor: (canSubmit && !submitting) ? 'pointer' : 'not-allowed',
-              }}>{submitting ? 'Moving…' : 'Reassign'}</button>
-            </div>
-          </div>
-        </div>
+        <ReassignDistributionModal
+          fromCaller={reassigning.fromCaller}
+          scope={reassigning.scope}
+          date={date}
+          total={reassigning.total}
+          eligibleCallers={callers}
+          token={token}
+          onClose={closeReassign}
+          onMoved={handleMoved}
+        />
       )}
     </div>
   );

@@ -14,9 +14,23 @@ const tataInboundSync = require('../utils/tataInboundSync');
 
 router.use(callerAuth);
 
-/* ── GET /api/caller/me ── */
-router.get('/me', (req, res) => {
-  res.json({ caller: req.caller });
+/* ── GET /api/caller/me ──
+   Returns the JWT payload PLUS the live is_active flag. The caller frontend
+   uses is_active to show a blocking "paused by admin" overlay; the JWT alone
+   can't be trusted for that because admin can flip it mid-session. */
+router.get('/me', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT is_active FROM crm_users WHERE id = $1',
+      [req.caller.id]
+    );
+    const isActive = rows[0]?.is_active !== false;  // default to active if row vanished
+    res.json({ caller: { ...req.caller, is_active: isActive } });
+  } catch (err) {
+    console.error('caller/me error:', err.message);
+    // Fall back to JWT-only payload so an outage doesn't lock callers out.
+    res.json({ caller: { ...req.caller, is_active: true } });
+  }
 });
 
 /* ── GET /api/caller/leads ──
@@ -28,6 +42,7 @@ const LEAD_SELECT = `
          l.assigned_user_id, l.assigned_at, l.created_at,
          l.last_note_outcome, l.last_note_at, l.follow_up_at, l.completed_at,
          l.last_note_interested,
+         l.next_batch_parked, l.next_batch_parked_at,
          w.name AS webinar_name,
          latest_call.id                   AS last_call_id,
          latest_call.status               AS last_call_status,
@@ -59,14 +74,78 @@ const LEAD_SELECT = `
          latest_note.follow_up_at             AS last_note_follow_up_at
     FROM leads l
     LEFT JOIN webinars w ON w.id = l.webinar_id
+    -- Latest-call aggregation. Tata fragments a single click-to-call into
+    -- multiple "calls" rows (one per leg, each with its own provider_call_id).
+    -- The recording webhook lands on whichever fragment Tata happens to attach
+    -- it to — often NOT the row with the latest started_at, which may carry
+    -- status='failed' / null duration / null recording. Picking that fragment
+    -- alone makes the completed-lead card show "failed / — / No recording"
+    -- even when the call was answered and recorded.
+    --
+    -- Solution: gather the most-recent 6 rows for this lead, scope to a
+    -- ~30-min "session" window around the latest one (so a previous day's
+    -- call doesn't leak into today's row), and pick the best value for each
+    -- field across those rows — same approach the in-call modal uses
+    -- client-side (LeadCallNoteModal.jsx polling merge).
     LEFT JOIN LATERAL (
-      SELECT id, status, duration_sec, recording_url, started_at,
-             agent_answered_at, customer_answered_at, customer_missed_at,
-             ended_at, hangup_by
-        FROM calls c
-       WHERE c.lead_id = l.id
-       ORDER BY c.started_at DESC
-       LIMIT 1
+      WITH recent AS (
+        SELECT id, status, duration_sec, recording_url, started_at,
+               agent_answered_at, customer_answered_at, customer_missed_at,
+               ended_at, hangup_by
+          FROM calls c
+         WHERE c.lead_id = l.id
+         ORDER BY c.started_at DESC
+         LIMIT 6
+      ),
+      session AS (
+        SELECT * FROM recent
+         WHERE started_at >= (SELECT MAX(started_at) FROM recent) - INTERVAL '30 minutes'
+      )
+      SELECT
+        -- id: prefer the fragment that actually holds the recording (so the
+        -- /api/caller/recordings/:id lookup hits a row with recording_url).
+        COALESCE(
+          (SELECT id FROM session WHERE recording_url IS NOT NULL
+             ORDER BY started_at DESC LIMIT 1),
+          (SELECT id FROM session ORDER BY started_at DESC LIMIT 1)
+        ) AS id,
+        -- status: if any fragment has an "answered" signal (customer picked,
+        -- duration > 0, or a recording landed), the call effectively ended
+        -- normally — surface 'ended' instead of whatever the latest fragment
+        -- happens to carry. Otherwise fall back to the latest row's status.
+        COALESCE(
+          (SELECT 'ended' WHERE EXISTS (
+             SELECT 1 FROM session
+              WHERE recording_url IS NOT NULL
+                 OR customer_answered_at IS NOT NULL
+                 OR (duration_sec IS NOT NULL AND duration_sec > 0)
+          )),
+          (SELECT status FROM session ORDER BY started_at DESC LIMIT 1)
+        ) AS status,
+        (SELECT duration_sec FROM session
+           WHERE duration_sec IS NOT NULL AND duration_sec > 0
+           ORDER BY started_at DESC LIMIT 1) AS duration_sec,
+        (SELECT recording_url FROM session
+           WHERE recording_url IS NOT NULL
+           ORDER BY started_at DESC LIMIT 1) AS recording_url,
+        -- started_at: earliest fragment in the session — that's when the
+        -- call actually began, not when the last leg-row was created.
+        (SELECT MIN(started_at) FROM session) AS started_at,
+        (SELECT agent_answered_at FROM session
+           WHERE agent_answered_at IS NOT NULL
+           ORDER BY started_at DESC LIMIT 1) AS agent_answered_at,
+        (SELECT customer_answered_at FROM session
+           WHERE customer_answered_at IS NOT NULL
+           ORDER BY started_at DESC LIMIT 1) AS customer_answered_at,
+        (SELECT customer_missed_at FROM session
+           WHERE customer_missed_at IS NOT NULL
+           ORDER BY started_at DESC LIMIT 1) AS customer_missed_at,
+        (SELECT ended_at FROM session
+           WHERE ended_at IS NOT NULL
+           ORDER BY started_at DESC LIMIT 1) AS ended_at,
+        (SELECT hangup_by FROM session
+           WHERE hangup_by IS NOT NULL
+           ORDER BY started_at DESC LIMIT 1) AS hangup_by
     ) latest_call ON TRUE
     LEFT JOIN LATERAL (
       SELECT id, sugar_confirmation, confirmed_range, range_for,
@@ -86,6 +165,7 @@ router.get('/leads', async (req, res) => {
     const { rows } = await pool.query(
       `${LEAD_SELECT}
         WHERE l.assigned_user_id = $1
+          AND l.next_batch_parked = FALSE
           AND (
             l.last_note_outcome IS NULL
             OR (l.last_note_outcome = 'follow_up' AND l.follow_up_at <= NOW())
@@ -198,12 +278,14 @@ router.post('/leads/reopen', async (req, res) => {
 });
 
 /* ── GET /api/caller/leads/completed ──
-   Completed leads + scheduled-but-not-yet-due follow-ups for this caller. */
+   Completed leads + scheduled-but-not-yet-due follow-ups for this caller.
+   Excludes leads parked in the Next-Batch bucket — those have their own page. */
 router.get('/leads/completed', async (req, res) => {
   try {
     const { rows } = await pool.query(
       `${LEAD_SELECT}
         WHERE l.assigned_user_id = $1
+          AND l.next_batch_parked = FALSE
           AND (
             l.last_note_outcome IN ('completed','not_interested')
             OR (l.last_note_outcome = 'follow_up' AND l.follow_up_at > NOW())
@@ -215,6 +297,26 @@ router.get('/leads/completed', async (req, res) => {
   } catch (err) {
     console.error('caller/leads/completed error:', err.message);
     res.status(500).json({ error: 'Failed to fetch completed leads' });
+  }
+});
+
+/* ── GET /api/caller/leads/next-batch ──
+   Leads the caller parked by answering Q14 "Next Batch Joining" with Yes.
+   They sit here until the admin starts a new batch (updates next_webinar_at),
+   at which point routes/admin.js promotes them back to /leads as follow-ups. */
+router.get('/leads/next-batch', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `${LEAD_SELECT}
+        WHERE l.assigned_user_id = $1
+          AND l.next_batch_parked = TRUE
+        ORDER BY l.next_batch_parked_at DESC NULLS LAST, l.last_note_at DESC NULLS LAST`,
+      [req.caller.id]
+    );
+    res.json({ leads: rows, total: rows.length });
+  } catch (err) {
+    console.error('caller/leads/next-batch error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch next-batch leads' });
   }
 });
 
@@ -306,7 +408,11 @@ router.post('/leads/:id/note', async (req, res) => {
     // Re-asserts assigned_user_id in WHERE to close the TOCTOU window between
     // the ownership SELECT above and this UPDATE — a concurrent reassignment
     // would otherwise let this caller mutate a lead they no longer own.
+    // If the caller answered Q14 (next_batch_joining) with Yes, park the lead
+    // in the Next-Batch bucket — it disappears from Assigned/Completed until
+    // admin starts a new batch.
     const cleanName = typeof full_name === 'string' ? full_name.trim() : '';
+    const parkForNextBatch = next_batch_joining === 'yes';
     await client.query(
       `UPDATE leads
           SET last_note_outcome     = $2,
@@ -314,7 +420,9 @@ router.post('/leads/:id/note', async (req, res) => {
               follow_up_at          = $3,
               completed_at          = CASE WHEN $2 IN ('completed','not_interested') THEN NOW() ELSE NULL END,
               last_note_interested  = $4,
-              full_name             = COALESCE(NULLIF($5, ''), full_name)
+              full_name             = COALESCE(NULLIF($5, ''), full_name),
+              next_batch_parked     = CASE WHEN $7 THEN TRUE  ELSE next_batch_parked    END,
+              next_batch_parked_at  = CASE WHEN $7 THEN NOW() ELSE next_batch_parked_at END
         WHERE id = $1
           AND assigned_user_id = $6`,
       [
@@ -324,6 +432,7 @@ router.post('/leads/:id/note', async (req, res) => {
         interested === 'yes' || interested === 'no' ? interested : null,
         cleanName,
         req.caller.id,
+        parkForNextBatch,
       ]
     );
 

@@ -7,6 +7,7 @@ const { adminAuth }                = require('../middleware/adminAuth');
 const { getPassword, writeConfig } = require('../utils/adminConfig');
 const cache = require('../utils/webinarConfigCache');
 const { broadcast } = require('../utils/sseClients');
+const callerSse = require('../utils/callerSse');
 const { syncLeadsToSheet } = require('../utils/leadsSheetSync');
 const { rotateLink }       = require('../utils/linkRotation');
 const { nextWebinarName, nextUpcomingWebinarName } = require('../utils/webinarName');
@@ -95,6 +96,19 @@ router.put('/webinar-config', configValidators, async (req, res) => {
   const values = keys.map(k => updates[k]);
 
   try {
+    // Snapshot the previous next_webinar_at BEFORE we apply the update so we
+    // can tell whether the caller actually started a NEW batch (cutover moved
+    // forward in time) — that's the trigger that promotes parked Next-Batch
+    // leads back to their callers' Assigned queue as follow-ups.
+    let prevNextWebinarAt = null;
+    if (updates.next_webinar_at !== undefined) {
+      const { rows: prev } = await pool.query(
+        'SELECT next_webinar_at FROM webinar_config WHERE source = $1',
+        [source]
+      );
+      prevNextWebinarAt = prev[0]?.next_webinar_at || null;
+    }
+
     values.push(source);
     await pool.query(
       `UPDATE webinar_config SET ${setClause} WHERE source = $${values.length}`,
@@ -111,6 +125,45 @@ router.put('/webinar-config', configValidators, async (req, res) => {
       const fresh = { ...rows[0] };
       cache.set(fresh, source);
       broadcast(fresh, source);
+    }
+
+    // Promote parked "Next Batch" leads when the caller schedules a fresh
+    // batch — i.e. next_webinar_at changed AND the new value is strictly
+    // later than the previous value (a true "new batch" cutover, not just a
+    // minor edit / earlier reschedule). Each promoted lead becomes a
+    // follow-up due NOW so it sits at the top of its original caller's
+    // Assigned page. SSE pushes the row so the caller's tab refreshes live.
+    if (updates.next_webinar_at !== undefined) {
+      const newAt = new Date(updates.next_webinar_at);
+      const prevAt = prevNextWebinarAt ? new Date(prevNextWebinarAt) : null;
+      const isNewBatch = !prevAt || newAt.getTime() > prevAt.getTime();
+      if (isNewBatch) {
+        try {
+          const { rows: promoted } = await pool.query(
+            `UPDATE leads
+                SET next_batch_parked     = FALSE,
+                    next_batch_parked_at  = NULL,
+                    last_note_outcome     = 'follow_up',
+                    follow_up_at          = NOW(),
+                    last_note_at          = NOW()
+              WHERE next_batch_parked = TRUE
+              RETURNING id, assigned_user_id`
+          );
+          for (const r of promoted) {
+            if (r.assigned_user_id) {
+              callerSse.pushTo(r.assigned_user_id, {
+                type: 'lead.assigned',
+                lead: { id: r.id, promoted_from: 'next_batch' },
+              });
+            }
+          }
+          if (promoted.length > 0) {
+            console.log(`[admin] Next-Batch promoted ${promoted.length} leads on new-batch cutover (source=${source})`);
+          }
+        } catch (promoteErr) {
+          console.error('[admin] Next-Batch promote error:', promoteErr.message);
+        }
+      }
     }
 
     // Sync webinar sessions for this source — UPDATE existing row, only INSERT if none exists
@@ -792,6 +845,7 @@ const crmUserPatchValidators = [
   body('tata_agent_number').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 30 }),
   body('tata_caller_id').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 30 }),
   body('tata_smartflo_api_key').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 1000 }),
+  body('is_active').optional().isBoolean().withMessage('is_active must be a boolean.'),
 ];
 
 router.patch('/crm-users/:id', crmUserPatchValidators, async (req, res) => {
@@ -805,6 +859,9 @@ router.patch('/crm-users/:id', crmUserPatchValidators, async (req, res) => {
     'full_name', 'email', 'phone', 'role',
     'tata_extension', 'tata_account_type', 'tata_agent_number', 'tata_caller_id',
     'tata_smartflo_api_key',
+    // is_active doubles as the "paused" flag — leadAssigner.js already skips
+    // callers where is_active = FALSE; the Sales Performance kebab toggles it.
+    'is_active',
   ];
   const tataKeys = new Set(['tata_extension', 'tata_account_type', 'tata_agent_number', 'tata_caller_id', 'tata_smartflo_api_key']);
   const updates = {};
@@ -815,6 +872,8 @@ router.patch('/crm-users/:id', crmUserPatchValidators, async (req, res) => {
         updates[key] = String(raw).trim().toLowerCase();
       } else if (tataKeys.has(key)) {
         updates[key] = raw === null || raw === '' ? null : String(raw).trim() || null;
+      } else if (key === 'is_active') {
+        updates[key] = !!raw;
       } else if (typeof raw === 'string') {
         updates[key] = raw.trim();
       } else {
@@ -852,6 +911,18 @@ router.patch('/crm-users/:id', crmUserPatchValidators, async (req, res) => {
       values
     );
     if (rows.length === 0) return res.status(404).json({ error: 'User not found.' });
+    // If is_active was in this PATCH, push an SSE so the caller's open tab
+    // shows / hides the "paused by admin" overlay without a manual refresh.
+    if (Object.prototype.hasOwnProperty.call(updates, 'is_active')) {
+      try {
+        callerSse.pushTo(id, {
+          type: updates.is_active ? 'caller.resumed' : 'caller.paused',
+          is_active: !!updates.is_active,
+        });
+      } catch (sseErr) {
+        console.error('[admin] caller-paused SSE push error:', sseErr.message);
+      }
+    }
     res.json({ user: rows[0] });
   } catch (err) {
     if (err.code === '23505') {
@@ -1336,10 +1407,12 @@ router.get('/sales-performance', async (req, res) => {
                $3::timestamptz AS p_start, $4::timestamptz AS p_end
       ),
       caller_base AS (
-        SELECT u.id AS caller_id, u.full_name AS name, u.role
+        -- Include paused (is_active = FALSE) callers in the result so the
+        -- admin's Sales Performance kebab can show a Paused pill and a
+        -- Resume action. The frontend reads is_active per row.
+        SELECT u.id AS caller_id, u.full_name AS name, u.role, u.is_active
           FROM crm_users u
-         WHERE u.is_active = TRUE
-           AND u.role IN ('junior_caller','senior_caller','team_leader','manager')
+         WHERE u.role IN ('junior_caller','senior_caller','team_leader','manager')
       ),
       lead_agg AS (
         SELECT l.assigned_user_id AS caller_id,
@@ -1348,6 +1421,10 @@ router.get('/sales-performance', async (req, res) => {
                COUNT(*) FILTER (WHERE l.lead_score IN (2,3) AND l.assigned_at >= w.d_start AND l.assigned_at <= w.d_end)::int AS warm,
                COUNT(*) FILTER (WHERE l.last_note_at IS NOT NULL AND l.last_note_at >= w.d_start AND l.last_note_at <= w.d_end AND l.assigned_at >= w.d_start AND l.assigned_at <= w.d_end)::int AS touched,
                COUNT(*) FILTER (WHERE l.last_note_at IS NULL AND l.assigned_at < NOW() - INTERVAL '24 hours')::int AS untouched_aged,
+               -- Follow-ups: leads currently parked with outcome=follow_up,
+               -- regardless of when the follow_up was scheduled. Reflects
+               -- "how many follow-ups is this caller still on the hook for".
+               COUNT(*) FILTER (WHERE l.last_note_outcome = 'follow_up')::int AS followups,
                COUNT(*) FILTER (WHERE l.last_note_outcome = 'completed' AND l.completed_at >= w.d_start AND l.completed_at <= w.d_end)::int AS enrolled
           FROM leads l CROSS JOIN w
          WHERE l.assigned_user_id IS NOT NULL
@@ -1382,13 +1459,14 @@ router.get('/sales-performance', async (req, res) => {
            AND c.started_at >= w.p_start AND c.started_at <= w.p_end
          GROUP BY c.caller_id
       )
-      SELECT cb.caller_id, cb.name, cb.role,
+      SELECT cb.caller_id, cb.name, cb.role, cb.is_active,
              COALESCE(la.assigned, 0)            AS assigned,
              COALESCE(la.hot, 0)                 AS hot,
              COALESCE(la.warm, 0)                AS warm,
              COALESCE(la.touched, 0)             AS touched,
              GREATEST(COALESCE(la.assigned, 0) - COALESCE(la.touched, 0), 0) AS untouched,
              COALESCE(la.untouched_aged, 0)      AS untouched_aged,
+             COALESCE(la.followups, 0)           AS followups,
              COALESCE(ca.total_calls, 0)         AS total_calls,
              COALESCE(ca.incoming, 0)            AS incoming,
              COALESCE(ca.outgoing, 0)            AS outgoing,
@@ -1432,6 +1510,7 @@ router.get('/sales-performance', async (req, res) => {
       touched:             sum('touched'),
       untouched:           sum('untouched'),
       untouched_aged:      sum('untouched_aged'),
+      followups:           sum('followups'),
       total_calls:         teamCalls,
       incoming:            sum('incoming'),
       outgoing:            sum('outgoing'),

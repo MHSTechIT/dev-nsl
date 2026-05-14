@@ -57,14 +57,44 @@ export default function AssignedLeadsModule({ jwt, externalHighlightId }) {
 
   /* Break picker — opened when caller hits Stop in the cooldown card.
        breakStep    : null | 'choose' | 'other'   (modal flow)
-       breakInfo    : null | { reason, minutes, message?, endsAt }  (active break)
+       breakInfo    : null | { reason, minutes, message?, endsAt, startedAt }
+                      (active break — persisted to localStorage so it survives
+                       reloads / logouts / browser restarts. Only ends when
+                       the caller presses Start Auto-Call.)
        otherMessage / otherMinutes — fields inside the "other" step       */
+  const breakStorageKey = (() => {
+    try {
+      const [, payload] = (jwt || '').split('.');
+      const uid = JSON.parse(atob(payload || ''))?.user_id;
+      return uid ? `mhs_break_${uid}` : 'mhs_break_anon';
+    } catch { return 'mhs_break_anon'; }
+  })();
   const [breakStep, setBreakStep]       = useState(null);
-  const [breakInfo, setBreakInfo]       = useState(null);
+  const [breakInfo, setBreakInfo]       = useState(() => {
+    // Restore on mount — handles tab close / logout / PC restart.
+    try {
+      const raw = localStorage.getItem(breakStorageKey);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.endsAt === 'number') return parsed;
+    } catch { /* fall through to null */ }
+    return null;
+  });
   const [breakTimeLeft, setBreakTimeLeft] = useState(0);
+  const [breakElapsed,  setBreakElapsed]  = useState(0);
   const [otherMessage, setOtherMessage]   = useState('');
   const [otherMinutes, setOtherMinutes]   = useState(10);
   const breakTimerRef = useRef(null);
+
+  /* Inactivity guard for the "Stopping the auto-call?" card.
+     Each time the modal opens the caller has 10 s to pick a reason. If the
+     window expires we show an inline nudge and restart the countdown. After
+     3 consecutive expiries the auto-call is stopped silently — the caller
+     clearly stepped away from the desk. */
+  const [breakChooseLeft, setBreakChooseLeft] = useState(0);
+  const [breakChooseStrikes, setBreakChooseStrikes] = useState(0);
+  const breakChooseTimerRef    = useRef(null);
+  const breakChooseStrikesRef  = useRef(0);
 
   // Queue-end refill modal — pops once the auto-call queue drains so the
   // caller can refill the Assigned bucket from DNP or Missed Calls in one
@@ -109,6 +139,13 @@ export default function AssignedLeadsModule({ jwt, externalHighlightId }) {
     }
   }
 
+  function clearBreakChooseTimer() {
+    if (breakChooseTimerRef.current) {
+      clearInterval(breakChooseTimerRef.current);
+      breakChooseTimerRef.current = null;
+    }
+  }
+
   function stopAutoMode() {
     clearCooldownTimer();
     setAutoMode('off');
@@ -119,30 +156,74 @@ export default function AssignedLeadsModule({ jwt, externalHighlightId }) {
     setAutoError('');
   }
 
+  /* 10-s inactivity countdown for the break-picker card. Deadline-anchored
+     for the same StrictMode-safety reasons as the cooldown / advance timers.
+     On expiry: increment strike count; if < 3, restart for another 10 s with
+     an inline nudge visible; on the 3rd strike, stop auto-call and close
+     the modal. */
+  function startBreakChooseTimer() {
+    clearBreakChooseTimer();
+    const deadline = Date.now() + 10000;
+    const tick = () => {
+      const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+      setBreakChooseLeft(left);
+      if (left <= 0) {
+        clearBreakChooseTimer();
+        const next = breakChooseStrikesRef.current + 1;
+        breakChooseStrikesRef.current = next;
+        setBreakChooseStrikes(next);
+        if (next >= 3) {
+          setBreakStep(null);
+          stopAutoMode();
+        } else {
+          startBreakChooseTimer();
+        }
+      }
+    };
+    tick();  // paint "10" immediately
+    breakChooseTimerRef.current = setInterval(tick, 250);
+  }
+
   /* Stop the auto-call AND start a break with a countdown banner. The
      existing stopAutoMode() guarantees no further calls will trigger
      until the caller manually presses Start Auto-Call again. */
   function startBreak(reason, minutes, message = '') {
     stopAutoMode();
     const totalSec = Math.max(1, Math.round(minutes * 60));
-    setBreakInfo({
+    const now = Date.now();
+    const info = {
       reason,
       minutes,
       message,
-      endsAt: Date.now() + totalSec * 1000,
-    });
+      startedAt: now,
+      endsAt: now + totalSec * 1000,
+    };
+    setBreakInfo(info);
     setBreakTimeLeft(totalSec);
+    setBreakElapsed(0);
     setBreakStep(null);
     setOtherMessage('');
     setOtherMinutes(10);
+    try { localStorage.setItem(breakStorageKey, JSON.stringify(info)); } catch { /* quota / sandbox */ }
   }
-  function endBreak() {
+  /* End the break and (if possible) immediately kick off auto-call. Only
+     called from the in-modal "Start Auto-Call" button — there is no
+     standalone "End break" anywhere else, by design. */
+  function endBreakAndStartAutoCall() {
     setBreakInfo(null);
     setBreakTimeLeft(0);
+    setBreakElapsed(0);
     if (breakTimerRef.current) {
       clearInterval(breakTimerRef.current);
       breakTimerRef.current = null;
     }
+    try { localStorage.removeItem(breakStorageKey); } catch { /* sandbox */ }
+    if (leads.length) {
+      startAutoMode();
+    }
+    // If no leads loaded yet (e.g., right after a tab restore), the modal
+    // closes and the page's Start Auto-Call button takes over once leads
+    // arrive — the caller is back in normal manual mode.
   }
 
   /* Refill Assigned bucket from DNP or Missed Calls. Hits the new
@@ -177,17 +258,21 @@ export default function AssignedLeadsModule({ jwt, externalHighlightId }) {
     }
   }
 
-  /* Tick down the break countdown every second. */
+  /* Tick the break clock every second. After the allotted minutes are up the
+     remaining countdown stays at 0 but the elapsed timer keeps climbing —
+     the caller is still on (overrun) break until they press Start Auto-Call. */
   useEffect(() => {
     if (!breakInfo) return undefined;
-    breakTimerRef.current = setInterval(() => {
-      const remaining = Math.max(0, Math.round((breakInfo.endsAt - Date.now()) / 1000));
+    const update = () => {
+      const now = Date.now();
+      const remaining = Math.max(0, Math.round((breakInfo.endsAt - now) / 1000));
+      const startedAt = breakInfo.startedAt || (breakInfo.endsAt - breakInfo.minutes * 60 * 1000);
+      const elapsed   = Math.max(0, Math.round((now - startedAt) / 1000));
       setBreakTimeLeft(remaining);
-      if (remaining <= 0) {
-        clearInterval(breakTimerRef.current);
-        breakTimerRef.current = null;
-      }
-    }, 1000);
+      setBreakElapsed(elapsed);
+    };
+    update();  // paint once immediately on (re-)mount / restore
+    breakTimerRef.current = setInterval(update, 1000);
     return () => {
       if (breakTimerRef.current) clearInterval(breakTimerRef.current);
       breakTimerRef.current = null;
@@ -265,6 +350,24 @@ export default function AssignedLeadsModule({ jwt, externalHighlightId }) {
 
   // Clean up timer if module unmounts mid-cooldown
   useEffect(() => () => clearCooldownTimer(), []);
+
+  /* Drive the break-picker inactivity timer off the modal-step state.
+     Entering 'choose' resets strikes + starts the 10-s window. Leaving
+     it (any other step, including 'other' / null) tears the timer down. */
+  useEffect(() => {
+    if (breakStep === 'choose') {
+      breakChooseStrikesRef.current = 0;
+      setBreakChooseStrikes(0);
+      startBreakChooseTimer();
+    } else {
+      clearBreakChooseTimer();
+      setBreakChooseLeft(0);
+      setBreakChooseStrikes(0);
+      breakChooseStrikesRef.current = 0;
+    }
+    return () => clearBreakChooseTimer();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [breakStep]);
 
   /* When the shell asks us to highlight a lead (e.g. caller clicked an
      incoming-call toast), reflect it on the row and scroll into view. */
@@ -666,12 +769,39 @@ export default function AssignedLeadsModule({ jwt, externalHighlightId }) {
             width: '100%', maxWidth: 380, background: '#fff', borderRadius: 22,
             padding: '26px 22px', boxShadow: '0 24px 64px rgba(91,33,182,0.30)',
           }}>
-            <h3 style={{ margin: 0, fontWeight: 800, fontSize: '1.05rem', color: '#3B0764' }}>
-              Stopping the auto-call?
-            </h3>
-            <p style={{ margin: '4px 0 18px', fontSize: '0.80rem', color: 'rgba(91,33,182,0.65)' }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
+              <h3 style={{ margin: 0, fontWeight: 800, fontSize: '1.05rem', color: '#3B0764' }}>
+                Stopping the auto-call?
+              </h3>
+              {/* 10-s inactivity countdown — turns red below 4s as a nudge. */}
+              <span style={{
+                fontFamily: 'ui-monospace, monospace', fontWeight: 800,
+                fontSize: '0.86rem', padding: '4px 10px', borderRadius: 50,
+                background: breakChooseLeft <= 3
+                  ? 'rgba(220,38,38,0.12)' : 'rgba(91,33,182,0.10)',
+                color: breakChooseLeft <= 3 ? '#B91C1C' : '#5B21B6',
+                whiteSpace: 'nowrap',
+              }}>
+                00:{String(breakChooseLeft).padStart(2, '0')}
+              </span>
+            </div>
+            <p style={{ margin: '4px 0 14px', fontSize: '0.80rem', color: 'rgba(91,33,182,0.65)' }}>
               Pick a reason — your break time will be set automatically.
             </p>
+            {/* Inactivity nudge — appears after the 10-s window expires once.
+                Strike 3 stops auto-call silently, so this only renders for
+                strikes 1 and 2. */}
+            {breakChooseStrikes > 0 && breakChooseStrikes < 3 && (
+              <div style={{
+                marginBottom: 14, padding: '10px 14px', borderRadius: 8,
+                background: 'rgba(254,226,226,0.55)', border: '1px solid rgba(220,38,38,0.30)',
+                color: '#991B1B', fontSize: '0.80rem', fontWeight: 600,
+              }}>
+                Please select an option. {3 - breakChooseStrikes === 1
+                  ? 'Next miss stops auto-call.'
+                  : `${3 - breakChooseStrikes} chances left before auto-stop.`}
+              </div>
+            )}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <button
                 onClick={() => startBreak('Tea Break', 15)}
@@ -908,53 +1038,98 @@ export default function AssignedLeadsModule({ jwt, externalHighlightId }) {
         </div>
       )}
 
-      {/* ── Active break banner ── */}
-      {breakInfo && (
-        <div style={{
-          position: 'fixed', bottom: 20, left: '50%', transform: 'translateX(-50%)',
-          zIndex: 9400, background: '#fff', borderRadius: 14,
-          padding: '12px 16px', boxShadow: '0 12px 36px rgba(91,33,182,0.25)',
-          border: '1px solid rgba(91,33,182,0.15)',
-          fontFamily: 'Outfit, sans-serif',
-          display: 'flex', alignItems: 'center', gap: 14, minWidth: 280,
-        }}>
-          <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#3B0764', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-                On {breakInfo.reason}
-              </span>
-              <span style={{
-                fontSize: '0.68rem', fontWeight: 700,
-                color: breakTimeLeft > 0 ? '#5B21B6' : '#16A34A',
-                background: breakTimeLeft > 0 ? 'rgba(91,33,182,0.10)' : 'rgba(22,163,74,0.10)',
-                padding: '2px 8px', borderRadius: 50,
+      {/* ── Active break modal ──
+         Big centered card that blocks the page until the caller presses
+         Start Auto-Call. No End-break / Cancel — the only way out is to
+         resume calls. Survives reloads / logouts via localStorage. */}
+      {breakInfo && (() => {
+        const overrun = breakTimeLeft <= 0;
+        const fmt = (s) => `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+        return (
+          <div style={{
+            position: 'fixed', inset: 0, zIndex: 9700,
+            background: 'rgba(15,0,40,0.65)',
+            backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: '0 16px', fontFamily: 'Outfit, sans-serif',
+          }}>
+            <div style={{
+              width: '100%', maxWidth: 440, background: '#fff', borderRadius: 24,
+              padding: '36px 28px 28px',
+              boxShadow: '0 32px 80px rgba(91,33,182,0.40)',
+              textAlign: 'center',
+            }}>
+              <div style={{
+                display: 'inline-block', padding: '6px 14px', borderRadius: 50,
+                background: overrun ? 'rgba(220,38,38,0.12)' : 'rgba(91,33,182,0.10)',
+                color: overrun ? '#B91C1C' : '#5B21B6',
+                fontSize: '0.72rem', fontWeight: 800, letterSpacing: '0.08em',
+                textTransform: 'uppercase', marginBottom: 14,
               }}>
-                {breakTimeLeft > 0 ? `${Math.floor(breakTimeLeft / 60)}m ${String(breakTimeLeft % 60).padStart(2, '0')}s` : 'time up'}
-              </span>
-            </div>
-            {breakInfo.message && (
-              <div style={{ fontSize: '0.72rem', color: 'rgba(91,33,182,0.60)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {breakInfo.message}
+                On {breakInfo.reason}
               </div>
-            )}
-            <div style={{ fontSize: '0.68rem', color: 'rgba(91,33,182,0.55)', marginTop: 2 }}>
-              Auto-call paused — press <b>Start Auto-Call</b> to resume
+              <div style={{
+                fontFamily: 'ui-monospace, monospace',
+                fontWeight: 800, fontSize: '2.6rem',
+                color: overrun ? '#B91C1C' : '#3B0764',
+                lineHeight: 1.05, marginBottom: 6,
+              }}>
+                {overrun ? fmt(breakElapsed) : fmt(breakTimeLeft)}
+              </div>
+              <div style={{
+                fontSize: '0.78rem', fontWeight: 600,
+                color: overrun ? 'rgba(185,28,28,0.85)' : 'rgba(91,33,182,0.65)',
+                marginBottom: breakInfo.message ? 6 : 18,
+              }}>
+                {overrun
+                  ? `Break over · ${fmt(breakElapsed - breakInfo.minutes * 60)} overrun`
+                  : `of ${breakInfo.minutes} min · elapsed ${fmt(breakElapsed)}`}
+              </div>
+              {breakInfo.message && (
+                <div style={{
+                  fontSize: '0.80rem', color: 'rgba(91,33,182,0.70)',
+                  marginBottom: 18, padding: '8px 12px',
+                  background: 'rgba(237,234,248,0.50)', borderRadius: 8,
+                }}>
+                  {breakInfo.message}
+                </div>
+              )}
+              <div style={{
+                fontSize: '0.80rem', color: 'rgba(91,33,182,0.65)',
+                marginBottom: 20, lineHeight: 1.45,
+              }}>
+                Auto-call is paused. The break clock keeps running even if you
+                close this tab or sign out — only <b>Start Auto-Call</b> ends it.
+              </div>
+              <button
+                onClick={endBreakAndStartAutoCall}
+                disabled={!leads.length}
+                title={!leads.length ? 'Waiting for assigned leads to load…' : undefined}
+                style={{
+                  width: '100%', height: '3rem', borderRadius: 50, border: 'none',
+                  background: leads.length ? '#059669' : 'rgba(5,150,105,0.40)',
+                  color: '#fff', fontFamily: 'Outfit,sans-serif',
+                  fontWeight: 800, fontSize: '0.95rem',
+                  cursor: leads.length ? 'pointer' : 'not-allowed',
+                  boxShadow: leads.length ? '0 6px 18px rgba(5,150,105,0.35)' : 'none',
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                Start Auto-Call
+              </button>
+              {!leads.length && (
+                <div style={{
+                  marginTop: 10, fontSize: '0.72rem',
+                  color: 'rgba(91,33,182,0.55)',
+                }}>
+                  No assigned leads loaded yet — they'll appear once the page finishes loading.
+                </div>
+              )}
             </div>
           </div>
-          <button
-            onClick={endBreak}
-            style={{
-              padding: '6px 12px', height: '2.1rem', borderRadius: 8,
-              border: '1px solid rgba(91,33,182,0.20)',
-              background: '#fff', color: '#5B21B6',
-              fontFamily: 'Outfit, sans-serif', fontWeight: 600, fontSize: '0.78rem',
-              cursor: 'pointer', whiteSpace: 'nowrap',
-            }}
-          >
-            End break
-          </button>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

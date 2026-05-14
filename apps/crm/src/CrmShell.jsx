@@ -77,6 +77,17 @@ export default function CrmShell() {
   const [sidebarOpen, setSidebarOpen] = useState(false); // mobile drawer
   const [workspace, setWorkspace]   = useState(() => sessionStorage.getItem('mhs_crm_workspace') || 'meta');
   const [wsOpen, setWsOpen]         = useState(false);
+  /* Collapsed sidebar — clicking the brand row toggles between full (240px)
+     and rail (72px). Persisted across sessions. */
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => sessionStorage.getItem('mhs_crm_sidebar_collapsed') === '1'
+  );
+  useEffect(() => {
+    sessionStorage.setItem('mhs_crm_sidebar_collapsed', sidebarCollapsed ? '1' : '0');
+    // Close any open workspace dropdown when collapsing so its panel doesn't
+    // hang over the icon rail awkwardly.
+    if (sidebarCollapsed) setWsOpen(false);
+  }, [sidebarCollapsed]);
 
   useEffect(() => { sessionStorage.setItem('mhs_crm_workspace', workspace); }, [workspace]);
 
@@ -135,7 +146,8 @@ export default function CrmShell() {
       <aside
         className={`crm-sidebar ${sidebarOpen ? 'open' : ''}`}
         style={{
-          width: 240,
+          width: sidebarCollapsed ? 72 : 240,
+          transition: 'width 220ms ease',
           background: '#fff',
           borderRadius: 20,
           border: '1px solid rgba(209,196,240,0.40)',
@@ -149,22 +161,44 @@ export default function CrmShell() {
           overflow: 'hidden',
         }}
       >
-        {/* Brand */}
-        <div style={{ padding: '24px 20px 18px', borderBottom: '1px solid rgba(209,196,240,0.35)', display: 'flex', alignItems: 'center', gap: 12 }}>
+        {/* Brand — click to toggle collapsed/expanded */}
+        <button
+          type="button"
+          onClick={() => setSidebarCollapsed(c => !c)}
+          title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          style={{
+            padding: sidebarCollapsed ? '24px 0 18px' : '24px 20px 18px',
+            borderBottom: '1px solid rgba(209,196,240,0.35)',
+            border: 'none', borderRadius: 0,
+            background: 'transparent', cursor: 'pointer',
+            display: 'flex', alignItems: 'center',
+            gap: sidebarCollapsed ? 0 : 12,
+            justifyContent: sidebarCollapsed ? 'center' : 'flex-start',
+            width: '100%', textAlign: 'left',
+            transition: 'background 150ms, padding 220ms',
+          }}
+          onMouseEnter={e => e.currentTarget.style.background = 'rgba(91,33,182,0.04)'}
+          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+        >
           <img
             src="/favicon.png"
             alt="MHS"
             style={{ width: 40, height: 40, objectFit: 'contain', flexShrink: 0 }}
           />
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontWeight: 700, fontSize: '0.95rem', color: '#3B0764' }}>MHS CRM</div>
-            <div style={{ fontSize: '0.7rem', color: 'rgba(91,33,182,0.50)' }}>Admin Panel</div>
-          </div>
-        </div>
+          {!sidebarCollapsed && (
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontWeight: 700, fontSize: '0.95rem', color: '#3B0764' }}>MHS CRM</div>
+              <div style={{ fontSize: '0.7rem', color: 'rgba(91,33,182,0.50)' }}>Admin Panel</div>
+            </div>
+          )}
+        </button>
 
         {/* Module list */}
-        <nav style={{ padding: '14px 12px', flex: 1, display: 'flex', flexDirection: 'column', gap: 4, overflowY: 'auto', minHeight: 0 }}>
-          {/* Workspace dropdown (replaces the old "MODULES" label) */}
+        <nav style={{ padding: sidebarCollapsed ? '14px 6px' : '14px 12px', flex: 1, display: 'flex', flexDirection: 'column', gap: 4, overflowY: 'auto', minHeight: 0 }}>
+          {/* Workspace dropdown (hidden in collapsed mode — no room for the
+              label; users can expand if they need to switch workspaces). */}
+          {!sidebarCollapsed && (
           <div style={{ position: 'relative', margin: '4px 4px 8px' }} onMouseDown={e => e.stopPropagation()}>
             <button
               onClick={() => setWsOpen(o => !o)}
@@ -223,6 +257,7 @@ export default function CrmShell() {
               </div>
             )}
           </div>
+          )}
 
           {MODULES.map(m => {
             const isActive = activeModule === m.id;
@@ -231,9 +266,13 @@ export default function CrmShell() {
                 key={m.id}
                 onClick={() => { if (m.enabled) { setActive(m.id); setSidebarOpen(false); } }}
                 disabled={!m.enabled}
+                title={sidebarCollapsed ? m.label : undefined}
                 style={{
-                  display: 'flex', alignItems: 'center', gap: 12,
-                  padding: '10px 12px', borderRadius: 10, border: 'none',
+                  display: 'flex', alignItems: 'center',
+                  gap: sidebarCollapsed ? 0 : 12,
+                  justifyContent: sidebarCollapsed ? 'center' : 'flex-start',
+                  padding: sidebarCollapsed ? '12px 8px' : '10px 12px',
+                  borderRadius: 10, border: 'none',
                   background: isActive ? 'rgba(91,33,182,0.10)' : 'transparent',
                   color: isActive ? '#5B21B6' : 'rgba(59,7,100,0.78)',
                   fontFamily: 'Outfit, sans-serif',
@@ -242,7 +281,7 @@ export default function CrmShell() {
                   cursor: m.enabled ? 'pointer' : 'not-allowed',
                   opacity: m.enabled ? 1 : 0.45,
                   textAlign: 'left',
-                  transition: 'background 150ms',
+                  transition: 'background 150ms, gap 200ms, padding 200ms',
                   position: 'relative',
                 }}
                 onMouseEnter={e => { if (m.enabled && !isActive) e.currentTarget.style.background = 'rgba(91,33,182,0.05)'; }}
@@ -255,26 +294,30 @@ export default function CrmShell() {
                 <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 22, color: isActive ? '#5B21B6' : 'rgba(91,33,182,0.55)' }}>
                   {m.icon}
                 </span>
-                <span>{m.label}</span>
+                {!sidebarCollapsed && <span>{m.label}</span>}
               </button>
             );
           })}
         </nav>
 
         {/* Logout */}
-        <div style={{ padding: '12px 12px 18px', borderTop: '1px solid rgba(209,196,240,0.35)' }}>
+        <div style={{ padding: sidebarCollapsed ? '12px 6px 18px' : '12px 12px 18px', borderTop: '1px solid rgba(209,196,240,0.35)' }}>
           <button
             onClick={handleLogout}
+            title={sidebarCollapsed ? 'Sign Out' : undefined}
             style={{
               width: '100%',
-              display: 'flex', alignItems: 'center', gap: 10,
-              padding: '10px 12px', borderRadius: 10, border: 'none',
+              display: 'flex', alignItems: 'center',
+              gap: sidebarCollapsed ? 0 : 10,
+              justifyContent: sidebarCollapsed ? 'center' : 'flex-start',
+              padding: sidebarCollapsed ? '12px 8px' : '10px 12px',
+              borderRadius: 10, border: 'none',
               background: 'transparent',
               color: '#DC2626',
               fontFamily: 'Outfit,sans-serif', fontWeight: 600, fontSize: '0.86rem',
               cursor: 'pointer',
               textAlign: 'left',
-              transition: 'background 150ms',
+              transition: 'background 150ms, gap 200ms, padding 200ms',
             }}
             onMouseEnter={e => e.currentTarget.style.background = 'rgba(254,242,242,0.70)'}
             onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
@@ -284,7 +327,7 @@ export default function CrmShell() {
               <polyline points="16 17 21 12 16 7"/>
               <line x1="21" y1="12" x2="9" y2="12"/>
             </svg>
-            Sign Out
+            {!sidebarCollapsed && <span>Sign Out</span>}
           </button>
         </div>
       </aside>

@@ -5,6 +5,7 @@ import UntouchedLeadsModule    from './modules/UntouchedLeadsModule';
 import CompletedLeadsModule    from './modules/CompletedLeadsModule';
 import NotPickedLeadsModule    from './modules/NotPickedLeadsModule';
 import MissedCallsModule       from './modules/MissedCallsModule';
+import NextBatchModule         from './modules/NextBatchModule';
 import IncomingCallToast       from './components/IncomingCallToast';
 
 const PAGES = [
@@ -61,6 +62,19 @@ const PAGES = [
       </svg>
     ),
   },
+  {
+    id: 'next_batch',
+    label: 'Next Batch',
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+        <line x1="16" y1="2" x2="16" y2="6"/>
+        <line x1="8"  y1="2" x2="8"  y2="6"/>
+        <line x1="3"  y1="10" x2="21" y2="10"/>
+        <polyline points="9 16 11 18 15 14"/>
+      </svg>
+    ),
+  },
 ];
 
 const PAGE_TITLES = {
@@ -69,6 +83,7 @@ const PAGE_TITLES = {
   completed:    { title: 'Completed Leads',  subtitle: 'Leads you have already handled' },
   not_picked:   { title: 'Not Picked',       subtitle: "Calls that didn't connect" },
   missed_calls: { title: 'Missed Calls',     subtitle: "Customers who called you but weren't picked up" },
+  next_batch:   { title: 'Next Batch',       subtitle: "Parked here when Q14 was answered 'Yes' — promoted to Assigned when admin starts a new batch" },
 };
 
 export default function CallerShell({ callerName: nameProp, callerRole: roleProp }) {
@@ -81,6 +96,9 @@ export default function CallerShell({ callerName: nameProp, callerRole: roleProp
   const [showDropdown, setShowDropdown] = useState(false);
   const [externalHighlightId, setExternalHighlightId] = useState(null);
   const dropRef = useRef(null);
+  /* Pause state — live-tracked via /api/caller/me + SSE caller.paused / caller.resumed.
+     null = unknown (still loading), true = active, false = paused-by-admin. */
+  const [isActive, setIsActive] = useState(null);
 
   /* Toast → "Open lead" handler: jump to Assigned tab and ask the module
      to highlight the row. The module clears the highlight on its own timer. */
@@ -112,6 +130,37 @@ export default function CallerShell({ callerName: nameProp, callerRole: roleProp
     document.addEventListener('mousedown', handleClick);
     return () => document.removeEventListener('mousedown', handleClick);
   }, []);
+
+  /* Pause check — fetch /api/caller/me on mount and on any caller.paused /
+     caller.resumed SSE message. The overlay below renders when is_active is
+     explicitly false; null (still loading) renders nothing so we don't flash
+     it during the first paint. */
+  const jwtForEffect = user ? (sessionStorage.getItem('mhs_crm_token') || '') : '';
+  useEffect(() => {
+    if (!user || !jwtForEffect) return undefined;
+    let cancelled = false;
+    async function refresh() {
+      try {
+        const res = await fetch('/api/caller/me', {
+          headers: { Authorization: `Bearer ${jwtForEffect}` },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setIsActive(data?.caller?.is_active !== false);
+      } catch { /* network blips don't lock anyone out */ }
+    }
+    refresh();
+    const url = `/api/caller/leads/events?token=${encodeURIComponent(jwtForEffect)}`;
+    const es  = new EventSource(url);
+    es.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg?.type === 'caller.paused')  setIsActive(false);
+        if (msg?.type === 'caller.resumed') setIsActive(true);
+      } catch { /* ignore */ }
+    };
+    return () => { cancelled = true; es.close(); };
+  }, [user, jwtForEffect]);
 
   function handleLogout() {
     sessionStorage.removeItem('mhs_crm_user');
@@ -296,9 +345,50 @@ export default function CallerShell({ callerName: nameProp, callerRole: roleProp
       {activePage === 'completed'    && <CompletedLeadsModule jwt={jwt} />}
       {activePage === 'not_picked'   && <NotPickedLeadsModule jwt={jwt} />}
       {activePage === 'missed_calls' && <MissedCallsModule    jwt={jwt} />}
+      {activePage === 'next_batch'   && <NextBatchModule      jwt={jwt} />}
 
       {/* ── Floating incoming-call toasts (top-right, persists across tabs) ── */}
       <IncomingCallToast jwt={jwt} onOpenLead={handleOpenLead} />
+
+      {/* ── Paused-by-admin blocking overlay ──
+         Renders only when /api/caller/me reports is_active = false. No dismiss
+         button by design — the caller has to wait for admin to resume them.
+         z-index sits above every other modal (break-picker is 9700, this is
+         9900) so even an in-flight call modal can't be touched. */}
+      {isActive === false && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9900,
+          background: 'rgba(15,0,40,0.75)',
+          backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: '0 16px', fontFamily: 'Outfit, sans-serif',
+        }}>
+          <div style={{
+            width: '100%', maxWidth: 420, background: '#fff', borderRadius: 22,
+            padding: '32px 28px', textAlign: 'center',
+            boxShadow: '0 32px 80px rgba(15,0,40,0.50)',
+          }}>
+            <div style={{
+              width: 64, height: 64, margin: '0 auto 16px', borderRadius: '50%',
+              background: 'rgba(220,38,38,0.12)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}>
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="#DC2626">
+                <rect x="6" y="5" width="4" height="14"/>
+                <rect x="14" y="5" width="4" height="14"/>
+              </svg>
+            </div>
+            <h2 style={{ margin: 0, fontWeight: 800, fontSize: '1.18rem', color: '#3B0764' }}>
+              You're paused by admin
+            </h2>
+            <p style={{ margin: '8px 0 0', fontSize: '0.86rem', color: 'rgba(91,33,182,0.70)', lineHeight: 1.5 }}>
+              Your account has been temporarily paused. You can't make outbound
+              calls or receive new leads until admin resumes you. Please reach
+              out to your manager.
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -39,14 +39,24 @@ router.post('/calls/start', async (req, res) => {
       return res.status(403).json({ error: 'lead not assigned to you' });
     }
 
-    // Look up the caller's Smartflo profile (set per-user in Users page)
+    // Look up the caller's Smartflo profile (set per-user in Users page).
+    // is_active doubles as "paused by admin" — when an admin toggles Pause on
+    // the Sales Performance kebab, we set is_active = FALSE and refuse to
+    // dial. 423 Locked is the right semantic: the row exists but is
+    // intentionally unavailable for outbound dialing.
     const { rows: agentRows } = await pool.query(
       `SELECT tata_extension, tata_account_type, tata_agent_number, tata_caller_id,
-              tata_smartflo_api_key, phone
+              tata_smartflo_api_key, phone, is_active
          FROM crm_users WHERE id = $1`,
       [req.caller.id]
     );
     const agent = agentRows[0] || {};
+    if (agent.is_active === false) {
+      return res.status(423).json({
+        error:   'paused_by_admin',
+        message: 'Your account is paused by admin. Reach out to your manager to resume.',
+      });
+    }
 
     const customerNumber = toE164India(lead.whatsapp_number);
     if (!customerNumber) {
