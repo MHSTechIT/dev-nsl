@@ -42,29 +42,55 @@ const { startListener }                         = require('../utils/pgListener')
 const { handleLeadCreated, sweepUnassignedLeads } = require('../utils/leadCreatedListener');
 
 const PORT = process.env.PORT || 3003;
+
+/* Shared-DB safety toggles. When dev-CRM and prod-CRM hit the SAME Postgres,
+   every scheduler and the lead.created listener would fire twice — duplicate
+   Tata CDR pulls, double WhatsApp link swaps, race-y lead assignment, double
+   admin alert emails. Set these env flags to TRUE on the dev deployment so
+   only prod-CRM owns these side-effects.
+
+     DISABLE_SCHEDULERS      — skip all cron / interval jobs
+     DISABLE_LEAD_LISTENER   — skip the 'lead.created' LISTEN + boot sweep
+
+   Default is ENABLED (false-equivalent) so existing prod-CRM deployments are
+   unchanged. */
+const DISABLE_SCHEDULERS    = process.env.DISABLE_SCHEDULERS === 'true';
+const DISABLE_LEAD_LISTENER = process.env.DISABLE_LEAD_LISTENER === 'true';
+
 app.listen(PORT, () => {
   console.log(`[crm] running on port ${PORT}`);
 
-  // All schedulers — race-prone if run in more than one process, so CRM owns
-  // every one and the funnel services start none.
-  startLinkSwapScheduler();
-  startTataInboundSync({ intervalMs: 2 * 60 * 1000 });
-  startLeadsAlert({ intervalMs: 5 * 60 * 1000 });
-  cron.schedule('25 18 * * *', () => {
-    console.log('[Sheets Sync] Starting daily sync...');
-    syncLeadsToSheet();
-  });
-  console.log('[Sheets Sync] Daily sync scheduled at 11:55 PM IST');
-  startStaleCallReaper();
-  startDailyReconciliation();
+  if (DISABLE_SCHEDULERS) {
+    console.log('[crm] DISABLE_SCHEDULERS=true → skipping linkSwap, tataInboundSync, leadsAlert, sheetsSync, staleCallReaper, dailyReconciliation');
+  } else {
+    // All schedulers — race-prone if run in more than one process, so CRM owns
+    // every one and the funnel services start none.
+    startLinkSwapScheduler();
+    startTataInboundSync({ intervalMs: 2 * 60 * 1000 });
+    startLeadsAlert({ intervalMs: 5 * 60 * 1000 });
+    cron.schedule('25 18 * * *', () => {
+      console.log('[Sheets Sync] Starting daily sync...');
+      syncLeadsToSheet();
+    });
+    console.log('[Sheets Sync] Daily sync scheduled at 11:55 PM IST');
+    startStaleCallReaper();
+    startDailyReconciliation();
+  }
 
-  // Cross-service signal: funnel-meta / funnel-yt fire pg_notify('lead.created')
-  // after each lead INSERT. We LISTEN and run the round-robin assigner.
-  startListener({
-    'lead.created': handleLeadCreated,
-  });
+  if (DISABLE_LEAD_LISTENER) {
+    console.log('[crm] DISABLE_LEAD_LISTENER=true → skipping lead.created LISTEN + boot sweep');
+    // We still LISTEN for webinar.config.updated so admin edits propagate to
+    // SSE clients connected to THIS service. That's a read-side broadcast and
+    // is safe to run in both prod and dev.
+  } else {
+    // Cross-service signal: funnel-meta / funnel-yt fire pg_notify('lead.created')
+    // after each lead INSERT. We LISTEN and run the round-robin assigner.
+    startListener({
+      'lead.created': handleLeadCreated,
+    });
 
-  // Recovery sweep: NOTIFY is fire-and-forget. If CRM was offline when funnels
-  // fired, those leads sit with assigned_user_id = NULL. Catch them on boot.
-  sweepUnassignedLeads().catch(e => console.error('[crm] sweep failed:', e.message));
+    // Recovery sweep: NOTIFY is fire-and-forget. If CRM was offline when funnels
+    // fired, those leads sit with assigned_user_id = NULL. Catch them on boot.
+    sweepUnassignedLeads().catch(e => console.error('[crm] sweep failed:', e.message));
+  }
 });
