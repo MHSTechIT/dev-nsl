@@ -12,7 +12,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://dev-nsl-funnel-meta.onrender.com/api/:path*"
+      "destination": "https://dev-nsl.onrender.com/api/:path*"
     },
     {
       "source": "/(.*)",

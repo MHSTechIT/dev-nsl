@@ -9,7 +9,8 @@ export default defineConfig({
     host: true,
     proxy: {
       '/api': {
-        target: 'http://localhost:3001',
+        // YT funnel backend runs on port 3002 in dev.
+        target: 'http://localhost:3002',
         changeOrigin: true,
         configure: (proxy) => {
           proxy.on('proxyRes', (proxyRes, _req, res) => {

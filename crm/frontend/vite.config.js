@@ -8,7 +8,8 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       '/api': {
-        target: 'http://localhost:3001',
+        // CRM backend runs on port 3003 in dev (see crm/backend/servers/crm.js).
+        target: 'http://localhost:3003',
         changeOrigin: true,
         configure: (proxy) => {
           proxy.on('proxyRes', (proxyRes, _req, res) => {
