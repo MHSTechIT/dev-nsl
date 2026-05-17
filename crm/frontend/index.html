@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MHS CRM</title>
+    <link rel="icon" type="image/png" href="/favicon.png" />
+
+    <!-- Fonts: async (non-blocking) -->
+    <link rel="dns-prefetch" href="https://fonts.googleapis.com" />
+    <link rel="dns-prefetch" href="https://fonts.gstatic.com" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="preload" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Noto+Sans+Tamil:wght@400;600;700&display=swap" as="style" onload="this.onload=null;this.rel='stylesheet'" />
+    <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Noto+Sans+Tamil:wght@400;600;700&display=swap" /></noscript>
+  </head>
+  <body>
+    <div id="root">
+      <style>
+        #app-skeleton {
+          min-height: 100vh;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          background: linear-gradient(135deg, #f3f0ff 0%, #ede9fe 100%);
+          gap: 16px;
+          padding: 24px;
+        }
+        .sk-logo {
+          width: 80px; height: 80px; border-radius: 50%;
+          background: rgba(124,58,237,0.15);
+          animation: sk-pulse 1.4s ease-in-out infinite;
+        }
+        .sk-line {
+          border-radius: 8px;
+          background: rgba(124,58,237,0.12);
+          animation: sk-pulse 1.4s ease-in-out infinite;
+        }
+        @keyframes sk-pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.4; }
+        }
+      </style>
+      <div id="app-skeleton">
+        <div class="sk-logo"></div>
+        <div class="sk-line" style="width:200px;height:20px;"></div>
+        <div class="sk-line" style="width:260px;height:14px;margin-top:4px;"></div>
+        <div class="sk-line" style="width:160px;height:14px;"></div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

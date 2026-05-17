@@ -1,0 +1,34 @@
+{
+  "name": "mhs-funnel-yt-backend",
+  "version": "1.0.0",
+  "main": "servers/funnel-yt.js",
+  "scripts": {
+    "start": "node servers/funnel-yt.js",
+    "dev":   "node servers/funnel-yt.js",
+    "test": "jest --forceExit",
+    "test:coverage": "jest --coverage --forceExit"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "testMatch": ["**/tests/**/*.test.js"],
+    "clearMocks": true,
+    "testTimeout": 10000
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^8.5.0",
+    "express-validator": "^7.1.0",
+    "googleapis": "^171.4.0",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.3",
+    "node-cron": "^4.2.1",
+    "nodemailer": "^8.0.5",
+    "pg": "^8.12.0"
+  },
+  "devDependencies": {
+    "jest": "^30.3.0",
+    "supertest": "^7.2.2"
+  }
+}

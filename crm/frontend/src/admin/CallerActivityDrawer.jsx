@@ -1,0 +1,291 @@
+import { useEffect, useState, useMemo } from 'react';
+
+/* Caller activity drawer — opens from the Performance grid's Status pill.
+   Shows the chronological audit log of every state transition for one
+   caller on one IST day. Each row carries a color-coded tag, start →
+   end timestamps, duration, and optional context (lead name on ON_CALL,
+   over-by-sec on BREAK_OVER). */
+
+const TAG_META = {
+  LOGGED_IN:          { label: 'Logged in',       color: '#059669', bg: 'rgba(5,150,105,0.10)' },
+  LOGGED_OUT:         { label: 'Logged out',      color: '#374151', bg: 'rgba(55,65,81,0.10)'  },
+  ACTIVE:             { label: 'Active',          color: '#16A34A', bg: 'rgba(22,163,74,0.10)' },
+  ON_CALL:            { label: 'On call',         color: '#2563EB', bg: 'rgba(37,99,235,0.10)' },
+  AFTER_CALL_FORM:    { label: 'After-call form', color: '#7C3AED', bg: 'rgba(124,58,237,0.10)' },
+  ON_REASON_FORM:     { label: 'On reason form',  color: '#D97706', bg: 'rgba(217,119,6,0.12)'  },
+  BREAK:              { label: 'Break',           color: '#F59E0B', bg: 'rgba(245,158,11,0.12)' },
+  BREAK_OVER:         { label: 'Break over',      color: '#DC2626', bg: 'rgba(220,38,38,0.12)'  },
+  RESUMED:            { label: 'Resumed',         color: '#0891B2', bg: 'rgba(8,145,178,0.10)'  },
+  IDLE:               { label: 'Idle',            color: '#6B7280', bg: 'rgba(107,114,128,0.12)' },
+  PAUSED_BY_ADMIN:    { label: 'Paused by admin', color: '#B91C1C', bg: 'rgba(185,28,28,0.12)'  },
+  UNPAUSED_BY_ADMIN:  { label: 'Unpaused by admin', color: '#15803D', bg: 'rgba(21,128,61,0.12)' },
+  OFFLINE:            { label: 'Offline',         color: '#6B7280', bg: 'rgba(107,114,128,0.18)' },
+};
+
+function fmtTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
+}
+
+function fmtDuration(sec) {
+  if (sec == null || sec < 0) return '—';
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function todayIstYmd() {
+  const istNow = new Date(Date.now() + 5.5 * 3600 * 1000);
+  return istNow.toISOString().slice(0, 10);
+}
+
+export default function CallerActivityDrawer({ token, callerId, callerName, onClose }) {
+  const [date,    setDate]    = useState(() => todayIstYmd());
+  const [events,  setEvents]  = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error,   setError]   = useState('');
+  /* nowTick — re-renders every second so ongoing entries (ended_at IS NULL)
+     show a live-ticking duration without re-fetching. */
+  const [nowTick, setNowTick] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!callerId) return;
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    fetch(`/api/admin/caller-activity/${callerId}?date=${date}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(r => r.json())
+      .then(d => {
+        if (cancelled) return;
+        if (d.error) { setError(d.error); setEvents([]); }
+        else { setEvents(d.events || []); }
+      })
+      .catch(err => { if (!cancelled) setError(err.message); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [token, callerId, date]);
+
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  /* Esc closes the drawer */
+  useEffect(() => {
+    function onKey(e) { if (e.key === 'Escape') onClose?.(); }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  /* Newest first, but keep open (ongoing) rows pinned to the top. */
+  const sortedEvents = useMemo(() => {
+    return [...events].sort((a, b) => {
+      const aOpen = a.ended_at == null ? 1 : 0;
+      const bOpen = b.ended_at == null ? 1 : 0;
+      if (aOpen !== bOpen) return bOpen - aOpen;
+      return new Date(b.started_at) - new Date(a.started_at);
+    });
+  }, [events]);
+
+  /* Per-tag totals for the summary header — only count closed events
+     plus the live duration of open ones. */
+  const summary = useMemo(() => {
+    const totals = {};
+    for (const ev of events) {
+      const dur = ev.ended_at
+        ? ev.duration_sec || 0
+        : Math.max(0, Math.floor((nowTick - new Date(ev.started_at).getTime()) / 1000));
+      totals[ev.tag] = (totals[ev.tag] || 0) + dur;
+    }
+    return totals;
+  }, [events, nowTick]);
+
+  return (
+    <>
+      {/* Scrim */}
+      <div
+        onClick={onClose}
+        style={{
+          position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.45)',
+          zIndex: 9000, backdropFilter: 'blur(2px)',
+        }}
+      />
+      {/* Drawer panel */}
+      <div
+        role="dialog" aria-modal="true"
+        style={{
+          position: 'fixed', top: 0, right: 0, bottom: 0,
+          width: 'min(560px, 100vw)', background: '#fff',
+          zIndex: 9001, boxShadow: '-12px 0 40px rgba(15,23,42,0.20)',
+          display: 'flex', flexDirection: 'column',
+          fontFamily: 'Outfit, sans-serif',
+          animation: 'cad-slide-in 220ms ease-out',
+        }}
+      >
+        <style>{`
+          @keyframes cad-slide-in {
+            from { transform: translateX(20px); opacity: 0; }
+            to   { transform: translateX(0);    opacity: 1; }
+          }
+          .cad-row:hover { background: rgba(91,33,182,0.04); }
+        `}</style>
+
+        {/* Header */}
+        <div style={{
+          padding: '18px 22px 14px', borderBottom: '1px solid rgba(209,196,240,0.45)',
+          background: 'linear-gradient(180deg,#7C3AED,#5B21B6)', color: '#fff',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: '0.72rem', fontWeight: 700, opacity: 0.85, textTransform: 'uppercase', letterSpacing: '0.10em' }}>
+                Activity log
+              </div>
+              <div style={{ fontSize: '1.20rem', fontWeight: 800, marginTop: 2 }}>
+                {callerName || `Caller #${callerId}`}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close"
+              style={{
+                width: 34, height: 34, borderRadius: 10, border: 'none',
+                background: 'rgba(255,255,255,0.18)', color: '#fff',
+                cursor: 'pointer', display: 'inline-flex',
+                alignItems: 'center', justifyContent: 'center',
+                fontSize: '1.10rem', fontWeight: 800,
+              }}
+            >×</button>
+          </div>
+          <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <label style={{ fontSize: '0.78rem', opacity: 0.85, fontWeight: 600 }}>Date</label>
+            <input
+              type="date"
+              value={date}
+              max={todayIstYmd()}
+              onChange={e => setDate(e.target.value)}
+              style={{
+                height: '2.1rem', padding: '0 10px', borderRadius: 8,
+                border: 'none', background: 'rgba(255,255,255,0.18)',
+                color: '#fff', fontFamily: 'Outfit, sans-serif',
+                fontSize: '0.82rem', fontWeight: 600, outline: 'none',
+                colorScheme: 'dark',
+              }}
+            />
+          </div>
+        </div>
+
+        {/* Summary chips */}
+        {!loading && events.length > 0 && (
+          <div style={{
+            display: 'flex', flexWrap: 'wrap', gap: 6,
+            padding: '12px 22px', borderBottom: '1px solid rgba(209,196,240,0.45)',
+            background: '#FAF7FF',
+          }}>
+            {Object.entries(summary)
+              .sort((a, b) => b[1] - a[1])
+              .map(([tag, sec]) => {
+                const meta = TAG_META[tag] || { label: tag, color: '#374151', bg: 'rgba(55,65,81,0.10)' };
+                return (
+                  <span key={tag} style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                    padding: '4px 10px', borderRadius: 999,
+                    background: meta.bg, color: meta.color,
+                    fontSize: '0.74rem', fontWeight: 700,
+                  }}>
+                    <span style={{ textTransform: 'uppercase', letterSpacing: '0.04em' }}>{meta.label}</span>
+                    <span style={{ opacity: 0.75 }}>{fmtDuration(sec)}</span>
+                  </span>
+                );
+              })}
+          </div>
+        )}
+
+        {/* Body */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '6px 0' }}>
+          {loading ? (
+            <div style={{ padding: 40, textAlign: 'center', color: 'rgba(91,33,182,0.55)', fontSize: '0.88rem' }}>
+              Loading activity…
+            </div>
+          ) : error ? (
+            <div style={{ padding: 40, textAlign: 'center', color: '#DC2626', fontSize: '0.88rem' }}>
+              {error}
+            </div>
+          ) : sortedEvents.length === 0 ? (
+            <div style={{ padding: 40, textAlign: 'center', color: 'rgba(91,33,182,0.55)', fontSize: '0.88rem' }}>
+              No activity recorded for this day.
+            </div>
+          ) : sortedEvents.map(ev => {
+            const meta = TAG_META[ev.tag] || { label: ev.tag, color: '#374151', bg: 'rgba(55,65,81,0.10)' };
+            const ongoing = ev.ended_at == null;
+            const liveDur = ongoing
+              ? Math.max(0, Math.floor((nowTick - new Date(ev.started_at).getTime()) / 1000))
+              : (ev.duration_sec || 0);
+            const ctx = ev.context || {};
+            return (
+              <div
+                key={ev.id}
+                className="cad-row"
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '120px 1fr auto',
+                  alignItems: 'center', gap: 10,
+                  padding: '12px 22px',
+                  borderBottom: '1px solid rgba(209,196,240,0.30)',
+                  transition: 'background 120ms',
+                }}
+              >
+                <span style={{
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  padding: '5px 8px', borderRadius: 999,
+                  background: meta.bg, color: meta.color,
+                  fontSize: '0.66rem', fontWeight: 800,
+                  textTransform: 'uppercase', letterSpacing: '0.06em',
+                }}>
+                  {ongoing && (
+                    <span style={{
+                      width: 6, height: 6, borderRadius: '50%',
+                      background: meta.color, marginRight: 6,
+                      animation: 'pulse 1.4s infinite',
+                    }} />
+                  )}
+                  {meta.label}
+                </span>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: '0.86rem', fontWeight: 700, color: '#3B0764', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {fmtTime(ev.started_at)} <span style={{ opacity: 0.55, fontWeight: 600 }}>→</span> {ongoing ? <span style={{ color: meta.color }}>ongoing</span> : fmtTime(ev.ended_at)}
+                  </div>
+                  {(ctx.lead_name || ctx.over_by_sec || ctx.reason || ctx.minutes) && (
+                    <div style={{ fontSize: '0.74rem', color: 'rgba(91,33,182,0.65)', fontWeight: 600, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {ctx.lead_name && <span>Lead: {ctx.lead_name}</span>}
+                      {ctx.reason && <span>{ctx.lead_name ? ' · ' : ''}Reason: {ctx.reason}</span>}
+                      {ctx.minutes && <span>{(ctx.lead_name || ctx.reason) ? ' · ' : ''}Allotted: {ctx.minutes}m</span>}
+                      {ctx.over_by_sec > 0 && <span style={{ color: '#DC2626' }}>{(ctx.lead_name || ctx.reason || ctx.minutes) ? ' · ' : ''}Over by {fmtDuration(ctx.over_by_sec)}</span>}
+                    </div>
+                  )}
+                </div>
+                <div style={{ fontSize: '0.84rem', fontWeight: 800, color: meta.color, textAlign: 'right', minWidth: 70 }}>
+                  {fmtDuration(liveDur)}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <style>{`
+          @keyframes pulse {
+            0%   { opacity: 0.4; }
+            50%  { opacity: 1; }
+            100% { opacity: 0.4; }
+          }
+        `}</style>
+      </div>
+    </>
+  );
+}

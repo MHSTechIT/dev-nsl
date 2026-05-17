@@ -1,47 +1,50 @@
-# Dependencies
+# ── Dependencies ────────────────────────────────────────────────────
 node_modules/
-backend/node_modules/
-apps/funnel/node_modules/
-apps/whatsapp/node_modules/
-apps/disqualified/node_modules/
-apps/funnel-yt/node_modules/
-apps/whatsapp-yt/node_modules/
-apps/disqualified-yt/node_modules/
 
-# Build output
-apps/funnel/dist/
-apps/whatsapp/dist/
-apps/disqualified/dist/
-apps/funnel-yt/dist/
-apps/whatsapp-yt/dist/
-apps/disqualified-yt/dist/
+# ── Build output ───────────────────────────────────────────────────
+dist/
+.vite/
+build/
 
-# Environment files
-backend/.env
+# ── Environment files ──────────────────────────────────────────────
+# NEVER commit secrets (DB url, JWT secret, Tata API key, etc.)
 .env
+.env.*
 .env.local
 .env.*.local
+!.env.example
 
-# Logs
+# ── Logs ───────────────────────────────────────────────────────────
 *.log
 npm-debug.log*
 
-# OS
+# ── OS ─────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 
-# Test coverage
-backend/coverage/
+# ── Test coverage ──────────────────────────────────────────────────
+**/coverage/
 
-# Claude
+# ── Claude / editor ────────────────────────────────────────────────
 .claude/
 
-# Vercel
-.vercel
-
-# Temp env pull files
+# ── Vercel ─────────────────────────────────────────────────────────
+.vercel/
 *.env.prod.check
 *.env.verify
 *.env.vercel.local
 
-.vercel
+# ── Render-style scratch dirs ──────────────────────────────────────
+.render/
+
+# ── Runtime artifacts (recordings + uploads regenerate per service) ─
+**/uploads/*
+!**/uploads/.gitkeep
+
+# ── Persisted admin secret (contains password + JWT secret) ─────────
+# Each environment generates its own at first boot.
+**/backend/data/admin.json
+
+# ── Local-only / backup folders (NOT part of the codebase) ─────────
+nsl - original - Copy/
+.dev-logs/
