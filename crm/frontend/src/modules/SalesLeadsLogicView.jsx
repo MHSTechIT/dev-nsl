@@ -162,6 +162,11 @@ export default function SalesLeadsLogicView({ token }) {
                   <th style={thStyle}>Caller</th>
                   <th style={thStyle}>Role</th>
                   <th style={thStyle}>Receives</th>
+                  {/* Count of leads in THIS webinar already routed to the
+                      caller — lets admins eyeball whether the rotation is
+                      balancing fairly. Powered by `assigned_count` from the
+                      lead-share-config response. */}
+                  <th style={thStyle}>Assigned</th>
                 </tr>
               </thead>
               <tbody>
@@ -182,6 +187,25 @@ export default function SalesLeadsLogicView({ token }) {
                             return <span key={t} style={badgeStyle({ ...b, label: t })}>{t}</span>;
                           })}
                         </div>
+                      </td>
+                      {/* Assigned-count pill. Greys out for zero so the eye
+                          immediately spots callers who haven't received any
+                          leads yet (often a sign of a stuck round-robin).
+                          Coerce `undefined` → 0 so the pill never renders
+                          blank if a back-compat backend skips the field. */}
+                      <td style={tdStyle}>
+                        {(() => {
+                          const n = Number(c.assigned_count) || 0;
+                          return (
+                            <span style={badgeStyle({
+                              bg: n > 0 ? '#DDD6FE' : '#F3F4F6',
+                              fg: n > 0 ? '#5B21B6' : '#9CA3AF',
+                              label: n,
+                            })}>
+                              {n}
+                            </span>
+                          );
+                        })()}
                       </td>
                     </tr>
                   );

@@ -4,12 +4,12 @@ import DateTimePicker from '../admin/DateTimePicker';
 import LeadTagBadge from '../components/LeadTagBadge';
 import { classifyLeadTag } from '../utils/leadTagging';
 import sadBotRaw from '../assets/bot/robot-sad.json';
-import { patchRobotArm } from '../utils/patchRobotArm';
+import { lockArmsDown, normalizeLoop } from '../utils/patchRobotArm';
 import pickTheCallMp3 from '../assets/audio/pick-the-call.mp3';
 import formFillMp3   from '../assets/audio/form-fill.mp3';
-// Patch once at module load — fixes the always-raised right arm so the
-// "sad" bot's hands sit at his sides instead of waving constantly.
-const sadBotData = patchRobotArm(sadBotRaw);
+// Patch once at module load — canonical "both arms hanging at sides,
+// anatomically mirrored" pose used everywhere else in the CRM.
+const sadBotData = normalizeLoop(lockArmsDown(sadBotRaw));
 
 /* One-shot audio helper. Each reason card plays its prompt once when it
    opens. .play() may reject if the browser blocks autoplay; we swallow
@@ -1137,6 +1137,12 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
             />
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {/* DNP ("Did Not Pick") makes no sense while the customer is
+                actually on the call — hide it during `customer_on_call`
+                so the caller can't accidentally hang up a live call. The
+                button comes back the moment the customer disconnects or
+                we move to the form_window / ringing phases. */}
+            {callPhase !== 'customer_on_call' && (
             <button
               onClick={handleCutCall}
               disabled={cuttingCall}
@@ -1162,6 +1168,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
               </svg>
               {cuttingCall ? 'DNP…' : 'DNP'}
             </button>
+            )}
             {/* Recall is only actionable during the 30-s form_window — i.e.,
                 customer disconnected and the caller has the timer running.
                 During ringing / on-call phases, recalling would interrupt a

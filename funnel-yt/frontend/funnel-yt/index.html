@@ -6,6 +6,19 @@
     <title>My Health School – Diabetes Reversal Webinar</title>
     <link rel="icon" type="image/png" href="/favicon.png" />
 
+    <!-- Google Ads (gtag.js) — bootstrap. Loads the library and registers
+         the account ID. Per-event conversions (LPV on Screen1A, Lead on
+         Screen3 submit) are fired from React via src/utils/gtag.js. The
+         inline dataLayer queue replays any gtag() calls fired before the
+         async library finishes loading, so React doesn't have to wait. -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=AW-17164057977"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){ dataLayer.push(arguments); }
+      gtag('js', new Date());
+      gtag('config', 'AW-17164057977');
+    </script>
+
     <!-- Preload hero image — shown immediately on first paint -->
     <link rel="preload" href="/person.webp" as="image" type="image/webp" />
 

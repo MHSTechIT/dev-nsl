@@ -3,22 +3,89 @@ import Lottie from 'lottie-react';
 import LeadCallNoteModal from './LeadCallNoteModal';
 import happyBotRaw     from '../assets/bot/robot-happy.json';
 import confettiData    from '../assets/bot/confetti.json';
-import { patchRobotArm } from '../utils/patchRobotArm';
+import { lockArmsDown, normalizeLoop } from '../utils/patchRobotArm';
 // Tag-specific celebration audio. Played alongside the speech-bubble line.
 import hotLeadMp3   from '../assets/audio/hot-lead.mp3';
 import warmLeadMp3  from '../assets/audio/warm-lead.mp3';
 import coldLeadMp3  from '../assets/audio/cold-lead.mp3';
 import junkLeadMp3  from '../assets/audio/junk-lead.mp3';
 import noTagMp3     from '../assets/audio/no-tag.mp3';
+// HOT lead has 4 paired voice clips (h1..h4) — each one matches the
+// matching bubble line in COOLDOWN_LINES.HOT below, so the caller hears
+// the same sentence they read.
+import hotH1Mp3     from '../assets/audio/hot/h1.mp3';
+import hotH2Mp3     from '../assets/audio/hot/h2.mp3';
+import hotH3Mp3     from '../assets/audio/hot/h3.mp3';
+import hotH4Mp3     from '../assets/audio/hot/h4.mp3';
 const TAG_AUDIO = {
-  HOT:  hotLeadMp3,
+  HOT:  hotLeadMp3,   // fallback only — HOT now uses per-line clips
   WARM: warmLeadMp3,
   COLD: coldLeadMp3,
   JUNK: junkLeadMp3,
 };
-// Patch once at module load — fixes the always-raised right arm so the
-// celebratory wave actually animates up and back down.
-const happyBotData = patchRobotArm(happyBotRaw);
+// Patch once at module load — apply the canonical "both arms hanging
+// at sides, anatomically mirrored" pose used everywhere in the CRM.
+const happyBotData = normalizeLoop(lockArmsDown(happyBotRaw));
+
+/* Post-call celebration speech-bubble lines. Each tag has multiple
+   variations; the cooldown overlay picks one at random per call so the
+   bubble feels fresh instead of repeating the same line every time.
+
+   HOT entries are `{ text, audio }` pairs so the voice clip played
+   matches the line shown in the bubble. The other tags remain plain
+   strings (one shared audio clip per tag via TAG_AUDIO). */
+const COOLDOWN_LINES = {
+  HOT: [
+    {
+      text:  'hot lead secured nanba! un vibe customer ku direct ah connect aagiduchu va next call ah yum mass ah close pannalam',
+      audio: hotH1Mp3,
+    },
+    {
+      text:  'semma handling nanba! hot lead ready ah hook aagiduchu va next conversational innum mass katalam',
+      audio: hotH2Mp3,
+    },
+    {
+      text:  'nee pesuna vibe vera level nanba leads um intrestku vanthiruchu ippo next call poitu streak continue pannalam',
+      audio: hotH3Mp3,
+    },
+    {
+      text:  'un voice ku customer straight ah connect aagitanga nanba come on next call waiting kalakuvom',
+      audio: hotH4Mp3,
+    },
+  ],
+  WARM: [
+    "Hey buddy, you got a Warm Lead! Keep the conversation going!",
+    "Warm lead in hand — one more push and it's HOT!",
+    "Nice — warm lead. Follow up sema-a panna, deal close pannalaam!",
+    "Warm one captured! Keep the heat building!",
+    "Patience-um effort-um pay aagum. Nalla warm lead!",
+    "Warm catch boss — followup vechukinga, deal varum!",
+  ],
+  COLD: [
+    "Hey buddy, you got a Cold Lead! Don't worry, every call matters!",
+    "Cold lead's okay — every call is practice for the next big one!",
+    "Adho oru cold lead. Parava illa, motha effort-um count aagum!",
+    "Cold one — move on, hot lead waiting right after!",
+    "Cold lead, no stress. Next call could be the big one!",
+    "Every dial-um experience. Cold today, hot tomorrow!",
+  ],
+  JUNK: [
+    "Hey buddy, this one looks like a Junk Lead! Let's move to the next win!",
+    "Junk lead spotted! Filter pannitu next-ku po!",
+    "Junk! Time pazhakidaadhe — next call ready-a iruga!",
+    "Junk one — adhu pochu pochu. Hot lead waiting up next!",
+    "Junk lead aana parava illa — pure focus, gold-um varum!",
+  ],
+  // Fallback for outcomes without a tag (not_picked, auto_paused, etc.)
+  DEFAULT: [
+    "Great work — call completed!",
+    "Boss work! Mass-a finish pannitu next move!",
+    "Sema effort! Next lead-um waiting for you!",
+    "One down — keep the rhythm going!",
+    "Call complete! On to the next opportunity!",
+    "Nicely handled. Next-ku ready-aagu!",
+  ],
+};
 
 const SUGAR_BADGE = {
   '250+':    { bg: '#FEE2E2', fg: '#B91C1C' },
@@ -77,6 +144,10 @@ export default function AssignedLeadsModule({ jwt, externalHighlightId, setMood,
      message in the post-call celebration overlay. Cleared between calls
      so a stale tag never blends into the next celebration. */
   const [lastCompletedTag, setLastCompletedTag] = useState(null);
+  // The exact celebration line to render in the bubble. Picked ONCE per
+  // call inside the save-handler so the bubble text stays in sync with
+  // the voice clip we played, instead of being re-rolled on every render.
+  const [celebrationLine, setCelebrationLine] = useState('');
 
   /* Break picker — opened when caller hits Stop in the cooldown card.
        breakStep    : null | 'choose' | 'other'   (modal flow)
@@ -764,14 +835,25 @@ export default function AssignedLeadsModule({ jwt, externalHighlightId, setMood,
             // bubble can show the matching message. Stays in state until
             // the next call's save overwrites it.
             setLastCompletedTag(meta?.lead_tag || null);
+            // Pick the bubble line + matching audio in one place so they
+            // can never drift out of sync. For HOT the pool is
+            // `{text,audio}[]`; for other tags it's `string[]` and we
+            // fall back to TAG_AUDIO[tag] for the voice clip.
+            const tag       = meta?.lead_tag;
+            const pool      = COOLDOWN_LINES[tag] || COOLDOWN_LINES.DEFAULT;
+            const pick      = pool[Math.floor(Math.random() * pool.length)];
+            const pickText  = typeof pick === 'string' ? pick : pick.text;
+            const pickAudio = typeof pick === 'string'
+              ? (TAG_AUDIO[tag] || noTagMp3)
+              : pick.audio;
+            setCelebrationLine(pickText);
             // Play tag-specific celebration audio — only for "real" call
             // completions (form was actually filled). Skip DNP / auto-paused
             // since those aren't celebratory moments.
             const REAL_OUTCOMES = new Set(['completed', 'follow_up', 'not_interested']);
             if (REAL_OUTCOMES.has(outcome)) {
-              const src = TAG_AUDIO[meta?.lead_tag] || noTagMp3;
               try {
-                const audio = new Audio(src);
+                const audio = new Audio(pickAudio);
                 audio.volume = 0.85;
                 // .play() returns a promise that rejects if autoplay is
                 // blocked (no user gesture). The Complete-Call button IS a
@@ -920,22 +1002,10 @@ export default function AssignedLeadsModule({ jwt, externalHighlightId, setMood,
               animation: 'cdBubble 520ms cubic-bezier(0.34,1.56,0.64,1) both, cdBubbleFloat 2.6s ease-in-out 600ms infinite',
               animationDelay: '120ms, 740ms',  // bubble pops in slightly after the robot
             }}>
-              {(() => {
-                switch (lastCompletedTag) {
-                  case 'HOT':
-                    return 'Hey buddy, you got a Hot Lead! Keep rocking!';
-                  case 'WARM':
-                    return 'Hey buddy, you got a Warm Lead! Keep the conversation going!';
-                  case 'COLD':
-                    return 'Hey buddy, you got a Cold Lead! Don’t worry, every call matters!';
-                  case 'JUNK':
-                    return 'Hey buddy, this one looks like a Junk Lead! Let’s move to the next win!';
-                  default:
-                    // Falls through when the form had nothing to classify
-                    // (e.g. not_picked / auto_paused outcomes).
-                    return 'Great work — call completed!';
-                }
-              })()}
+              {/* Read the line that was picked when the call saved — keeps
+                  the bubble text perfectly in sync with the voice clip that
+                  played, and avoids the line flickering on re-renders. */}
+              {celebrationLine || 'Great work — call completed!'}
               {/* Bubble tail — pointed down toward the robot's head */}
               <div style={{
                 position: 'absolute',
@@ -949,8 +1019,11 @@ export default function AssignedLeadsModule({ jwt, externalHighlightId, setMood,
               }} />
             </div>
 
-            {/* 1 — Robot */}
-            <div style={{ width: 'min(260px, 60vw)', height: 'min(260px, 60vw)' }}>
+            {/* 1 — Robot. Shrunk from 260 → 180 px so the speech bubble
+                above it sits clearly above the robot's head instead of
+                being clipped by the head/antenna geometry. The 50vw cap
+                keeps it from dominating very small phones. */}
+            <div style={{ width: 'min(180px, 50vw)', height: 'min(180px, 50vw)' }}>
               <Lottie
                 animationData={happyBotData}
                 loop={false}

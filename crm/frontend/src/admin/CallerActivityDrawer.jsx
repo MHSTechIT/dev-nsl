@@ -1,4 +1,5 @@
 import { useEffect, useState, useMemo } from 'react';
+import DatePicker from './DatePicker';
 
 /* Caller activity drawer — opens from the Performance grid's Status pill.
    Shows the chronological audit log of every state transition for one
@@ -43,7 +44,26 @@ function todayIstYmd() {
   return istNow.toISOString().slice(0, 10);
 }
 
-export default function CallerActivityDrawer({ token, callerId, callerName, onClose }) {
+export default function CallerActivityDrawer({
+  token, callerId, callerName, onClose,
+  // Pause/Resume support. `isActive` is the current paused state of the
+  // caller; `onTogglePause` is async and the parent updates its row data.
+  // When `onTogglePause` is omitted, the button is hidden entirely so the
+  // drawer can still be used by any view that doesn't grant pause rights.
+  isActive,
+  onTogglePause,
+}) {
+  // Local "busy" flag so the button shows a loading state while the
+  // parent's PATCH is in flight. Cleared as soon as onTogglePause resolves.
+  const [togglingPause, setTogglingPause] = useState(false);
+  async function handleTogglePause() {
+    if (typeof onTogglePause !== 'function' || togglingPause) return;
+    setTogglingPause(true);
+    try { await onTogglePause(); }
+    finally { setTogglingPause(false); }
+  }
+  // Hide the pause button entirely if the parent didn't wire up a handler.
+  const canTogglePause = typeof onTogglePause === 'function' && typeof isActive === 'boolean';
   const [date,    setDate]    = useState(() => todayIstYmd());
   const [events,  setEvents]  = useState([]);
   const [loading, setLoading] = useState(true);
@@ -150,33 +170,72 @@ export default function CallerActivityDrawer({ token, callerId, callerName, onCl
                 {callerName || `Caller #${callerId}`}
               </div>
             </div>
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="Close"
-              style={{
-                width: 34, height: 34, borderRadius: 10, border: 'none',
-                background: 'rgba(255,255,255,0.18)', color: '#fff',
-                cursor: 'pointer', display: 'inline-flex',
-                alignItems: 'center', justifyContent: 'center',
-                fontSize: '1.10rem', fontWeight: 800,
-              }}
-            >×</button>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+              {/* Pause / Resume button — only rendered when the parent
+                  passes onTogglePause + isActive. Single button that
+                  toggles between "Pause caller" (when active, red tint)
+                  and "Resume caller" (when paused, green tint). */}
+              {canTogglePause && (
+                <button
+                  type="button"
+                  onClick={handleTogglePause}
+                  disabled={togglingPause}
+                  aria-label={isActive ? 'Pause caller' : 'Resume caller'}
+                  title={isActive ? 'Pause this caller (block new auto-assigned leads)' : 'Resume this caller'}
+                  style={{
+                    height: 34, padding: '0 14px', borderRadius: 10, border: 'none',
+                    background: togglingPause
+                      ? 'rgba(255,255,255,0.20)'
+                      : (isActive ? 'rgba(220,38,38,0.85)' : 'rgba(22,163,74,0.90)'),
+                    color: '#fff', fontFamily: 'Outfit, sans-serif',
+                    fontWeight: 700, fontSize: '0.80rem',
+                    cursor: togglingPause ? 'wait' : 'pointer',
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                    boxShadow: togglingPause ? 'none' : '0 2px 8px rgba(0,0,0,0.20)',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {isActive ? (
+                    /* Pause icon — two vertical bars */
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+                  ) : (
+                    /* Play icon — right-pointing triangle */
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4"/></svg>
+                  )}
+                  {togglingPause ? '…' : (isActive ? 'Pause' : 'Resume')}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={onClose}
+                aria-label="Close"
+                style={{
+                  width: 34, height: 34, borderRadius: 10, border: 'none',
+                  background: 'rgba(255,255,255,0.18)', color: '#fff',
+                  cursor: 'pointer', display: 'inline-flex',
+                  alignItems: 'center', justifyContent: 'center',
+                  fontSize: '1.10rem', fontWeight: 800,
+                }}
+              >×</button>
+            </div>
           </div>
           <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
             <label style={{ fontSize: '0.78rem', opacity: 0.85, fontWeight: 600 }}>Date</label>
-            <input
-              type="date"
+            {/* Custom DatePicker — same component used across the admin
+                UI (Sales Performance, Funnel Overview). Matches the
+                violet/Outfit aesthetic so it doesn't clash with the
+                browser-native dark date dropdown that was here before.
+                We also guard against future-day picks by clamping any
+                onChange value that exceeds today (IST) back to today —
+                the activity log has no rows beyond today anyway. */}
+            <DatePicker
               value={date}
-              max={todayIstYmd()}
-              onChange={e => setDate(e.target.value)}
-              style={{
-                height: '2.1rem', padding: '0 10px', borderRadius: 8,
-                border: 'none', background: 'rgba(255,255,255,0.18)',
-                color: '#fff', fontFamily: 'Outfit, sans-serif',
-                fontSize: '0.82rem', fontWeight: 600, outline: 'none',
-                colorScheme: 'dark',
+              onChange={v => {
+                const max = todayIstYmd();
+                if (!v) return;            // ignore Clear (keep current)
+                setDate(v > max ? max : v);
               }}
+              placeholder="Select date"
             />
           </div>
         </div>

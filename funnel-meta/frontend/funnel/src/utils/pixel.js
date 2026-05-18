@@ -55,7 +55,11 @@ const SCORE_MAP = {
   sugar:   { '150-250': 80, '250+': 120 },
   duration: { new: 60, mid: 100, long: 150 },
   medication: { none: 60, tablets: 110, insulin: 160 },
-  age:     { '35-45': 70, '45-55': 110, '55+': 140 },
+  // The age-range question has been replaced by "Do you know Tamil?".
+  // Only the yes/no answer feeds the rolling_value now — Tamil-yes is
+  // weighted higher because the webinar is delivered in Tamil. No legacy
+  // age-bucket values ('35-45' / '45-55' / '55+') are scored anymore.
+  tamil:   { yes: 120, no: 50 },
   occupation: { working: 130, retired: 110, housewife: 90 },
 };
 function scoreFor(category, key) {
@@ -69,7 +73,11 @@ function rollingValue(state = {}) {
   if (state.sugarLevel)      v += scoreFor('sugar', state.sugarLevel);
   if (state.diabetesDuration) v += scoreFor('duration', state.diabetesDuration);
   if (state.onMedication)    v += scoreFor('medication', state.onMedication);
-  if (state.ageGroup)        v += scoreFor('age', state.ageGroup);
+  // `state.ageGroup` is kept as the variable name for back-compat with
+  // FunnelContext / API payload (`age_group` DB column), but its value
+  // is now the Tamil-knowledge answer ('yes' / 'no') for Meta-funnel
+  // leads. Look up in the `tamil` bucket of SCORE_MAP accordingly.
+  if (state.ageGroup)        v += scoreFor('tamil', state.ageGroup);
   if (state.occupation)      v += scoreFor('occupation', state.occupation);
   return v;
 }
@@ -123,11 +131,19 @@ export const pixelMedicationSelected = (medication, state) => fbq('trackCustom',
   rolling_value: rollingValue({ ...(state || {}), onMedication: medication }),
 }, { eventID: newEventID() });
 
-export const pixelAgeSelected = (ageGroup, state) => fbq('trackCustom', 'AgeGroupSelected', {
-  age_group: ageGroup,
+// Renamed from `pixelAgeSelected` — the funnel now asks "Do you know
+// Tamil?" instead of an age bucket. The function signature is kept (same
+// arg name `ageGroup` so existing call sites still compile) but the value
+// is 'yes' / 'no' and the Meta event + custom-data key now reflect that.
+// Old `pixelAgeSelected` export is kept as an alias below in case any
+// imported usage still references it (no breaking change in dev).
+export const pixelTamilKnowledgeSelected = (ageGroup, state) => fbq('trackCustom', 'TamilKnowledgeSelected', {
+  knows_tamil: ageGroup,
   content_category: 'qualification_q3a',
   rolling_value: rollingValue({ ...(state || {}), ageGroup }),
 }, { eventID: newEventID() });
+// Back-compat alias — any leftover `pixelAgeSelected(…)` import still works.
+export const pixelAgeSelected = pixelTamilKnowledgeSelected;
 
 export const pixelOccupationSelected = (occupation, state) => fbq('trackCustom', 'OccupationSelected', {
   occupation,
@@ -184,7 +200,10 @@ export function pixelLead({ fullName, email, whatsappNumber, leadScore }, state 
     sugar_level: state.sugarLevel || null,
     diabetes_duration: state.diabetesDuration || null,
     on_medication: state.onMedication || null,
-    age_group: state.ageGroup || null,
+    // Meta now sees the Tamil-knowledge answer (yes/no) instead of an
+    // age range. Key renamed `age_group` → `knows_tamil` so Events
+    // Manager column names are accurate for the new question.
+    knows_tamil: state.ageGroup || null,
     occupation: state.occupation || null,
   }, { eventID: leadEventID });
 

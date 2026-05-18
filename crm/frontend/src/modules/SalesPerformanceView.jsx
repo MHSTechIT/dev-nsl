@@ -2229,6 +2229,14 @@ export default function SalesPerformanceView({ token, actionsSlotEl }) {
           callerId={activityRow.caller_id}
           callerName={activityRow.name || activityRow.full_name}
           onClose={() => setActivityRow(null)}
+          // `is_active` may be undefined on rows that haven't been
+          // resolved yet — treat undefined as active so the button
+          // defaults to "Pause" (the correct affordance for a live caller).
+          isActive={activityRow.is_active !== false}
+          // Reuse the existing togglePause handler. After the PATCH the
+          // function refetches data, which refreshes activityRow's row
+          // data so the button switches Pause ↔ Resume in real time.
+          onTogglePause={() => togglePause(activityRow)}
         />
       )}
 

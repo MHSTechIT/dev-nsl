@@ -3,6 +3,21 @@ import DateTimePicker from './DateTimePicker';
 
 const DURATION_LABELS = { new: '< 1 yr', mid: '1–5 yrs', long: '5+ yrs', pre: 'Pre-diabetic' };
 const SUGAR_LABELS    = { '150-250': '150–250', '250+': '250+' };
+const LANG_LABELS     = { tamil: 'Tamil', english: 'English' };
+const MEDICATION_LABELS = { insulin: 'Insulin', tablets: 'Tablets', none: 'None' };
+const OCCUPATION_LABELS = { working: 'Working', housewife: 'Housewife', retired: 'Retired' };
+// age_group column holds two different shapes: the old age-bucket
+// ('35-45' / '45-55' / '55+') from the YT funnel, and the new Tamil
+// yes/no answer ('yes' / 'no') from the Meta funnel. The header column
+// is now labelled "Do you know Tamil?" so we render the answer plainly
+// ("Yes" / "No") and fall back to the raw age-bucket value for legacy
+// YT rows so no data is lost in the migration.
+function fmtAgeOrTamil(v) {
+  if (!v) return '';
+  if (v === 'yes') return 'Yes';
+  if (v === 'no')  return 'No';
+  return v;
+}
 
 function fmtWebinar(iso) {
   if (!iso) return '';
@@ -193,11 +208,22 @@ export default function LeadsTable({ token, source = 'meta' }) {
   const paginated = sorted.slice((page - 1) * perPage, page * perPage);
 
   function exportCSV() {
-    const headers = ['Name', 'Phone', 'Sugar Level', 'Ad Source', 'Registered At', 'WA Clicked'];
+    // CSV headers + row mapper kept in lockstep with the on-screen `cols`
+    // array above. Adding a new column here should always be paired with
+    // both an entry in `cols` and a `<td>` in the body so admins can
+    // verify what they see in the table matches what they download.
+    const headers = ['Name', 'Phone', 'Email', 'Sugar Level', 'Duration', 'Medication',
+                     'Do you know Tamil?', 'Occupation',
+                     'Ad Source', 'Registered At', 'WA Clicked'];
     const rows = sorted.map(l => [
       l.full_name,
       '+91' + l.whatsapp_number,
+      l.email || '',
       SUGAR_LABELS[l.sugar_level] || l.sugar_level,
+      DURATION_LABELS[l.diabetes_duration] || l.diabetes_duration || '',
+      MEDICATION_LABELS[l.on_medication] || l.on_medication || '',
+      fmtAgeOrTamil(l.age_group),
+      OCCUPATION_LABELS[l.occupation] || l.occupation || '',
       l.utm_content || '',
       new Date(l.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
       l.wa_clicked ? 'Yes' : 'No',
@@ -285,10 +311,23 @@ export default function LeadsTable({ token, source = 'meta' }) {
   const waClicked    = dateFiltered.filter(l => l.wa_clicked === true).length;
   const waNotClicked = dateFiltered.filter(l => !l.wa_clicked).length;
 
+  // Columns mirror the funnel form fields the admin actually cares about.
+  // Language + Score were removed by request — language_pref is rarely
+  // relevant for follow-up since callers handle both, and the score is
+  // already encoded in the Sugar/Duration combination.
+  // The `age_group` DB column is now used by the Meta funnel to store the
+  // Tamil-knowledge answer (`yes` / `no`), so the column header is renamed
+  // to "Do you know Tamil?" to match. Old YT-funnel rows that still hold
+  // an age bucket ('35-45', etc.) render the raw value verbatim.
   const cols = [
     { key: 'full_name',         label: 'Name' },
     { key: 'whatsapp_number',   label: 'Phone' },
+    { key: 'email',             label: 'Email' },
     { key: 'sugar_level',       label: 'Sugar Level' },
+    { key: 'diabetes_duration', label: 'Duration' },
+    { key: 'on_medication',     label: 'Medication' },
+    { key: 'age_group',         label: 'Do you know Tamil?' },
+    { key: 'occupation',        label: 'Occupation' },
     { key: 'utm_content',       label: 'Ad Source' },
     { key: 'created_at',        label: 'Registered' },
     { key: 'wa_clicked',        label: 'WhatsApp' },
@@ -603,10 +642,38 @@ export default function LeadsTable({ token, source = 'meta' }) {
                 )}
                 <td className="px-3 py-3 font-semibold text-gray-900 whitespace-nowrap">{l.full_name}</td>
                 <td className="px-3 py-3 text-gray-600 whitespace-nowrap font-mono text-xs">+91 {l.whatsapp_number}</td>
+                {/* Email — truncated with full value on hover via title */}
+                <td className="px-3 py-3 text-gray-600 whitespace-nowrap text-xs" style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis' }} title={l.email || ''}>
+                  {l.email || <span className="text-gray-300">—</span>}
+                </td>
                 <td className="px-3 py-3 whitespace-nowrap">
                   <span className={`inline-flex items-center px-2 py-0.5 rounded-pill text-xs font-semibold ${l.sugar_level === '250+' ? 'bg-red-100 text-red-700' : 'bg-orange-100 text-orange-700'}`}>
                     {SUGAR_LABELS[l.sugar_level] || l.sugar_level}
                   </span>
+                </td>
+                {/* Diabetes duration — soft yellow pill */}
+                <td className="px-3 py-3 whitespace-nowrap text-xs">
+                  {l.diabetes_duration
+                    ? <span className="inline-flex items-center px-2 py-0.5 rounded-pill text-xs font-semibold bg-yellow-50 text-yellow-800">{DURATION_LABELS[l.diabetes_duration] || l.diabetes_duration}</span>
+                    : <span className="text-gray-300">—</span>}
+                </td>
+                {/* On medication — soft indigo pill */}
+                <td className="px-3 py-3 whitespace-nowrap text-xs">
+                  {l.on_medication
+                    ? <span className="inline-flex items-center px-2 py-0.5 rounded-pill text-xs font-semibold bg-indigo-50 text-indigo-700">{MEDICATION_LABELS[l.on_medication] || l.on_medication}</span>
+                    : <span className="text-gray-300">—</span>}
+                </td>
+                {/* Age bucket OR Tamil yes/no — same DB column, format depends on the value */}
+                <td className="px-3 py-3 whitespace-nowrap text-xs">
+                  {l.age_group
+                    ? <span className="inline-flex items-center px-2 py-0.5 rounded-pill text-xs font-semibold bg-purple-50 text-purple-700">{fmtAgeOrTamil(l.age_group)}</span>
+                    : <span className="text-gray-300">—</span>}
+                </td>
+                {/* Occupation — soft teal pill */}
+                <td className="px-3 py-3 whitespace-nowrap text-xs">
+                  {l.occupation
+                    ? <span className="inline-flex items-center px-2 py-0.5 rounded-pill text-xs font-semibold bg-teal-50 text-teal-700">{OCCUPATION_LABELS[l.occupation] || l.occupation}</span>
+                    : <span className="text-gray-300">—</span>}
                 </td>
                 <td className="px-3 py-3 whitespace-nowrap text-xs">
                   {l.utm_content ? (
@@ -637,7 +704,8 @@ export default function LeadsTable({ token, source = 'meta' }) {
             ))}
             {sorted.length === 0 && (
               <tr>
-                <td colSpan={deleteMode ? 7 : 6} className="px-3 py-16 text-center">
+                {/* Total cells = 11 visible cols, +1 when delete-mode shows checkbox */}
+                <td colSpan={deleteMode ? 12 : 11} className="px-3 py-16 text-center">
                   <div className="flex flex-col items-center gap-2 text-purple-300">
                     <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="16" x2="13" y2="16"/></svg>
                     <p className="font-sans text-sm">No leads yet.</p>

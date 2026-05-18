@@ -3,7 +3,11 @@ const { body, validationResult } = require('express-validator');
 const router = express.Router();
 const pool = require('../db');
 const { rotateLink } = require('../utils/linkRotation');
-const { sendEvent: sendMetaEvent, userDataFromReq } = require('../utils/metaCapi');
+// Meta Pixel / Conversions API was intentionally REMOVED from the YT funnel
+// — YT traffic doesn't go through Meta ads, so no pixel events to fire
+// and no need for server-side CAPI dedup. The meta_event_id / fbp / fbc
+// columns on the leads table stay (for back-compat) but are no longer
+// populated by this route.
 // assignNewLead is not called from this route in the split deployment — see
 // the pg_notify block in the POST handler. The lead-assigner runs only on
 // the CRM service (driven by the 'lead.created' notification).
@@ -179,43 +183,9 @@ router.post('/leads', validators, async (req, res) => {
       ).catch(e => console.error('[Assigner notify] post-lead error:', e.message));
     }
 
-    // Fire-and-forget: Meta Conversions API — Lead + CompleteRegistration.
-    // Shares meta_event_id with the browser Pixel so Events Manager
-    // dedupes the two transports automatically. If META_CAPI_ACCESS_TOKEN
-    // is unset, sendMetaEvent silently no-ops (see utils/metaCapi.js).
-    if (metaEventId) {
-      const [firstName, ...restName] = (full_name || '').trim().split(/\s+/);
-      const lastName = restName.join(' ');
-      const userData = userDataFromReq(req, {
-        email,
-        phone: whatsapp_number,
-        first_name: firstName,
-        last_name: lastName,
-      });
-      // `value` + `currency` are intentionally NOT included in custom_data —
-      // we don't want Meta's bid model driven by a synthetic monetary value.
-      // `rolling_value` is sent as a CUSTOM key for our own analytics only.
-      const rollingValue = leadQualificationValue({ sugar_level, diabetes_duration, on_medication, age_group, occupation });
-      const customData = {
-        content_name: 'webinar_registration',
-        content_category: 'lead',
-        lead_score,
-        rolling_value: rollingValue,
-        sugar_level,
-        diabetes_duration,
-        on_medication: on_medication || null,
-        age_group: age_group || null,
-        occupation: occupation || null,
-      };
-      const sourceUrl = req.body.event_source_url || req.headers.referer || undefined;
-      sendMetaEvent({ event_name: 'Lead', event_id: metaEventId, event_source_url: sourceUrl, user_data: userData, custom_data: customData })
-        .catch(e => console.error('[metaCapi] Lead error:', e.message));
-      // CompleteRegistration uses a derived event_id so the browser
-      // pixel's CompleteRegistration (different UUID) also dedupes.
-      const crEventId = metaEventIdCr || (metaEventId + ':cr');
-      sendMetaEvent({ event_name: 'CompleteRegistration', event_id: crEventId, event_source_url: sourceUrl, user_data: userData, custom_data: { ...customData, status: true } })
-        .catch(e => console.error('[metaCapi] CompleteRegistration error:', e.message));
-    }
+    // Meta CAPI Lead + CompleteRegistration events intentionally removed
+    // (YT funnel doesn't run Meta ads). Browser pixel calls are gone too —
+    // see the YT screens (Screen2/3/5) and TopBar.jsx.
   } catch (err) {
     console.error('Lead insert error:', err.message);
     res.status(500).json({ success: false, error: 'server_error' });
@@ -236,32 +206,8 @@ router.patch('/leads/:id/wa-click', async (req, res) => {
       [id]
     );
     res.json({ success: true });
-
-    // Fire-and-forget: Meta CAPI Schedule event — the strongest commitment
-    // signal we have. Browser Pixel fires the same event with the matching
-    // meta_event_id, so they dedupe in Events Manager.
-    const metaEventId = typeof req.body?.meta_event_id === 'string' ? req.body.meta_event_id : null;
-    const lead = rows[0];
-    if (metaEventId && lead) {
-      const [firstName, ...restName] = (lead.full_name || '').trim().split(/\s+/);
-      const lastName = restName.join(' ');
-      const userData = userDataFromReq(req, {
-        email: lead.email,
-        phone: lead.whatsapp_number,
-        first_name: firstName,
-        last_name: lastName,
-      });
-      const rollingValue = leadQualificationValue(lead);
-      const customData = {
-        content_name: 'webinar_attendance_committed',
-        content_category: 'schedule',
-        lead_score: lead.lead_score,
-        rolling_value: rollingValue,
-      };
-      const sourceUrl = req.body?.event_source_url || req.headers.referer || undefined;
-      sendMetaEvent({ event_name: 'Schedule', event_id: metaEventId, event_source_url: sourceUrl, user_data: userData, custom_data: customData })
-        .catch(e => console.error('[metaCapi] Schedule error:', e.message));
-    }
+    // Meta CAPI Schedule event intentionally removed — YT funnel runs
+    // without any Meta pixel/CAPI integration. See routes/leads.js header.
   } catch (err) {
     console.error('wa-click update error:', err.message);
     res.status(500).json({ success: false });

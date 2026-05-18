@@ -5,7 +5,14 @@ import { useFunnel } from '../context/FunnelContext';
 import { t } from '../translations';
 import CountdownTimer, { stopTick } from '../components/CountdownTimer';
 import { trackEvent } from '../utils/trackEvent';
+import { gtagPageView } from '../utils/gtag';
 import Confetti from '../components/Confetti';
+
+/* Module-level guard so the Google Ads LPV conversion fires at most once
+   per page-load even if Screen1A re-mounts (e.g. user bounces back to
+   `/` mid-session). Resets only on full reload — exactly when Google Ads
+   wants a fresh "link click" signal. */
+let hasFiredLpv = false;
 
 /* ── Live social proof messages ───────────────────────────────────────── */
 const LIVE_MSGS = [
@@ -198,6 +205,16 @@ export default function Screen1A() {
     const handler = (e) => setIsDesktop(e.matches);
     mq.addEventListener('change', handler);
     return () => mq.removeEventListener('change', handler);
+  }, []);
+
+  // Google Ads — fire LPV ("Landing Page View") conversion on mount.
+  // This is the top-of-funnel signal Google Ads needs to confirm an ad
+  // click actually landed. Guarded by `hasFiredLpv` so we fire at most
+  // once per browser session.
+  useEffect(() => {
+    if (hasFiredLpv) return;
+    hasFiredLpv = true;
+    gtagPageView();
   }, []);
 
   // Track page visit — fires once (waits up to 3s for webinar config, then fires anyway)

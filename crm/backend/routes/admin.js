@@ -1111,10 +1111,23 @@ router.get('/lead-share-config', async (req, res) => {
         WHERE webinar_id = $1`,
       [webinar_id]
     );
-    const [callersRes, configRes] = await Promise.all([callersQuery, configQuery]);
+    // How many leads in THIS webinar have already been handed out to each
+    // caller. Powers the "Assigned" column in the admin view so the operator
+    // can eyeball whether round-robin is distributing fairly.
+    const countsQuery = pool.query(
+      `SELECT assigned_user_id::text AS caller_id, COUNT(*)::int AS count
+         FROM leads
+        WHERE webinar_id = $1
+          AND assigned_user_id IS NOT NULL
+        GROUP BY assigned_user_id`,
+      [webinar_id]
+    );
+    const [callersRes, configRes, countsRes] = await Promise.all([callersQuery, configQuery, countsQuery]);
 
     const configByCaller = {};
     for (const row of configRes.rows) configByCaller[row.caller_id] = row;
+    const countByCaller = {};
+    for (const row of countsRes.rows) countByCaller[row.caller_id] = row.count;
 
     const config = callersRes.rows.map((c, idx) => {
       const saved = configByCaller[c.id];
@@ -1129,6 +1142,7 @@ router.get('/lead-share-config', async (req, res) => {
         allowed_lead_types: saved ? saved.allowed_lead_types : ['all'],
         position:           saved ? saved.position           : idx,
         has_saved_config:   !!saved,
+        assigned_count:     countByCaller[c.id] || 0,
       };
     });
     res.json({ callers: config });

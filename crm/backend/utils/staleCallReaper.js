@@ -50,9 +50,29 @@ async function reapOnce(staleAfterMs) {
           at:               new Date().toISOString(),
         }));
       } catch (_) { /* best-effort log */ }
-      // Notify the owning caller so the modal can synthesize a recovery
-      // (call.hangup → form_window if customer answered, else agent.missed).
+      // Close any matching activity-event rows that would otherwise be
+      // left open forever (ON_CALL / AFTER_CALL_FORM / ON_REASON_FORM
+      // tags). Without this the caller's activity dashboard ends up
+      // showing 30h+ "on call" entries days later.
       if (r.caller_id) {
+        try {
+          await pool.query(
+            `UPDATE caller_activity_events
+                SET ended_at     = NOW(),
+                    duration_sec = GREATEST(0, EXTRACT(EPOCH FROM (NOW() - started_at))::int),
+                    context      = COALESCE(context, '{}'::jsonb) ||
+                                   jsonb_build_object('closed_by', 'stale_call_reaper',
+                                                      'call_id',   $2::text)
+              WHERE caller_id = $1
+                AND tag IN ('ON_CALL','AFTER_CALL_FORM','ON_REASON_FORM')
+                AND ended_at IS NULL`,
+            [r.caller_id, r.id]
+          );
+        } catch (err) {
+          console.error('[staleCallReaper] activity-event close error:', err.message);
+        }
+        // Notify the owning caller so the modal can synthesize a recovery
+        // (call.hangup → form_window if customer answered, else agent.missed).
         callerSse.pushTo(r.caller_id, {
           type: 'call.hangup',
           call: {

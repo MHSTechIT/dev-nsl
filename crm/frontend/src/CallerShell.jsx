@@ -115,6 +115,12 @@ export default function CallerShell({ callerName: nameProp, callerRole: roleProp
   }, []);
   const clearPendingAutoStart = useCallback(() => setPendingAutoStart(false), []);
   const [showDropdown, setShowDropdown] = useState(false);
+  /* Hamburger toggle — when true, the tab bar collapses into a single
+     three-line button. Defaults to COLLAPSED on every login / refresh so
+     the caller sees the clean Call page (robot + Start Call) without the
+     tab strip cluttering the layout. Clicking the hamburger expands the
+     full tab strip on demand. */
+  const [tabsCollapsed, setTabsCollapsed] = useState(true);
   const [externalHighlightId, setExternalHighlightId] = useState(null);
   const dropRef = useRef(null);
   /* Pause state — live-tracked via /api/caller/me + SSE caller.paused / caller.resumed.
@@ -301,11 +307,15 @@ export default function CallerShell({ callerName: nameProp, callerRole: roleProp
           marginBottom: 16,
         }}
       >
-        {/* White card holds ONLY the tabs */}
+        {/* Tab card — wraps a hamburger toggle + the tab buttons.
+            When `tabsCollapsed` is true, ONLY the hamburger shows
+            (the tabs are removed from layout). Click the hamburger
+            to re-expand. */}
         <div
           className="caller-tabs"
           style={{
             display: 'flex',
+            alignItems: 'center',
             gap: 4,
             background: '#fff',
             borderRadius: 16,
@@ -316,7 +326,31 @@ export default function CallerShell({ callerName: nameProp, callerRole: roleProp
             flexShrink: 1,
           }}
         >
-          {PAGES.map(p => {
+          {/* Hamburger — always visible, toggles the tab strip */}
+          <button
+            type="button"
+            onClick={() => setTabsCollapsed(c => !c)}
+            aria-label={tabsCollapsed ? 'Show tabs' : 'Hide tabs'}
+            title={tabsCollapsed ? 'Show tabs' : 'Hide tabs'}
+            style={{
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              width: 38, height: 38, borderRadius: 12, border: 'none',
+              cursor: 'pointer', transition: 'background 180ms',
+              background: tabsCollapsed ? '#5B21B6' : 'rgba(91,33,182,0.08)',
+              color: tabsCollapsed ? '#fff' : '#5B21B6',
+              flexShrink: 0,
+            }}
+            onMouseEnter={e => { if (!tabsCollapsed) e.currentTarget.style.background = 'rgba(91,33,182,0.15)'; }}
+            onMouseLeave={e => { if (!tabsCollapsed) e.currentTarget.style.background = 'rgba(91,33,182,0.08)'; }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="3" y1="6" x2="21" y2="6" />
+              <line x1="3" y1="12" x2="21" y2="12" />
+              <line x1="3" y1="18" x2="21" y2="18" />
+            </svg>
+          </button>
+
+          {!tabsCollapsed && PAGES.map(p => {
             const isActive = activePage === p.id;
             return (
               <button
@@ -451,8 +485,12 @@ export default function CallerShell({ callerName: nameProp, callerRole: roleProp
       {/* ── Floating incoming-call toasts (top-right, persists across tabs) ── */}
       <IncomingCallToast jwt={jwt} onOpenLead={handleOpenLead} />
 
-      {/* ── Mascot bot (bottom-right, behind pause overlay at z 9900) ── */}
-      <MascotBot mood={mascotMood} />
+      {/* ── Mascot bot (bottom-right) — removed per design.
+           The CallModule already shows a much larger version of the same
+           bot in the center of the Call page; the corner duplicate just
+           competed for attention. Kept the import + setMood plumbing in
+           case we want to bring it back behind a toggle later. */}
+      {false && <MascotBot mood={mascotMood} />}
 
       {/* ── Paused-by-admin blocking overlay ──
          Renders only when /api/caller/me reports is_active = false. No dismiss

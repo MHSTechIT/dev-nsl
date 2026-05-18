@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 const DAYS   = ['Mo','Tu','We','Th','Fr','Sa','Su'];
@@ -13,10 +14,18 @@ export default function DatePicker({ value, onChange, placeholder = 'Select date
   const [viewMonth, setViewMonth] = useState(() => value ? parseInt(value.split('-')[1]) - 1 : now.getMonth());
   const ref = useRef(null);
   const triggerRef = useRef(null);
+  const dropdownRef = useRef(null);
   const [dropPos, setDropPos] = useState({ top: 0, left: 0, width: 0 });
 
   useEffect(() => {
-    function h(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    // Close on outside-click. The dropdown is now portaled to document.body
+    // so `ref.current.contains()` alone won't include it — also check
+    // `dropdownRef.current` so clicks inside the calendar don't close it.
+    function h(e) {
+      const inTrigger  = ref.current && ref.current.contains(e.target);
+      const inDropdown = dropdownRef.current && dropdownRef.current.contains(e.target);
+      if (!inTrigger && !inDropdown) setOpen(false);
+    }
     document.addEventListener('mousedown', h);
     return () => document.removeEventListener('mousedown', h);
   }, []);
@@ -97,13 +106,19 @@ export default function DatePicker({ value, onChange, placeholder = 'Select date
         </svg>
       </button>
 
-      {open && (
-        <div style={{
+      {open && createPortal(
+        /* PORTAL — render the dropdown under document.body so it escapes
+           any transformed/contained ancestor's stacking context. Without
+           this, opening the picker inside an animated drawer (which gets
+           a `transform` keyframe even briefly) re-anchors the fixed
+           position to the drawer instead of the viewport, and the calendar
+           appears off-screen / behind the drawer. */
+        <div ref={dropdownRef} style={{
           position: 'fixed', top: dropPos.top, left: dropPos.left,
           width: dropPos.width, background: '#fff',
           border: '1px solid rgba(139,92,246,0.18)', borderRadius: 14,
           boxShadow: '0 12px 48px rgba(91,33,182,0.16)',
-          zIndex: 9999, padding: '10px 12px 12px',
+          zIndex: 99999, padding: '10px 12px 12px',
           fontFamily: 'Outfit, sans-serif',
         }}>
           {/* Month nav */}
@@ -172,7 +187,8 @@ export default function DatePicker({ value, onChange, placeholder = 'Select date
               marginLeft: 'auto',
             }}>Today</button>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

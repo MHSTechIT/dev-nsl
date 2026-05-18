@@ -9,7 +9,11 @@ import {
   pixelViewContent, pixelStartQualification,
   pixelSugarSelected, pixelDisqualified,
   pixelDurationSelected, pixelMedicationSelected,
-  pixelAgeSelected, pixelOccupationSelected,
+  // The "age group" question was replaced by "Do you know Tamil?"; the
+  // pixel call was renamed accordingly. `selectedAge` still holds the
+  // answer because the FunnelContext field name didn't change — just
+  // the meaning of the value (now 'yes' / 'no' instead of an age bucket).
+  pixelTamilKnowledgeSelected, pixelOccupationSelected,
   pixelFormOpened,
 } from '../utils/pixel';
 
@@ -305,7 +309,7 @@ export default function Screen1A() {
 
   function handleDemographicsContinue() {
     if (!selectedAge || !selectedOccupation) return;
-    pixelAgeSelected(selectedAge, state);
+    pixelTamilKnowledgeSelected(selectedAge, state);
     pixelOccupationSelected(selectedOccupation, { ...state, ageGroup: selectedAge });
     dispatch({ type: 'SET_AGE_GROUP', payload: selectedAge });
     dispatch({ type: 'SET_OCCUPATION', payload: selectedOccupation });
@@ -567,15 +571,19 @@ export default function Screen1A() {
               To customise the session for you
             </p>
 
-            {/* Q1 — age group (horizontal row of 3 small pills) */}
-            <p style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.72rem', fontWeight: 700, color: '#5B21B6', letterSpacing: '0.06em', margin: '0 0 8px' }}>
-              YOUR AGE GROUP?
+            {/* Q1 — Tamil-knowledge filter (replaces the old age group
+                question). Two pills instead of three. The values land in
+                the same `age_group` column on the lead row — the backend
+                validator was widened to accept these values too. The
+                question is bilingual — English + Tamil on a single line
+                separated by a slash so both audiences see it at once. */}
+            <p style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.72rem', fontWeight: 700, color: '#5B21B6', letterSpacing: '0.04em', margin: '0 0 8px' }}>
+              DO YOU KNOW TAMIL? / உங்களுக்கு தமிழ் தெரியுமா?
             </p>
             <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
               {[
-                { id: '35-45', label: '35 – 45' },
-                { id: '45-55', label: '45 – 55' },
-                { id: '55+',   label: '55+' },
+                { id: 'yes', label: 'ஆம்' },
+                { id: 'no',  label: 'No'  },
               ].map((opt, i) => {
                 const isSelected = selectedAge === opt.id;
                 return (

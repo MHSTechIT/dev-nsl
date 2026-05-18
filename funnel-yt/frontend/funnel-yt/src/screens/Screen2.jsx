@@ -5,7 +5,6 @@ import { useFunnel } from '../context/FunnelContext';
 import { t } from '../translations';
 import TopBar from '../components/TopBar';
 import CountdownTimerCompact from '../components/CountdownTimerCompact';
-import { pixelLanguageQualified, pixelDisqualifiedLead, pixelLead } from '../utils/pixel';
 import { trackEvent } from '../utils/trackEvent';
 
 const slideIn = {
@@ -27,15 +26,12 @@ export default function Screen2() {
     trackEvent('tamil_yes', state.webinarConfig?.next_webinar_at);
     dispatch({ type: 'SET_LANGUAGE_QUALIFIED', payload: true });
     dispatch({ type: 'SET_NAV_DIRECTION', payload: 'forward' });
-    pixelLanguageQualified();
-    pixelLead({ content_name: 'tamil_qualified', content_category: 'language_screen' });
     navigate('/duration');
   }
 
   function handleNo() {
     trackEvent('tamil_no', state.webinarConfig?.next_webinar_at);
     dispatch({ type: 'SET_NAV_DIRECTION', payload: 'forward' });
-    pixelDisqualifiedLead('language_mismatch', state.utm);
     window.location.href = (import.meta.env.VITE_DISQUALIFIED_URL || '') + '/language';
   }
 

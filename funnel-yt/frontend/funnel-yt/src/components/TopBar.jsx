@@ -2,7 +2,6 @@ import { useNavigate } from 'react-router-dom';
 import { m } from 'framer-motion';
 import { useFunnel } from '../context/FunnelContext';
 import LanguageToggle from './LanguageToggle';
-import { pixelBackNavigation } from '../utils/pixel';
 
 const TOTAL = 4; // total funnel steps (screens 2–5)
 
@@ -11,7 +10,6 @@ export default function TopBar({ showBack = false, backPath = '/', onBack, step 
   const { dispatch } = useFunnel();
 
   function handleBack() {
-    pixelBackNavigation();
     dispatch({ type: 'SET_NAV_DIRECTION', payload: 'back' });
     if (onBack) { onBack(); } else { navigate(backPath); }
   }
