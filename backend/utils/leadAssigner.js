@@ -22,6 +22,38 @@ async function assignNewLead(leadId, sugarLevel, webinarId) {
   try {
     await client.query('BEGIN');
 
+    // 0. Same-webinar duplicate guard.
+    //    If another lead with the same whatsapp_number already exists for this
+    //    webinar AND has been assigned to a caller, skip the round-robin step.
+    //    The lead row is kept (assigned_user_id stays NULL) and the rotation
+    //    cursor does not advance, so the next genuine lead lands on the caller
+    //    who would have been next.
+    const { rows: dup } = await client.query(`
+      SELECT earlier.id AS earlier_lead_id, earlier.assigned_user_id
+        FROM leads earlier
+        JOIN leads new_lead
+          ON new_lead.whatsapp_number = earlier.whatsapp_number
+         AND new_lead.webinar_id      = earlier.webinar_id
+       WHERE new_lead.id              = $1
+         AND earlier.id              <> $1
+         AND earlier.assigned_user_id IS NOT NULL
+       ORDER BY earlier.created_at ASC
+       LIMIT 1
+    `, [leadId]);
+
+    if (dup.length > 0) {
+      await client.query('COMMIT');
+      console.log(JSON.stringify({
+        type:              'lead.assign.duplicate_skipped',
+        lead_id:           leadId,
+        earlier_lead_id:   dup[0].earlier_lead_id,
+        earlier_caller_id: dup[0].assigned_user_id,
+        webinar_id:        webinarId,
+        at:                new Date().toISOString(),
+      }));
+      return null;
+    }
+
     // 1. Eligible callers for this webinar
     const { rows: eligible } = await client.query(`
       SELECT lsc.caller_id

@@ -426,6 +426,9 @@ const _clickMigration = pool.query(`
   -- cross-device dedupe via the lead's phone number).
   ALTER TABLE leads ADD COLUMN IF NOT EXISTS visitor_id TEXT;
   CREATE INDEX IF NOT EXISTS idx_leads_visitor_id ON leads (visitor_id);
+  -- Supports the same-webinar duplicate guard in utils/leadAssigner.js:
+  -- "another lead with same whatsapp_number + webinar_id already assigned?"
+  CREATE INDEX IF NOT EXISTS idx_leads_webinar_whatsapp ON leads (webinar_id, whatsapp_number);
 `);
 if (_clickMigration && typeof _clickMigration.catch === 'function') {
   _clickMigration.catch(err => console.error('[Migration] click_events error:', err.message));
