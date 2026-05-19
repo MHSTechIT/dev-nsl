@@ -4,6 +4,7 @@ import { m } from 'framer-motion';
 import { useFunnel } from '../context/FunnelContext';
 import { t } from '../translations';
 import { trackEvent, getVisitorId } from '../utils/trackEvent';
+import { gtagAtc } from '../utils/gtag';
 
 const slideIn = {
   initial: { opacity: 0, y: 12 },
@@ -99,6 +100,11 @@ export default function Screen4() {
     const errs = validate(fullName, whatsappNumber, email);
     setErrors(errs);
     if (Object.keys(errs).length > 0) return;
+
+    // Google Ads ATC — fire as soon as a valid submit click happens, before
+    // the POST. Counts "user committed to register" intent separately from
+    // the (out-of-scope) success-only Lead conversion.
+    gtagAtc();
 
     setSubmitting(true);
     setServerError('');
