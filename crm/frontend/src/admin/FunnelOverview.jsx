@@ -1,25 +1,34 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
 /* Funnel Overview — first tab in the admin dashboard.
    Pure-SVG visualisation of the customer journey funnel:
    Awareness → Consideration → Conversion → Loyalty → Advocacy.
 
    Left-side filter panel fills the space next to the funnel — date range
-   pills, webinar dropdown, source toggle, refresh action. Filter state is
-   wired up but the placeholder STAGES counts don't yet respond to it; when
-   live data is plumbed in, the filters will already be driving it. */
+   pills, webinar dropdown, refresh action. Counts are pulled live from
+   `/api/admin/dashboard` (the same endpoint that powers the Page
+   Performance tab) and re-fetched whenever any filter changes. */
 
-/* Per-stage counts are placeholder values for visual layout. When ready to
-   wire to live data, replace each `count` with the matching backend metric
-   (e.g. unique_visitors / wa_clicks from /api/admin/dashboard). */
+/* Stage definitions — each `eventKeys` array lists the click_event names
+   whose counts add up to that stage's value. The order here drives the
+   funnel rendering top-to-bottom. */
 const STAGES = [
-  { id: 'unique_leads',       letter: 'U', label: 'Unique Leads',       blurb: 'Unique visitors landing on the funnel',       count: 12500 },
-  { id: 'start_registration', letter: 'S', label: 'Start Registration', blurb: 'Tapped Start and began filling the form',     count:  8400 },
-  { id: 'sugar_level',        letter: 'S', label: 'Sugar Level',        blurb: 'Picked their fasting sugar bucket',           count:  6200 },
-  { id: 'tamil',              letter: 'T', label: 'Do You Know Tamil',  blurb: 'Confirmed Tamil language preference',         count:  5100 },
-  { id: 'registration',       letter: 'R', label: 'Registration',       blurb: 'Completed the registration form',             count:  3800 },
-  { id: 'whatsapp',           letter: 'W', label: 'WhatsApp',           blurb: 'Tapped through to the WhatsApp confirmation', count:  2950 },
+  { id: 'unique_leads',       letter: 'U', label: 'Unique Leads',       blurb: 'Unique visitors landing on the funnel',       eventKeys: ['unique_visitors']                    },
+  { id: 'start_registration', letter: 'S', label: 'Start Registration', blurb: 'Tapped Start and began filling the form',     eventKeys: ['cta_clicked']                        },
+  { id: 'sugar_level',        letter: 'S', label: 'Sugar Level',        blurb: 'Picked their fasting sugar bucket',           eventKeys: ['sugar_150_250', 'sugar_250_plus']    },
+  { id: 'tamil',              letter: 'T', label: 'Do You Know Tamil',  blurb: 'Confirmed Tamil language preference',         eventKeys: ['tamil_yes', 'tamil_no']              },
+  { id: 'registration',       letter: 'R', label: 'Registration',       blurb: 'Completed the registration form',             eventKeys: ['registration_submitted']             },
+  { id: 'whatsapp',           letter: 'W', label: 'WhatsApp',           blurb: 'Tapped through to the WhatsApp confirmation', eventKeys: ['wa_join_clicked']                    },
 ];
+
+/* Sum every event count listed in `eventKeys` against the `counts` map
+   returned by /api/admin/dashboard. Missing keys contribute 0 so the
+   stage stays valid even if a particular event hasn't fired yet. */
+function sumCounts(counts, keys) {
+  let total = 0;
+  for (const k of keys) total += (counts?.[k] || 0);
+  return total;
+}
 
 /* Compact integer formatter — adds Indian-style commas (1,23,456). */
 function fmtCount(n) {
@@ -101,20 +110,77 @@ function FilterCard({ icon, label, children }) {
   );
 }
 
-export default function FunnelOverview() {
+export default function FunnelOverview({ token, source = 'meta' }) {
   const [dateRange, setDateRange]   = useState('all');
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo]     = useState('');
   const [webinarId, setWebinarId]   = useState('');
+  const [webinars,  setWebinars]    = useState([]);
+  const [counts,    setCounts]      = useState({});
+  const [loading,   setLoading]     = useState(true);
+  const [error,     setError]       = useState('');
+  const [refetchTick, setRefetchTick] = useState(0);   // bumped by Refresh button
   const [lastUpdated, setLastUpdated] = useState(() =>
     new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })
   );
 
   function refresh() {
-    setLastUpdated(new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }));
-    // When live data is wired in, this will refetch the counts. For now the
-    // counts are static placeholders so we just update the "last updated" stamp.
+    setRefetchTick(t => t + 1);
   }
+
+  /* Populate the Webinar dropdown — reuses the same endpoint as every
+     other admin view so the option list stays consistent. */
+  useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+    fetch(`/api/admin/webinars?source=${source}`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(d => { if (!cancelled) setWebinars(d.webinars || []); })
+      .catch(() => { /* non-fatal — keeps the "All Webinars" default */ });
+    return () => { cancelled = true; };
+  }, [token, source]);
+
+  /* Fetch live funnel counts whenever a filter changes. Reuses
+     /api/admin/dashboard which already groups click_events by name +
+     joins lead/wa-click totals — exactly what the funnel stages need. */
+  useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+    const params = new URLSearchParams();
+    params.set('source', source);
+    if (dateRange === 'today') {
+      const today = new Date().toISOString().slice(0, 10);
+      params.set('from', today);
+      params.set('to',   today);
+    } else if (dateRange === 'custom' && customFrom) {
+      params.set('from', customFrom);
+      if (customTo) params.set('to', customTo);
+    }
+    if (webinarId) {
+      // `webinar_at` is what HomeDashboard sends — keep the contract stable.
+      const w = webinars.find(x => String(x.id) === String(webinarId));
+      if (w?.webinar_at) params.set('webinar_at', w.webinar_at);
+    }
+    setLoading(true);
+    setError('');
+    fetch(`/api/admin/dashboard?${params}`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : Promise.reject(new Error('Failed to fetch')))
+      .then(j => {
+        if (cancelled) return;
+        setCounts(j.counts || {});
+        setLastUpdated(new Date().toLocaleTimeString('en-IN', {
+          timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit',
+        }));
+      })
+      .catch(e => { if (!cancelled) setError(e.message); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [token, source, dateRange, customFrom, customTo, webinarId, webinars, refetchTick]);
+
+  /* Stage objects with live counts spliced in. Computed once per render
+     so the SVG below renders against `liveStages` and the placeholder
+     STAGES constant only carries config (labels, blurbs, event keys). */
+  const liveStages = STAGES.map(s => ({ ...s, count: sumCounts(counts, s.eventKeys) }));
 
   return (
     <div style={{ fontFamily: 'Outfit, sans-serif' }}>
@@ -194,7 +260,11 @@ export default function FunnelOverview() {
               }}
             >
               <option value="">All Webinars</option>
-              {/* Real webinar list plumbs in here once the filter is wired. */}
+              {webinars.map(w => (
+                <option key={w.id} value={w.id}>
+                  {w.name ? w.name.replace(/^AWS-/, 'AWS - ') : (w.webinar_at || w.id)}
+                </option>
+              ))}
             </select>
           </FilterCard>
 
@@ -204,21 +274,37 @@ export default function FunnelOverview() {
             gap: 8, marginTop: 'auto', padding: '4px 2px',
           }}>
             <span style={{ fontSize: '0.66rem', color: 'rgba(91,33,182,0.50)' }}>
-              Updated {lastUpdated}
+              {loading ? 'Loading…' : `Updated ${lastUpdated}`}
             </span>
             <button
               type="button"
               onClick={refresh}
+              disabled={loading}
               style={{
                 padding: '6px 12px', borderRadius: 8, border: 'none',
-                background: 'rgba(91,33,182,0.10)', color: '#5B21B6',
+                background: loading ? 'rgba(91,33,182,0.05)' : 'rgba(91,33,182,0.10)',
+                color: '#5B21B6',
                 fontFamily: 'Outfit, sans-serif', fontWeight: 700, fontSize: '0.74rem',
-                cursor: 'pointer',
+                cursor: loading ? 'wait' : 'pointer',
+                opacity: loading ? 0.5 : 1,
               }}
             >
               ↻ Refresh
             </button>
           </div>
+          {/* Compact inline error band — only visible when the API
+              call fails. Doesn't unmount the funnel; the SVG stays so
+              the admin can still glance at the previous counts. */}
+          {error && (
+            <div style={{
+              padding: '6px 10px', borderRadius: 8,
+              background: 'rgba(254,242,242,0.95)',
+              border: '1px solid rgba(248,113,113,0.40)',
+              color: '#B91C1C', fontSize: '0.74rem',
+            }}>
+              ⚠ {error}
+            </div>
+          )}
         </div>
 
         {/* ── Right: funnel SVG ── */}
@@ -245,8 +331,8 @@ export default function FunnelOverview() {
                always 100%. Every other stage shows what % of unique leads
                survived to that step. Computed once outside the map so each
                row can reference the same baseline. */
-            const baseline = STAGES[0]?.count || 0;
-            return STAGES.map((stage, i) => {
+            const baseline = liveStages[0]?.count || 0;
+            return liveStages.map((stage, i) => {
             const topW = TOP_WIDTHS[i];
             const botW = BOT_WIDTHS[i];
             const yTop = TOP_Y + i * (DISC_H + DISC_GAP);

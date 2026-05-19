@@ -113,6 +113,70 @@ router.post('/heartbeat', async (req, res) => {
   }
 });
 
+/* ── POST /api/caller/state ──
+   Caller-driven UI-state transition for the granular activity log.
+
+   The heartbeat above tracks coarse working / on_break / idle status. This
+   endpoint records the fine-grained "what page / modal is the caller on
+   right now" timeline (Assigned Leads page → Viewing Lead → On Call → Form
+   → Reason picker → Assigned Leads page again …).
+
+   Body shape:
+     { action: 'start'|'end'|'replace', tag, context?, end_tag? }
+
+   - action='start'   → activityLogger.startEvent(caller, tag, context)
+   - action='end'     → activityLogger.endEvent(caller, tag, context)  (context = optional patch)
+   - action='replace' → end_tag (or every other page/modal tag) is closed, then `tag` starts.
+                        Use 'replace' for clean A → B transitions so the timeline
+                        shows two consecutive rows instead of overlapping ones.
+
+   All operations are best-effort; the response is always { ok:true } unless the
+   tag is unknown. Logging failures never surface to the caller. */
+const PAGE_TAGS = [
+  'ON_PAGE_CALL', 'ON_PAGE_ASSIGNED', 'ON_PAGE_COMPLETED',
+  'ON_PAGE_NOT_PICKED', 'ON_PAGE_MISSED_CALLS', 'ON_PAGE_UNTOUCHED',
+  'ON_PAGE_NEXT_BATCH',
+];
+const MODAL_TAGS = [
+  'VIEWING_LEAD', 'AFTER_CALL_FORM', 'ON_REASON_FORM',
+  'BREAK_PICKER', 'BREAK_OTHER_PICKER',
+];
+
+router.post('/state', async (req, res) => {
+  const { action, tag, context, end_tag } = req.body || {};
+  if (!action || !tag) {
+    return res.status(422).json({ error: 'action and tag are required' });
+  }
+  if (!activityLogger.VALID_TAGS.has(tag)) {
+    return res.status(422).json({ error: `unknown tag: ${tag}` });
+  }
+  const callerId = req.caller.id;
+  try {
+    if (action === 'end') {
+      await activityLogger.endEvent(callerId, tag, context || null);
+    } else if (action === 'start') {
+      await activityLogger.startEvent(callerId, tag, context || null);
+    } else if (action === 'replace') {
+      // Close any modal-level event first so the new state takes precedence.
+      // If a specific end_tag was supplied, close only that one; otherwise
+      // sweep all modal tags + the page tags that aren't `tag` itself.
+      if (end_tag && activityLogger.VALID_TAGS.has(end_tag)) {
+        await activityLogger.endEvent(callerId, end_tag);
+      } else {
+        const sweep = [...MODAL_TAGS, ...PAGE_TAGS].filter(t => t !== tag);
+        await activityLogger.endEventsForCaller(callerId, sweep);
+      }
+      await activityLogger.startEvent(callerId, tag, context || null);
+    } else {
+      return res.status(422).json({ error: 'action must be one of: start, end, replace' });
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('caller/state error:', err.message);
+    res.status(500).json({ error: 'state_failed' });
+  }
+});
+
 /* ── GET /api/caller/me ──
    Returns the JWT payload PLUS the live is_active flag. The caller frontend
    uses is_active to show a blocking "paused by admin" overlay; the JWT alone

@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import SalesPerformanceDrillPanel from './SalesPerformanceDrillPanel';
 import ReassignDistributionModal   from '../admin/ReassignDistributionModal';
 import CallerActivityDrawer        from '../admin/CallerActivityDrawer';
+import CallerPageDrawer            from '../admin/CallerPageDrawer';
 import Toast                       from '../components/Toast';
 
 /* ── small formatters ── */
@@ -108,7 +109,7 @@ function PricingPerfTable({
   rows, tt, topRowId, nowTick,
   selectedRoles, toggleRole,
   openDrill, openMovePicker, togglePause, pauseBusyIds,
-  openActivity,
+  openActivity, openCallerPage,
 }) {
   // Click-to-highlight — track which label row the admin has selected.
   // Clicking the same label again clears the highlight. The wash applies
@@ -395,6 +396,7 @@ function PricingPerfTable({
                     onMove={openMovePicker}
                     onView={(row) => openDrill(row.caller_id, 'assigned')}
                     onTogglePause={togglePause}
+                    onCallerPage={openCallerPage}
                   />
                 </div>
               </div>
@@ -613,14 +615,24 @@ function TrendArrow({ now, prev }) {
                           Disabled while a previous toggle is in flight.
 
    Stops click propagation so the row's drill-down click isn't triggered. */
-function RowMenuButton({ row, busyPause, onMove, onView, onTogglePause }) {
+function RowMenuButton({ row, busyPause, onMove, onView, onTogglePause, onCallerPage }) {
   const [open, setOpen] = useState(false);
   const wrapperRef = useRef(null);
+  const menuRef    = useRef(null);
+  // Anchor position the menu relative to the trigger using
+  // getBoundingClientRect, then portal the menu to <body> so it escapes
+  // any ancestor's stacking context (sticky table headers, transformed
+  // drawers, etc.). Without this the dropdown rendered BEHIND the next
+  // table cells because the sticky header creates a fresh stacking
+  // context that traps absolute children.
+  const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
 
   useEffect(() => {
     if (!open) return undefined;
     function onDocClick(e) {
-      if (wrapperRef.current && !wrapperRef.current.contains(e.target)) setOpen(false);
+      const inTrigger = wrapperRef.current && wrapperRef.current.contains(e.target);
+      const inMenu    = menuRef.current    && menuRef.current.contains(e.target);
+      if (!inTrigger && !inMenu) setOpen(false);
     }
     function onKey(e) { if (e.key === 'Escape') setOpen(false); }
     document.addEventListener('mousedown', onDocClick);
@@ -644,11 +656,23 @@ function RowMenuButton({ row, busyPause, onMove, onView, onTogglePause }) {
   function close() { setOpen(false); }
   function handleItem(fn) { return (e) => { e.stopPropagation(); close(); fn?.(row); }; }
 
+  function toggleOpen(e) {
+    e.stopPropagation();
+    if (!open && wrapperRef.current) {
+      // Anchor the menu's top-right corner to the trigger's bottom-right.
+      // Using viewport coords because the menu is portaled to <body>,
+      // which is positioned relative to the viewport.
+      const r = wrapperRef.current.getBoundingClientRect();
+      setMenuPos({ top: r.bottom + 4, left: r.right - 200 });   // 200 = menu min-width
+    }
+    setOpen(v => !v);
+  }
+
   return (
     <div ref={wrapperRef} style={{ position: 'relative', display: 'inline-block' }}>
       <button
         type="button"
-        onClick={(e) => { e.stopPropagation(); setOpen(v => !v); }}
+        onClick={toggleOpen}
         aria-label={`Actions for ${row.name}`}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -668,15 +692,16 @@ function RowMenuButton({ row, busyPause, onMove, onView, onTogglePause }) {
           <circle cx="12" cy="19" r="1.7"/>
         </svg>
       </button>
-      {open && (
+      {open && createPortal(
         <div
+          ref={menuRef}
           role="menu"
           style={{
-            position: 'absolute', top: 'calc(100% + 4px)', right: 0,
+            position: 'fixed', top: menuPos.top, left: menuPos.left,
             minWidth: 200, background: '#fff', borderRadius: 10,
             border: '1px solid rgba(209,196,240,0.60)',
             boxShadow: '0 12px 36px rgba(91,33,182,0.20)',
-            padding: 6, zIndex: 50,
+            padding: 6, zIndex: 99999,
             fontFamily: 'Outfit, sans-serif',
           }}
         >
@@ -699,6 +724,25 @@ function RowMenuButton({ row, busyPause, onMove, onView, onTogglePause }) {
             </svg>
             View call log
           </button>
+          {/* Caller page — opens a side drawer that shows the caller's
+              own Assigned / Completed / Not Picked buckets and lets the
+              admin bulk-reopen any completed lead back to Assigned. Only
+              rendered when the parent wired up onCallerPage so older
+              usages of RowMenuButton stay compatible. */}
+          {typeof onCallerPage === 'function' && (
+            <button role="menuitem" onClick={handleItem(onCallerPage)} style={itemStyle(false)}
+              onMouseEnter={e => e.currentTarget.style.background = 'rgba(91,33,182,0.08)'}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                {/* layout-grid icon */}
+                <rect x="3" y="3" width="7" height="7" rx="1"/>
+                <rect x="14" y="3" width="7" height="7" rx="1"/>
+                <rect x="3" y="14" width="7" height="7" rx="1"/>
+                <rect x="14" y="14" width="7" height="7" rx="1"/>
+              </svg>
+              Caller page
+            </button>
+          )}
           <button
             role="menuitem"
             disabled={busyPause}
@@ -718,7 +762,8 @@ function RowMenuButton({ row, busyPause, onMove, onView, onTogglePause }) {
             )}
             {busyPause ? '…' : (isPaused ? 'Resume caller' : 'Pause caller')}
           </button>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -940,6 +985,10 @@ export default function SalesPerformanceView({ token, actionsSlotEl }) {
      in the drawer header. */
   const [activityRow, setActivityRow] = useState(null);
   function openActivity(row) { setActivityRow(row); }
+  // "Caller page" drawer — admin view of all a caller's leads with the
+  // ability to bulk-reopen completed leads back to Assigned.
+  const [callerPageRow, setCallerPageRow] = useState(null);
+  function openCallerPage(row) { setCallerPageRow(row); }
 
   /* Export modal — opens when admin clicks Export CSV. The set holds
      which optional metric columns to include; identity columns
@@ -2043,6 +2092,7 @@ export default function SalesPerformanceView({ token, actionsSlotEl }) {
           togglePause={togglePause}
           pauseBusyIds={pauseBusyIds}
           openActivity={openActivity}
+          openCallerPage={openCallerPage}
         />
       )}
 
@@ -2165,6 +2215,7 @@ export default function SalesPerformanceView({ token, actionsSlotEl }) {
                           onMove={openMovePicker}
                           onView={(row) => openDrill(row.caller_id, 'assigned')}
                           onTogglePause={togglePause}
+                          onCallerPage={openCallerPage}
                         />
                       </td>
                     </tr>
@@ -2237,6 +2288,21 @@ export default function SalesPerformanceView({ token, actionsSlotEl }) {
           // function refetches data, which refreshes activityRow's row
           // data so the button switches Pause ↔ Resume in real time.
           onTogglePause={() => togglePause(activityRow)}
+        />
+      )}
+
+      {/* Caller-page side drawer — opened from the kebab menu's
+          "Caller page" item. Shows the caller's Assigned / Completed /
+          Not Picked buckets with bulk reopen for Completed leads. */}
+      {callerPageRow && (
+        <CallerPageDrawer
+          token={token}
+          callerId={callerPageRow.caller_id}
+          callerName={callerPageRow.name || callerPageRow.full_name}
+          onClose={() => setCallerPageRow(null)}
+          // After a successful reopen, refetch the parent grid so the
+          // caller's Assigned / Completed columns reflect the move.
+          onAfterReopen={fetchData}
         />
       )}
 

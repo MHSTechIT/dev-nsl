@@ -6,6 +6,20 @@
     <title>Join WhatsApp Group</title>
     <link rel="icon" type="image/png" href="/favicon.png" />
 
+    <!-- Google Ads (gtag.js) — same account as the main YT funnel
+         (AW-17164057977). This page is the "WhatsApp registration
+         page" — the strongest Lead signal in the funnel — so we fire
+         the Lead conversion here too. The Lead from Screen3 + this one
+         share a `transaction_id` (the DB lead_id from the URL) so
+         Google Ads de-duplicates them and counts only one conversion. -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=AW-17164057977"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){ dataLayer.push(arguments); }
+      gtag('js', new Date());
+      gtag('config', 'AW-17164057977');
+    </script>
+
     <!-- Fonts: async (non-blocking) -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />

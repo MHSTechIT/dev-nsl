@@ -42,10 +42,14 @@ export function gtagPageView() {
 /* Lead. Fires right after POST /api/leads returns success in Screen3.
    We pass the lead_score as `value` so Google Ads can weight
    conversions if value-based bidding is turned on later. INR is the
-   currency for all our ads — change if you switch markets. */
-export function gtagLead({ value, currency = 'INR' } = {}) {
+   currency for all our ads — change if you switch markets.
+   `transactionId` is the DB lead_id — passing it lets Google Ads
+   de-duplicate this fire with the WhatsApp-page fire (same lead_id ⇒
+   counted only once even though both pages fire the conversion). */
+export function gtagLead({ transactionId, value, currency = 'INR' } = {}) {
   safeGtag('event', 'conversion', {
     send_to: LEAD_SEND_TO,
+    ...(transactionId && { transaction_id: transactionId }),
     ...(value != null && { value, currency }),
   });
 }

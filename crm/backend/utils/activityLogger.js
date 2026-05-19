@@ -24,6 +24,16 @@ const VALID_TAGS = new Set([
   // Resume is handled by the existing PAUSED_BY_ADMIN / UNPAUSED_BY_ADMIN
   // pair via the super-admin PATCH endpoint.
   'PAUSED_BY_SMARTFLOW',
+  // Page-level tags — exactly one open at any time on a logged-in caller.
+  // Emitted by CallerShell when `activePage` changes.
+  'ON_PAGE_CALL', 'ON_PAGE_ASSIGNED', 'ON_PAGE_COMPLETED',
+  'ON_PAGE_NOT_PICKED', 'ON_PAGE_MISSED_CALLS', 'ON_PAGE_UNTOUCHED',
+  'ON_PAGE_NEXT_BATCH',
+  // Modal/overlay tags — replace the page tag while open and resume it on close.
+  // VIEWING_LEAD: lead card modal is open, no call has started yet.
+  // BREAK_PICKER: "Stop auto-call — pick your break reason" card.
+  // BREAK_OTHER_PICKER: the "Other" sub-picker where caller types a custom reason.
+  'VIEWING_LEAD', 'BREAK_PICKER', 'BREAK_OTHER_PICKER',
 ]);
 
 /* Start an event. If one is already open for this (caller, tag), the

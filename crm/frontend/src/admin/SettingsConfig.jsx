@@ -314,23 +314,28 @@ export default function SettingsConfig({ token, source = 'meta' }) {
         )}
       </div>
 
-      {/* ── Meta campaign filter card ── */}
-      <MetaCampaignCard
-        configured={campaignsConfigured}
-        loading={campaignsLoading}
-        campaigns={campaigns}
-        selected={selectedCampaigns}
-        onToggle={toggleCampaign}
-        onSelectAllVisible={selectAllVisible}
-        onClearAll={clearAll}
-        onSave={saveCampaigns}
-        saving={campSaving}
-        savedMsg={campSavedMsg}
-        open={campOpen}
-        setOpen={setCampOpen}
-        query={campQuery}
-        setQuery={setCampQuery}
-      />
+      {/* ── Meta campaign filter card ──
+          Only relevant on the Meta workspace. Hidden on the YT workspace
+          since YT traffic doesn't flow through Meta Ads at all — Google
+          Ads gtag handles that side's attribution. */}
+      {source === 'meta' && (
+        <MetaCampaignCard
+          configured={campaignsConfigured}
+          loading={campaignsLoading}
+          campaigns={campaigns}
+          selected={selectedCampaigns}
+          onToggle={toggleCampaign}
+          onSelectAllVisible={selectAllVisible}
+          onClearAll={clearAll}
+          onSave={saveCampaigns}
+          saving={campSaving}
+          savedMsg={campSavedMsg}
+          open={campOpen}
+          setOpen={setCampOpen}
+          query={campQuery}
+          setQuery={setCampQuery}
+        />
+      )}
 
     </div>
   );

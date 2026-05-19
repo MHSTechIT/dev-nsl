@@ -7,6 +7,23 @@ const SUGAR_BADGE = {
   '150-250': { bg: '#FEF9C3', fg: '#A16207' },
 };
 
+// Form-option label maps — kept in sync with the funnel form choices and
+// with admin/LeadsTable.jsx so both views speak the same language.
+const DURATION_LABELS   = { new: '< 1 yr', mid: '1–5 yrs', long: '5+ yrs', pre: 'Pre-diabetic' };
+const LANG_LABELS       = { tamil: 'Tamil', english: 'English' };
+const MEDICATION_LABELS = { insulin: 'Insulin', tablets: 'Tablets', none: 'None' };
+const OCCUPATION_LABELS = { working: 'Working', housewife: 'Housewife', retired: 'Retired' };
+
+// age_group column on Meta leads stores the "Do you know Tamil?" answer
+// ('yes' / 'no'); on legacy YT leads it stores the old age bucket. Render
+// the Tamil answer plainly and fall through to the raw value otherwise.
+function fmtTamilOrAge(v) {
+  if (!v) return '';
+  if (v === 'yes') return 'Yes';
+  if (v === 'no')  return 'No';
+  return v;
+}
+
 function fmtDate(iso) {
   if (!iso) return '—';
   try {
@@ -132,12 +149,22 @@ export default function SalesLeadsTable({ token }) {
   useEffect(() => { setPage(1); }, [search, dateMode, customFrom, customTo, webinarIds]);
 
   function exportCsv() {
-    const header = ['Name', 'Email', 'Phone', 'Sugar', 'Webinar', 'Registered (IST)', 'Assigned To'];
+    const header = [
+      'Name', 'Email', 'Phone',
+      'Sugar', 'Duration', 'Language', 'Medication', 'Knows Tamil', 'Occupation',
+      'Ad Source', 'Webinar', 'Registered (IST)', 'Assigned To',
+    ];
     const body = filtered.map(l => [
       l.full_name || '',
       l.email || '',
       fmtPhone(l.whatsapp_number),
       l.sugar_level || '',
+      DURATION_LABELS[l.diabetes_duration] || l.diabetes_duration || '',
+      LANG_LABELS[l.language_pref] || l.language_pref || '',
+      MEDICATION_LABELS[l.on_medication] || l.on_medication || '',
+      fmtTamilOrAge(l.age_group),
+      OCCUPATION_LABELS[l.occupation] || l.occupation || '',
+      l.utm_content || '',
       webinarNameById[String(l.webinar_id)] || '',
       fmtDate(l.created_at),
       l.assigned_to_name || 'Unassigned',
@@ -307,6 +334,12 @@ export default function SalesLeadsTable({ token }) {
                   <th style={thStyle}>Name</th>
                   <th style={thStyle}>Phone</th>
                   <th style={thStyle}>Sugar</th>
+                  <th style={thStyle}>Duration</th>
+                  <th style={thStyle}>Language</th>
+                  <th style={thStyle}>Medication</th>
+                  <th style={thStyle}>Knows Tamil</th>
+                  <th style={thStyle}>Occupation</th>
+                  <th style={thStyle}>Ad Source</th>
                   <th style={thStyle}>Webinar</th>
                   <th style={thStyle}>Registered</th>
                   <th style={thStyle}>Assigned To</th>
@@ -325,6 +358,36 @@ export default function SalesLeadsTable({ token }) {
                         {fmtPhone(l.whatsapp_number)}
                       </td>
                       <td style={tdStyle}><span style={badgeStyle(sugar)}>{l.sugar_level || '—'}</span></td>
+                      <td style={tdStyle}>
+                        {l.diabetes_duration
+                          ? <span style={pillStyle('#FEF3C7', '#92400E')}>{DURATION_LABELS[l.diabetes_duration] || l.diabetes_duration}</span>
+                          : <span style={dashStyle}>—</span>}
+                      </td>
+                      <td style={tdStyle}>
+                        {l.language_pref
+                          ? <span style={pillStyle('#E0F2FE', '#075985')}>{LANG_LABELS[l.language_pref] || l.language_pref}</span>
+                          : <span style={dashStyle}>—</span>}
+                      </td>
+                      <td style={tdStyle}>
+                        {l.on_medication
+                          ? <span style={pillStyle('#EEF2FF', '#3730A3')}>{MEDICATION_LABELS[l.on_medication] || l.on_medication}</span>
+                          : <span style={dashStyle}>—</span>}
+                      </td>
+                      <td style={tdStyle}>
+                        {l.age_group
+                          ? <span style={pillStyle('#F5F3FF', '#5B21B6')}>{fmtTamilOrAge(l.age_group)}</span>
+                          : <span style={dashStyle}>—</span>}
+                      </td>
+                      <td style={tdStyle}>
+                        {l.occupation
+                          ? <span style={pillStyle('#CCFBF1', '#115E59')}>{OCCUPATION_LABELS[l.occupation] || l.occupation}</span>
+                          : <span style={dashStyle}>—</span>}
+                      </td>
+                      <td style={tdStyle}>
+                        {l.utm_content
+                          ? <span style={{ ...pillStyle('#DBEAFE', '#1E40AF'), maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', display: 'inline-block', verticalAlign: 'middle' }} title={l.utm_content}>{l.utm_content}</span>
+                          : <span style={dashStyle}>—</span>}
+                      </td>
                       <td style={{ ...tdStyle, fontWeight: 600, fontSize: '0.82rem' }}>
                         {webinarNameById[String(l.webinar_id)] || '—'}
                       </td>
@@ -438,6 +501,17 @@ function badgeStyle(badge) {
     whiteSpace: 'nowrap',
   };
 }
+
+function pillStyle(bg, fg) {
+  return {
+    display: 'inline-block', padding: '3px 10px', borderRadius: 50,
+    fontSize: '0.72rem', fontWeight: 700,
+    background: bg, color: fg,
+    whiteSpace: 'nowrap',
+  };
+}
+
+const dashStyle = { color: 'rgba(91,33,182,0.30)', fontSize: '0.82rem' };
 
 /* Custom multi-select dropdown for the webinar filter. Matches the rest of
    the toolbar's purple-brand pill / button styling (no more clashing native

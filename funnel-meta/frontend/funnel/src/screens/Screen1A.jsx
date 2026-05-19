@@ -307,6 +307,23 @@ export default function Screen1A() {
     setPopupStep('demographics');
   }
 
+  /* Tamil-knowledge pill tap.
+       'yes' → set the answer, stay on the demographics step.
+       'no'  → disqualify immediately. The webinar is delivered in Tamil, so
+               anyone who can't follow Tamil isn't a fit. Same exit path as
+               the "I don't have diabetes" branch: pixel event + animated
+               leave + navigate('/not-eligible'). */
+  function handleTamilSelect(id) {
+    if (id === 'yes') { setSelectedAge('yes'); return; }
+    pixelTamilKnowledgeSelected('no', state);
+    pixelDisqualified('no_tamil', state);
+    trackEvent('disqualified_no_tamil', state.webinarConfig?.next_webinar_at);
+    dispatch({ type: 'SET_AGE_GROUP', payload: 'no' });
+    dispatch({ type: 'SET_NAV_DIRECTION', payload: 'forward' });
+    setLeaving(true);
+    setTimeout(() => { navigate('/not-eligible'); }, 420);
+  }
+
   function handleDemographicsContinue() {
     if (!selectedAge || !selectedOccupation) return;
     pixelTamilKnowledgeSelected(selectedAge, state);
@@ -589,7 +606,7 @@ export default function Screen1A() {
                 return (
                   <m.button
                     key={opt.id}
-                    onClick={() => setSelectedAge(opt.id)}
+                    onClick={() => handleTamilSelect(opt.id)}
                     initial={{ opacity: 0, y: 8 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: 0.06 + i * 0.05 }}

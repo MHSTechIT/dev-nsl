@@ -12,8 +12,11 @@ const TAG_META = {
   LOGGED_OUT:         { label: 'Logged out',      color: '#374151', bg: 'rgba(55,65,81,0.10)'  },
   ACTIVE:             { label: 'Active',          color: '#16A34A', bg: 'rgba(22,163,74,0.10)' },
   ON_CALL:            { label: 'On call',         color: '#2563EB', bg: 'rgba(37,99,235,0.10)' },
-  AFTER_CALL_FORM:    { label: 'After-call form', color: '#7C3AED', bg: 'rgba(124,58,237,0.10)' },
-  ON_REASON_FORM:     { label: 'On reason form',  color: '#D97706', bg: 'rgba(217,119,6,0.12)'  },
+  VIEWING_LEAD:       { label: 'Viewing lead',    color: '#0EA5E9', bg: 'rgba(14,165,233,0.10)' },
+  AFTER_CALL_FORM:    { label: 'Filling form',    color: '#7C3AED', bg: 'rgba(124,58,237,0.10)' },
+  ON_REASON_FORM:     { label: 'Reason picker',   color: '#D97706', bg: 'rgba(217,119,6,0.12)'  },
+  BREAK_PICKER:       { label: 'Break picker',    color: '#EAB308', bg: 'rgba(234,179,8,0.12)'  },
+  BREAK_OTHER_PICKER: { label: 'Break: other reason', color: '#CA8A04', bg: 'rgba(202,138,4,0.12)' },
   BREAK:              { label: 'Break',           color: '#F59E0B', bg: 'rgba(245,158,11,0.12)' },
   BREAK_OVER:         { label: 'Break over',      color: '#DC2626', bg: 'rgba(220,38,38,0.12)'  },
   RESUMED:            { label: 'Resumed',         color: '#0891B2', bg: 'rgba(8,145,178,0.10)'  },
@@ -21,6 +24,15 @@ const TAG_META = {
   PAUSED_BY_ADMIN:    { label: 'Paused by admin', color: '#B91C1C', bg: 'rgba(185,28,28,0.12)'  },
   UNPAUSED_BY_ADMIN:  { label: 'Unpaused by admin', color: '#15803D', bg: 'rgba(21,128,61,0.12)' },
   OFFLINE:            { label: 'Offline',         color: '#6B7280', bg: 'rgba(107,114,128,0.18)' },
+  // Page-level — which workspace tab the caller is sitting on. Soft purples
+  // so they read as "background context" vs. the brighter modal/call tags.
+  ON_PAGE_CALL:         { label: 'Page: Call',            color: '#6D28D9', bg: 'rgba(109,40,217,0.08)' },
+  ON_PAGE_ASSIGNED:     { label: 'Page: Assigned',        color: '#6D28D9', bg: 'rgba(109,40,217,0.08)' },
+  ON_PAGE_COMPLETED:    { label: 'Page: Completed',       color: '#6D28D9', bg: 'rgba(109,40,217,0.08)' },
+  ON_PAGE_NOT_PICKED:   { label: 'Page: Not Picked',      color: '#6D28D9', bg: 'rgba(109,40,217,0.08)' },
+  ON_PAGE_MISSED_CALLS: { label: 'Page: Missed Calls',    color: '#6D28D9', bg: 'rgba(109,40,217,0.08)' },
+  ON_PAGE_UNTOUCHED:    { label: 'Page: Untouched',       color: '#6D28D9', bg: 'rgba(109,40,217,0.08)' },
+  ON_PAGE_NEXT_BATCH:   { label: 'Page: Next Batch',      color: '#6D28D9', bg: 'rgba(109,40,217,0.08)' },
 };
 
 function fmtTime(iso) {
@@ -320,12 +332,15 @@ export default function CallerActivityDrawer({
                   <div style={{ fontSize: '0.86rem', fontWeight: 700, color: '#3B0764', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                     {fmtTime(ev.started_at)} <span style={{ opacity: 0.55, fontWeight: 600 }}>→</span> {ongoing ? <span style={{ color: meta.color }}>ongoing</span> : fmtTime(ev.ended_at)}
                   </div>
-                  {(ctx.lead_name || ctx.over_by_sec || ctx.reason || ctx.minutes) && (
+                  {(ctx.lead_name || ctx.over_by_sec || ctx.reason || ctx.minutes || ctx.kind || ctx.attempt) && (
                     <div style={{ fontSize: '0.74rem', color: 'rgba(91,33,182,0.65)', fontWeight: 600, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {ctx.kind === 'agent_dnp' && <span>Why didn't customer pick? </span>}
+                      {ctx.kind === 'form_skip' && <span>Why didn't form get filled? </span>}
                       {ctx.lead_name && <span>Lead: {ctx.lead_name}</span>}
-                      {ctx.reason && <span>{ctx.lead_name ? ' · ' : ''}Reason: {ctx.reason}</span>}
-                      {ctx.minutes && <span>{(ctx.lead_name || ctx.reason) ? ' · ' : ''}Allotted: {ctx.minutes}m</span>}
-                      {ctx.over_by_sec > 0 && <span style={{ color: '#DC2626' }}>{(ctx.lead_name || ctx.reason || ctx.minutes) ? ' · ' : ''}Over by {fmtDuration(ctx.over_by_sec)}</span>}
+                      {ctx.attempt && <span>{ctx.lead_name ? ' · ' : ''}Try {ctx.attempt}</span>}
+                      {ctx.reason && <span>{(ctx.lead_name || ctx.attempt) ? ' · ' : ''}Reason: {ctx.reason}</span>}
+                      {ctx.minutes && <span>{(ctx.lead_name || ctx.reason || ctx.attempt) ? ' · ' : ''}Allotted: {ctx.minutes}m</span>}
+                      {ctx.over_by_sec > 0 && <span style={{ color: '#DC2626' }}>{(ctx.lead_name || ctx.reason || ctx.minutes || ctx.attempt) ? ' · ' : ''}Over by {fmtDuration(ctx.over_by_sec)}</span>}
                     </div>
                   )}
                 </div>

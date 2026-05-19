@@ -2,8 +2,13 @@ import { useEffect, useState } from 'react';
 import { m } from 'framer-motion';
 import { trackEvent } from '../utils/trackEvent';
 import { detectSource } from '../utils/source';
+import { gtagLead } from '../utils/gtag';
 
 const SOURCE = detectSource();
+
+/* Module-level guard so the Google Ads Lead conversion fires at most
+   once per page load even if React StrictMode double-invokes effects. */
+let hasFiredLead = false;
 
 /* ── Link expiry countdown ── */
 function LinkExpiryTimer() {
@@ -34,6 +39,22 @@ function LinkExpiryTimer() {
 export default function WhatsAppPage() {
   const [waLink, setWaLink] = useState('');
   const [webinarAt, setWebinarAt] = useState(null);
+
+  /* Fire the Google Ads Lead conversion the moment the WhatsApp page
+     mounts. The lead_id from the URL (?lead_id=…) is passed as
+     transaction_id so this fire de-duplicates with the Screen3 fire
+     inside the main funnel — Google Ads will count exactly one
+     conversion per lead even though both code paths fire it. */
+  useEffect(() => {
+    if (hasFiredLead) return;
+    hasFiredLead = true;
+    let leadId = null;
+    try {
+      const sp = new URLSearchParams(window.location.search);
+      leadId = sp.get('lead_id');
+    } catch (_) { /* malformed URL — fire without dedup id */ }
+    gtagLead({ transactionId: leadId });
+  }, []);
 
   useEffect(() => {
     // Initial fetch — get current link immediately

@@ -9,6 +9,7 @@ import MissedCallsModule       from './modules/MissedCallsModule';
 import NextBatchModule         from './modules/NextBatchModule';
 import IncomingCallToast       from './components/IncomingCallToast';
 import MascotBot               from './components/MascotBot';
+import { emitCallerState, PAGE_TAG_BY_ID } from './utils/callerActivity';
 
 const PAGES = [
   {
@@ -211,6 +212,21 @@ export default function CallerShell({ callerName: nameProp, callerRole: roleProp
     };
     return () => { cancelled = true; es.close(); };
   }, [user, jwtForEffect]);
+
+  /* Page-level activity emitter — fire a 'replace' state event each time
+     `activePage` changes so the admin Activity Log drawer shows which tab
+     the caller is sitting on. The server's 'replace' action atomically
+     ends every other page/modal tag and opens the new one, so the timeline
+     stays one-row-at-a-time.
+
+     Skipped when no user is logged in (login page) and on the very first
+     mount we still emit so an open tab on refresh re-anchors the timeline. */
+  useEffect(() => {
+    if (!user || !jwtForEffect) return;
+    const tag = PAGE_TAG_BY_ID[activePage];
+    if (!tag) return;
+    emitCallerState(jwtForEffect, { action: 'replace', tag });
+  }, [activePage, user, jwtForEffect]);
 
   /* Activity heartbeat — POST /api/caller/heartbeat every 30s reflecting the
      latest activity state stamped into localStorage by AssignedLeadsModule.

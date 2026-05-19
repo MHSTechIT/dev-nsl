@@ -7,6 +7,7 @@ import sadBotRaw from '../assets/bot/robot-sad.json';
 import { lockArmsDown, normalizeLoop } from '../utils/patchRobotArm';
 import pickTheCallMp3 from '../assets/audio/pick-the-call.mp3';
 import formFillMp3   from '../assets/audio/form-fill.mp3';
+import { emitCallerState } from '../utils/callerActivity';
 // Patch once at module load — canonical "both arms hanging at sides,
 // anatomically mirrored" pose used everywhere else in the CRM.
 const sadBotData = normalizeLoop(lockArmsDown(sadBotRaw));
@@ -243,6 +244,48 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
     if (callPhase === 'agent_reason_card') playClipOnce(pickTheCallMp3);
     else if (callPhase === 'form_reason_card') playClipOnce(formFillMp3);
   }, [callPhase]);
+
+  /* Granular activity emitter — maps each callPhase to its activity-log tag.
+       form_window       → AFTER_CALL_FORM
+       agent_reason_card → ON_REASON_FORM (kind=agent_dnp, attempt=cutCount+1)
+       form_reason_card  → ON_REASON_FORM (kind=form_skip)
+     Other phases are call-progress states owned by the server-emitted ON_CALL
+     (calls.js logs that on /calls/start and ends it on hangup), so we don't
+     duplicate. When the modal unmounts the parent's editLead effect ends the
+     modal-level event and resumes the page state. */
+  useEffect(() => {
+    if (!jwt) return;
+    const leadName = lead?.full_name || '';
+    const leadId   = lead?.id || null;
+    if (callPhase === 'form_window') {
+      emitCallerState(jwt, {
+        action: 'replace',
+        tag: 'AFTER_CALL_FORM',
+        context: { lead_name: leadName, lead_id: leadId },
+      });
+    } else if (callPhase === 'agent_reason_card') {
+      emitCallerState(jwt, {
+        action: 'replace',
+        tag: 'ON_REASON_FORM',
+        context: {
+          lead_name: leadName, lead_id: leadId,
+          kind: 'agent_dnp', attempt: (cutCount || 0) + 1,
+        },
+      });
+    } else if (callPhase === 'form_reason_card') {
+      emitCallerState(jwt, {
+        action: 'replace',
+        tag: 'ON_REASON_FORM',
+        context: {
+          lead_name: leadName, lead_id: leadId,
+          kind: 'form_skip',
+        },
+      });
+    }
+    // Other phases (ext_check, agent_ringing_*, customer_ringing,
+    // customer_on_call, recall_ringing, dnp_alert, auto_paused) intentionally
+    // leave the activity tag alone — they're transient call-progress states.
+  }, [callPhase, jwt, lead?.full_name, lead?.id, cutCount]);
 
   /* Structured log on every phase transition. One JSON line per change —
      greppable in browser DevTools and forwarded to any client-side log

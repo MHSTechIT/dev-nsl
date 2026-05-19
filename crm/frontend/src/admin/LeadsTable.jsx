@@ -212,18 +212,26 @@ export default function LeadsTable({ token, source = 'meta' }) {
     // array above. Adding a new column here should always be paired with
     // both an entry in `cols` and a `<td>` in the body so admins can
     // verify what they see in the table matches what they download.
-    const headers = ['Name', 'Phone', 'Email', 'Sugar Level', 'Duration', 'Medication',
-                     'Do you know Tamil?', 'Occupation',
-                     'Ad Source', 'Registered At', 'WA Clicked'];
+    // CSV column set mirrors the on-screen `cols` array so YT exports
+    // skip the Meta-only fields and Meta exports include them. Keep the
+    // two lists in lockstep when adding new columns.
+    const isMetaExport = source === 'meta';
+    const headers = [
+      'Name', 'Phone', 'Email', 'Sugar Level', 'Duration',
+      ...(isMetaExport ? ['Medication', 'Do you know Tamil?', 'Occupation'] : []),
+      'Ad Source', 'Registered At', 'WA Clicked',
+    ];
     const rows = sorted.map(l => [
       l.full_name,
       '+91' + l.whatsapp_number,
       l.email || '',
       SUGAR_LABELS[l.sugar_level] || l.sugar_level,
       DURATION_LABELS[l.diabetes_duration] || l.diabetes_duration || '',
-      MEDICATION_LABELS[l.on_medication] || l.on_medication || '',
-      fmtAgeOrTamil(l.age_group),
-      OCCUPATION_LABELS[l.occupation] || l.occupation || '',
+      ...(isMetaExport ? [
+        MEDICATION_LABELS[l.on_medication] || l.on_medication || '',
+        fmtAgeOrTamil(l.age_group),
+        OCCUPATION_LABELS[l.occupation] || l.occupation || '',
+      ] : []),
       l.utm_content || '',
       new Date(l.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
       l.wa_clicked ? 'Yes' : 'No',
@@ -312,22 +320,23 @@ export default function LeadsTable({ token, source = 'meta' }) {
   const waNotClicked = dateFiltered.filter(l => !l.wa_clicked).length;
 
   // Columns mirror the funnel form fields the admin actually cares about.
-  // Language + Score were removed by request — language_pref is rarely
-  // relevant for follow-up since callers handle both, and the score is
-  // already encoded in the Sugar/Duration combination.
-  // The `age_group` DB column is now used by the Meta funnel to store the
-  // Tamil-knowledge answer (`yes` / `no`), so the column header is renamed
-  // to "Do you know Tamil?" to match. Old YT-funnel rows that still hold
-  // an age bucket ('35-45', etc.) render the raw value verbatim.
+  // Meta-funnel-only columns (Medication / Do you know Tamil? / Occupation)
+  // are conditionally added so the YT workspace doesn't show empty columns
+  // for fields its funnel never collects. The `source` prop drives the
+  // conditional — 'meta' shows everything, 'yt' shows only the fields the
+  // YT funnel actually captures.
+  const isMeta = source === 'meta';
   const cols = [
     { key: 'full_name',         label: 'Name' },
     { key: 'whatsapp_number',   label: 'Phone' },
     { key: 'email',             label: 'Email' },
     { key: 'sugar_level',       label: 'Sugar Level' },
     { key: 'diabetes_duration', label: 'Duration' },
-    { key: 'on_medication',     label: 'Medication' },
-    { key: 'age_group',         label: 'Do you know Tamil?' },
-    { key: 'occupation',        label: 'Occupation' },
+    ...(isMeta ? [
+      { key: 'on_medication', label: 'Medication' },
+      { key: 'age_group',     label: 'Do you know Tamil?' },
+      { key: 'occupation',    label: 'Occupation' },
+    ] : []),
     { key: 'utm_content',       label: 'Ad Source' },
     { key: 'created_at',        label: 'Registered' },
     { key: 'wa_clicked',        label: 'WhatsApp' },
@@ -657,24 +666,32 @@ export default function LeadsTable({ token, source = 'meta' }) {
                     ? <span className="inline-flex items-center px-2 py-0.5 rounded-pill text-xs font-semibold bg-yellow-50 text-yellow-800">{DURATION_LABELS[l.diabetes_duration] || l.diabetes_duration}</span>
                     : <span className="text-gray-300">—</span>}
                 </td>
-                {/* On medication — soft indigo pill */}
-                <td className="px-3 py-3 whitespace-nowrap text-xs">
-                  {l.on_medication
-                    ? <span className="inline-flex items-center px-2 py-0.5 rounded-pill text-xs font-semibold bg-indigo-50 text-indigo-700">{MEDICATION_LABELS[l.on_medication] || l.on_medication}</span>
-                    : <span className="text-gray-300">—</span>}
-                </td>
-                {/* Age bucket OR Tamil yes/no — same DB column, format depends on the value */}
-                <td className="px-3 py-3 whitespace-nowrap text-xs">
-                  {l.age_group
-                    ? <span className="inline-flex items-center px-2 py-0.5 rounded-pill text-xs font-semibold bg-purple-50 text-purple-700">{fmtAgeOrTamil(l.age_group)}</span>
-                    : <span className="text-gray-300">—</span>}
-                </td>
-                {/* Occupation — soft teal pill */}
-                <td className="px-3 py-3 whitespace-nowrap text-xs">
-                  {l.occupation
-                    ? <span className="inline-flex items-center px-2 py-0.5 rounded-pill text-xs font-semibold bg-teal-50 text-teal-700">{OCCUPATION_LABELS[l.occupation] || l.occupation}</span>
-                    : <span className="text-gray-300">—</span>}
-                </td>
+                {/* Meta-only columns — On medication / Tamil yes-no /
+                    Occupation. The YT funnel doesn't capture these so we
+                    hide the cells entirely on the YT workspace to keep
+                    the row width tight. */}
+                {isMeta && (
+                  <>
+                    {/* On medication — soft indigo pill */}
+                    <td className="px-3 py-3 whitespace-nowrap text-xs">
+                      {l.on_medication
+                        ? <span className="inline-flex items-center px-2 py-0.5 rounded-pill text-xs font-semibold bg-indigo-50 text-indigo-700">{MEDICATION_LABELS[l.on_medication] || l.on_medication}</span>
+                        : <span className="text-gray-300">—</span>}
+                    </td>
+                    {/* Age bucket OR Tamil yes/no — same DB column, format depends on the value */}
+                    <td className="px-3 py-3 whitespace-nowrap text-xs">
+                      {l.age_group
+                        ? <span className="inline-flex items-center px-2 py-0.5 rounded-pill text-xs font-semibold bg-purple-50 text-purple-700">{fmtAgeOrTamil(l.age_group)}</span>
+                        : <span className="text-gray-300">—</span>}
+                    </td>
+                    {/* Occupation — soft teal pill */}
+                    <td className="px-3 py-3 whitespace-nowrap text-xs">
+                      {l.occupation
+                        ? <span className="inline-flex items-center px-2 py-0.5 rounded-pill text-xs font-semibold bg-teal-50 text-teal-700">{OCCUPATION_LABELS[l.occupation] || l.occupation}</span>
+                        : <span className="text-gray-300">—</span>}
+                    </td>
+                  </>
+                )}
                 <td className="px-3 py-3 whitespace-nowrap text-xs">
                   {l.utm_content ? (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-pill text-xs font-semibold bg-blue-50 text-blue-700" style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis' }} title={l.utm_content}>
@@ -704,8 +721,9 @@ export default function LeadsTable({ token, source = 'meta' }) {
             ))}
             {sorted.length === 0 && (
               <tr>
-                {/* Total cells = 11 visible cols, +1 when delete-mode shows checkbox */}
-                <td colSpan={deleteMode ? 12 : 11} className="px-3 py-16 text-center">
+                {/* Total cells = visible cols (8 on YT / 11 on Meta), +1
+                    when delete-mode adds the leading checkbox column. */}
+                <td colSpan={cols.length + (deleteMode ? 1 : 0)} className="px-3 py-16 text-center">
                   <div className="flex flex-col items-center gap-2 text-purple-300">
                     <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="16" x2="13" y2="16"/></svg>
                     <p className="font-sans text-sm">No leads yet.</p>

@@ -1676,6 +1676,74 @@ router.get('/sales-performance/leads-export', async (req, res) => {
   }
 });
 
+/* ── GET /api/admin/caller-leads/:callerId ──
+   Returns every lead assigned to one caller, grouped client-side by
+   bucket. Used by the "Caller page" drawer in the admin so an admin can
+   see what the caller sees and reopen completed leads back to assigned.
+
+   Buckets are derived from `last_note_outcome`:
+     • assigned   — no outcome yet (or follow_up scheduled in the future)
+     • completed  — last_note_outcome IN ('completed','not_interested')
+     • not_picked — last_note_outcome IN ('not_picked','auto_paused')
+   The frontend re-buckets the same payload so we don't need three queries. */
+router.get('/caller-leads/:callerId', async (req, res) => {
+  const { callerId } = req.params;
+  if (!callerId) return res.status(400).json({ error: 'callerId required' });
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, full_name, whatsapp_number, email, sugar_level,
+              diabetes_duration, on_medication, age_group, occupation,
+              lead_score, lead_tag, last_note_outcome, last_note_at,
+              follow_up_at, completed_at, assigned_at, created_at,
+              wa_clicked, utm_content
+         FROM leads
+        WHERE assigned_user_id = $1
+        ORDER BY COALESCE(last_note_at, assigned_at, created_at) DESC
+        LIMIT 1000`,
+      [callerId]
+    );
+    res.json({ leads: rows });
+  } catch (err) {
+    console.error('[admin] caller-leads error:', err.message);
+    res.status(500).json({ error: 'failed to load caller leads' });
+  }
+});
+
+/* ── POST /api/admin/leads/reopen ──
+   Bulk-reopen leads — moves them back to the caller's Assigned bucket
+   by clearing every closing-state column (outcome, follow_up, completed_at).
+   Mirrors the existing caller-side reopen path used by /caller/leads/reopen
+   but accepts an explicit list of IDs so the admin can pick exactly which
+   completed leads to bring back to active.
+
+   Body: { lead_ids: ["uuid", "uuid", ...] }
+   Returns: { reopened: <count> }
+*/
+router.post('/leads/reopen', async (req, res) => {
+  const ids = Array.isArray(req.body?.lead_ids)
+    ? req.body.lead_ids.filter(x => typeof x === 'string' && x.length > 0)
+    : [];
+  if (ids.length === 0) return res.status(400).json({ error: 'lead_ids required' });
+  try {
+    const { rowCount } = await pool.query(
+      `UPDATE leads
+          SET last_note_outcome   = NULL,
+              last_note_interested = NULL,
+              last_note_at         = NULL,
+              follow_up_at         = NULL,
+              completed_at         = NULL,
+              assigned_at          = NOW(),
+              pinned_at            = NOW()
+        WHERE id = ANY($1::uuid[])`,
+      [ids]
+    );
+    res.json({ reopened: rowCount });
+  } catch (err) {
+    console.error('[admin] leads/reopen error:', err.message);
+    res.status(500).json({ error: 'failed to reopen leads' });
+  }
+});
+
 router.get('/sales-performance', async (req, res) => {
   const istNow = new Date(Date.now() + 5.5 * 3600 * 1000);
   const todayYmd = istNow.toISOString().slice(0, 10);

@@ -197,8 +197,11 @@ export default function Screen3() {
       trackEvent('registration_submitted', state.webinarConfig?.next_webinar_at);
       // Google Ads — fire Lead conversion. lead_score (2..5) is passed
       // as `value` so value-based bidding can weight conversions later
-      // if the user enables it in Google Ads.
-      gtagLead({ value: data.lead_score, currency: 'INR' });
+      // if the user enables it in Google Ads. `transactionId` =
+      // data.lead_id so the matching fire from the WhatsApp page
+      // de-duplicates against this one (Google Ads only counts the
+      // first fire per transaction_id).
+      gtagLead({ value: data.lead_score, currency: 'INR', transactionId: data.lead_id });
       setWLink(data.whatsapp_link || '');
 
       /* show overlay immediately; confetti plays on top (z-index 9999) */

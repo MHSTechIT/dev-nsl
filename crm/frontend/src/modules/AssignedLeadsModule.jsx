@@ -4,6 +4,7 @@ import LeadCallNoteModal from './LeadCallNoteModal';
 import happyBotRaw     from '../assets/bot/robot-happy.json';
 import confettiData    from '../assets/bot/confetti.json';
 import { lockArmsDown, normalizeLoop } from '../utils/patchRobotArm';
+import { emitCallerState } from '../utils/callerActivity';
 // Tag-specific celebration audio. Played alongside the speech-bubble line.
 import hotLeadMp3   from '../assets/audio/hot-lead.mp3';
 import warmLeadMp3  from '../assets/audio/warm-lead.mp3';
@@ -200,6 +201,50 @@ export default function AssignedLeadsModule({ jwt, externalHighlightId, setMood,
   const [breakChooseStrikes, setBreakChooseStrikes] = useState(0);
   const breakChooseTimerRef    = useRef(null);
   const breakChooseStrikesRef  = useRef(0);
+
+  /* Granular activity emitter — VIEWING_LEAD when the call-note modal opens,
+     BREAK_PICKER / BREAK_OTHER_PICKER for the break-reason flow. Each useEffect
+     fires a `replace` so the admin Activity Log shows one row at a time:
+     ON_PAGE_ASSIGNED → VIEWING_LEAD → ON_CALL (server-side) → AFTER_CALL_FORM
+     (LeadCallNoteModal) → ON_PAGE_ASSIGNED again.
+
+     We track the previous value via a ref so the first paint with null state
+     doesn't double-emit on top of CallerShell's page-level emit. */
+  const prevEditLeadIdRef = useRef(null);
+  useEffect(() => {
+    if (!jwt) return;
+    const curId = editLead?.id || null;
+    const prevId = prevEditLeadIdRef.current;
+    if (curId && curId !== prevId) {
+      emitCallerState(jwt, {
+        action: 'replace',
+        tag: 'VIEWING_LEAD',
+        context: { lead_name: editLead.full_name, lead_id: editLead.id },
+      });
+    } else if (!curId && prevId) {
+      // Modal closed — return to the Assigned Leads page row in the timeline.
+      emitCallerState(jwt, { action: 'replace', tag: 'ON_PAGE_ASSIGNED' });
+    }
+    prevEditLeadIdRef.current = curId;
+  }, [editLead, jwt]);
+
+  const prevBreakStepRef = useRef(null);
+  useEffect(() => {
+    if (!jwt) return;
+    const prev = prevBreakStepRef.current;
+    if (breakStep === 'choose' && prev !== 'choose') {
+      emitCallerState(jwt, { action: 'replace', tag: 'BREAK_PICKER' });
+    } else if (breakStep === 'other' && prev !== 'other') {
+      emitCallerState(jwt, { action: 'replace', tag: 'BREAK_OTHER_PICKER' });
+    } else if (breakStep === null && (prev === 'choose' || prev === 'other')) {
+      // Picker closed — return to page state. The heartbeat poll will pick
+      // up an actual BREAK if the caller selected a reason. We do NOT emit
+      // BREAK here because BREAK lives outside the modal/page sweep list,
+      // and the heartbeat owns its lifecycle.
+      emitCallerState(jwt, { action: 'replace', tag: 'ON_PAGE_ASSIGNED' });
+    }
+    prevBreakStepRef.current = breakStep;
+  }, [breakStep, jwt]);
 
   // Queue-end refill modal — pops in two cases:
   //   1. 'auto_finished' — the auto-call queue just drained

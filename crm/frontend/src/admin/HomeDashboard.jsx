@@ -487,24 +487,29 @@ function CustomSelect({ value, onChange, options, placeholder }) {
   );
 }
 
-/* ── Per-webinar performance card ── */
+/* ── Per-webinar performance card ──
+   When `metaLinkClicks` is null, this is a YT-workspace render — drop
+   the Meta Clicks column and any "from Meta" hints, and let the grid
+   re-layout to 4 metric columns instead of 5. */
 function WebinarPerfCard({ session, metaLandingViews, metaLinkClicks }) {
   const label = session.name
     ? session.name.replace(/^AWS-/, 'AWS - ')
     : fmtSession(session.webinar_at);
 
+  const isMetaWorkspace = metaLinkClicks !== null;
   const metrics = [
-    { label: 'Meta Clicks',     value: metaLinkClicks                 || 0, color: '#1877F2', bg: 'rgba(24,119,242,0.10)', hint: 'From Meta — bulletproof' },
+    // Meta Clicks tile is only added on the Meta workspace.
+    ...(isMetaWorkspace ? [{ label: 'Meta Clicks',     value: metaLinkClicks            || 0, color: '#1877F2', bg: 'rgba(24,119,242,0.10)', hint: 'From Meta — bulletproof' }] : []),
     { label: 'Unique Visitors', value: session.unique_visitors        || 0, color: '#0E7490', bg: 'rgba(14,116,144,0.10)', hint: 'Real people' },
     { label: 'Page Views',      value: session.visitors               || 0, color: '#0891B2', bg: 'rgba(8,145,178,0.08)' },
-    { label: 'Registrations',   value: session.registrations          || 0, color: '#7C3AED', bg: 'rgba(124,58,237,0.08)', hint: session.meta_verified_regs ? `${session.meta_verified_regs} from Meta` : null },
-    { label: 'WhatsApp',        value: session.wa_clicks              || 0, color: '#16A34A', bg: 'rgba(22,163,74,0.08)',  hint: session.meta_verified_wa  ? `${session.meta_verified_wa} from Meta`  : null },
+    { label: 'Registrations',   value: session.registrations          || 0, color: '#7C3AED', bg: 'rgba(124,58,237,0.08)', hint: isMetaWorkspace && session.meta_verified_regs ? `${session.meta_verified_regs} from Meta` : null },
+    { label: 'WhatsApp',        value: session.wa_clicks              || 0, color: '#16A34A', bg: 'rgba(22,163,74,0.08)',  hint: isMetaWorkspace && session.meta_verified_wa  ? `${session.meta_verified_wa} from Meta`  : null },
   ];
 
   return (
     <div className="webinar-perf-card" style={{
       display: 'grid',
-      gridTemplateColumns: 'minmax(120px, 1.2fr) repeat(5, minmax(0, 1fr))',
+      gridTemplateColumns: `minmax(120px, 1.2fr) repeat(${metrics.length}, minmax(0, 1fr))`,
       alignItems: 'center', gap: 12,
       borderRadius: 14,
       border: '1px solid rgba(147,51,234,0.14)',
@@ -837,8 +842,10 @@ export default function HomeDashboard({ token, source = 'meta' }) {
                 <WebinarPerfCard
                   key={s.webinar_id}
                   session={s}
-                  metaLandingViews={metaByWebinar[s.webinar_id]?.landing_views || 0}
-                  metaLinkClicks={metaByWebinar[s.webinar_id]?.link_clicks   || 0}
+                  // Pass null on the YT workspace so the card drops the
+                  // Meta Clicks column entirely (see WebinarPerfCard).
+                  metaLandingViews={source === 'meta' ? (metaByWebinar[s.webinar_id]?.landing_views || 0) : null}
+                  metaLinkClicks={  source === 'meta' ? (metaByWebinar[s.webinar_id]?.link_clicks   || 0) : null}
                 />
               ))}
             </div>
@@ -854,7 +861,17 @@ export default function HomeDashboard({ token, source = 'meta' }) {
       }}>
         {loading
           ? Array.from({ length: 9 }).map((_, i) => <SkeletonBox key={i} />)
-          : STAT_BOXES.filter(box => box.key !== 'meta_landing_views' || metaConfigured).map(box => <StatBox key={box.key} box={box} counts={counts} />)
+          : STAT_BOXES
+              // Meta-only KPI tiles are hidden on the YT workspace —
+              // YT traffic doesn't pass through Meta Ads, so the three
+              // meta_* keys would always show 0 there and just confuse
+              // the reader.
+              .filter(box => source === 'meta' || !box.key.startsWith('meta_'))
+              // Also hide the `meta_landing_views` (Pixel) tile on the
+              // Meta workspace if Meta isn't actually configured — we
+              // already had this guard pre-existing, keep it.
+              .filter(box => box.key !== 'meta_landing_views' || metaConfigured)
+              .map(box => <StatBox key={box.key} box={box} counts={counts} />)
         }
       </div>
 
