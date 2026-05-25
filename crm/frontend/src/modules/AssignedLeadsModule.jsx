@@ -91,6 +91,12 @@ function fmtPhone(p) {
 export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId, setMood, pendingAutoStart, clearPendingAutoStart, onCount }) {
   const t = useTimerSettings();
   const [leads, setLeads]         = useState([]);
+  // Mirror of `leads` for callbacks that need the FRESHEST value (e.g.
+  // advanceAutoCall checking "did new leads arrive while the queue was
+  // draining?" so we can refill the auto-queue instead of falsely showing
+  // "Queue complete" while the table still has rows behind the modal).
+  const leadsRef = useRef([]);
+  useEffect(() => { leadsRef.current = leads; }, [leads]);
   // Bubble the lead count up to CallerShell so it can render the "N
   // leads" chip under the page header. Fires on every length change.
   useEffect(() => { if (typeof onCount === 'function') onCount(leads.length); }, [leads.length, onCount]);
@@ -122,7 +128,17 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
      click-to-call API → open note modal → wait for "Complete Call" →
      5s cooldown → next.                                                    */
   const [autoMode, setAutoMode]         = useState('off');
+  // Ref mirror of autoMode so async fetch callbacks (triggerCallAndOpen
+  // retries, etc.) read the FRESH value when they resume — not the
+  // stale closure capture from render time.
+  const autoModeRef                     = useRef('off');
+  useEffect(() => { autoModeRef.current = autoMode; }, [autoMode]);
   const [autoQueue, setAutoQueue]       = useState([]);
+  // Ref mirror of autoQueue so advanceAutoCall can read the freshest
+  // snapshot without doing work inside a setAutoQueue updater (which
+  // React StrictMode invokes twice in dev → double Tata calls).
+  const autoQueueRef                    = useRef([]);
+  useEffect(() => { autoQueueRef.current = autoQueue; }, [autoQueue]);
   const [autoIndex, setAutoIndex]       = useState(0);
   const [autoTotal, setAutoTotal]       = useState(0);
   const [cooldownLeft, setCooldownLeft] = useState(0);
@@ -536,16 +552,59 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
      (banner = "Your first call is triggered. Please pick the call.")
      instead of sitting at the idle "Ready to start auto call." banner.
 
-     If the call POST fails, we still open the modal — the user can retry
-     via the Start Auto Call button — but with last_call_id explicitly
-     null so the modal stays at idle (no stale id leaking in). */
+     Failure handling (auto-call loop continuity):
+       1. First POST failure → wait t.autoCallRetryDelayMs (~2.5 s) and
+          retry once. Tata routinely rejects a /start when the previous
+          DNP/hangup leg hasn't fully released; the brief retry covers
+          that window without bothering the caller.
+       2. Second failure → DO NOT dump the caller back into ext_check
+          (which is what the old "setEditLead with last_call_id=null"
+          path produced). Instead show a toast and advance the auto-call
+          loop to the lead after this one. Keeps the queue moving when
+          one specific lead is permanently un-dialable (bad number,
+          carrier reject, etc.).
+       3. When auto-mode is OFF (manual click), preserve the legacy
+          behaviour: open the modal at ext_check so the caller can
+          retry the Start button. */
   async function triggerCallAndOpen(lead, errorSetter) {
+    const reportError = errorSetter || setError;
+    const inAutoLoop  = autoModeRef.current === 'calling';
     try {
       const data = await triggerCall(lead);
       setEditLead({ ...lead, last_call_id: data?.call_id || null });
-    } catch (e) {
-      (errorSetter || setError)(e.message || 'Call failed');
-      setEditLead({ ...lead, last_call_id: null });
+      return;
+    } catch (e1) {
+      // First attempt failed. Outside the auto loop the user can retry
+      // manually — open the modal at ext_check as before.
+      if (!inAutoLoop) {
+        reportError(e1.message || 'Call failed');
+        setEditLead({ ...lead, last_call_id: null });
+        return;
+      }
+      // Inside the auto loop: wait briefly and try once more before
+      // giving up on this lead.
+      await new Promise(r => setTimeout(r, t.autoCallRetryDelayMs || 2500));
+      try {
+        const data = await triggerCall(lead);
+        setEditLead({ ...lead, last_call_id: data?.call_id || null });
+        return;
+      } catch (e2) {
+        // Second attempt failed → soft-skip. Drop this lead from the
+        // auto-queue and dial the lead after it, so the caller doesn't
+        // get stranded at a manual ext_check for a lead Tata won't
+        // accept right now.
+        const msg = e2.message || e1.message || 'Call failed';
+        setAdvanceToast(`Couldn't dial ${lead.full_name || 'lead'} — moving on. (${msg})`);
+        setTimeout(() => setAdvanceToast(''), 5000);
+        // Advance: remove this lead from queue + leads state, recurse
+        // into advanceAutoCall to dial the next one. Use setTimeout(0)
+        // so the state updates from the current render commit before
+        // advanceAutoCall reads autoQueueRef.
+        setAutoQueue(q => q.filter(l => l.id !== lead.id));
+        setLeads(ls => ls.filter(l => l.id !== lead.id));
+        setEditLead(null);
+        setTimeout(() => advanceAutoCall(), 0);
+      }
     }
   }
 
@@ -848,27 +907,56 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
   function advanceAutoCall() {
     clearCooldownTimer();
     setCooldownLeft(0);
-    setAutoQueue(prev => {
-      const remaining = prev.slice(1);
-      if (remaining.length === 0) {
-        // Reached the end of the queue — pop the refill modal so the caller
-        // can pull DNP / Missed-Call rows back to the top in one click
-        // instead of leaving them stranded in other tabs.
-        setAutoMode('off');
-        setAutoIndex(0);
-        setAutoTotal(0);
-        setQueueEndReason('auto_finished');
-        setQueueEndDismissed(false);
-        setQueueEndOpen(true);
-        return [];
+    // Compute the new queue PURELY first (no side effects), then run any
+    // setState / fetch calls in event-handler scope. The previous version
+    // called setAutoMode / setAutoIndex / triggerCallAndOpen INSIDE the
+    // setAutoQueue updater — React StrictMode invokes that updater twice
+    // in dev, which produced TWO /api/caller/calls/start POSTs and two
+    // setEditLead writes for every queue advance. Tata routinely rejects
+    // the second POST (or both, racing), which is one reason the auto-call
+    // appeared to "stop" after the cooldown finished.
+    const prevQueue   = autoQueueRef.current || [];
+    const sliced      = prevQueue.slice(1);
+    let nextLead      = null;
+    let nextQueue     = sliced;
+    let totalDelta    = 0;
+    let queueExhausted = false;
+    if (sliced.length > 0) {
+      nextLead = sliced[0];
+    } else {
+      // Snapshot drained — but new leads may have arrived via SSE/poll
+      // while the caller worked through this batch. Those landed in
+      // `leads` (rendered in the table) but never made it into the
+      // auto-queue snapshot. Pull them in NOW instead of falsely
+      // declaring "Queue complete" with rows clearly visible behind
+      // the modal. Read via leadsRef.current to get the freshest list.
+      const fresh = (leadsRef.current || []).filter(l => l && l.id);
+      if (fresh.length > 0) {
+        nextLead   = fresh[0];
+        nextQueue  = fresh;
+        totalDelta = fresh.length;
+      } else {
+        queueExhausted = true;
       }
-      const next = remaining[0];
-      setAutoIndex(i => i + 1);
-      setAutoMode('calling');
-      setAutoError('');
-      triggerCallAndOpen(next, setAutoError);
-      return remaining;
-    });
+    }
+    setAutoQueue(nextQueue);
+    if (queueExhausted) {
+      // Truly empty — pop the refill modal so the caller can pull DNP /
+      // Missed-Call rows back to the top in one click instead of leaving
+      // them stranded in other tabs.
+      setAutoMode('off');
+      setAutoIndex(0);
+      setAutoTotal(0);
+      setQueueEndReason('auto_finished');
+      setQueueEndDismissed(false);
+      setQueueEndOpen(true);
+      return;
+    }
+    setAutoIndex(i => i + 1);
+    if (totalDelta > 0) setAutoTotal(t => t + totalDelta);
+    setAutoMode('calling');
+    setAutoError('');
+    triggerCallAndOpen(nextLead, setAutoError);
   }
 
   /* Kick off the 5-second card after Complete Call.

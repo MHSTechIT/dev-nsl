@@ -137,6 +137,8 @@ export const TIMER_GROUPS = [
         help: 'Cooldown window after Complete Call before advancing to the next lead.' },
       { key: 'autoAdvanceCountdownMs', label: 'Auto-advance countdown', unit: 'ms', default: 10000, min: 1000, max: 60000,
         help: 'Countdown before the auto-call dials the next lead.' },
+      { key: 'autoCallRetryDelayMs', label: 'Auto-call retry delay', unit: 'ms', default: 2500, min: 500, max: 15000,
+        help: 'When /calls/start fails inside the auto-call loop (often because Tata hasn’t released the previous leg), wait this long and retry once before skipping the lead.' },
       { key: 'dnpAutoAdvanceDelayMs', label: 'DNP auto-advance delay', unit: 'ms', default: 1500, min: 0, max: 15000,
         help: 'Delay showing the confirmation before auto-advancing after a Did-Not-Pick.' },
       { key: 'dnpAutoPauseDelayMs', label: 'Idle-form auto-pause delay', unit: 'ms', default: 1800, min: 0, max: 15000,
