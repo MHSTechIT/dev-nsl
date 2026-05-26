@@ -1168,7 +1168,11 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
     }
   }
 
-  /* Caller clicked "Yes & Proceed" on the SmartFlow extension prompt. */
+  /* Caller clicked "Yes & Proceed" on the SmartFlow extension prompt.
+     The sessionStorage confirmation timestamp is set only AFTER the
+     call actually succeeds — caching a failed confirmation traps the
+     caller in a re-mount loop (auto-skip fires → call fails → falls
+     back to ext_check → next mount auto-skips again). */
   async function confirmExtensionAndStart() {
     if (recalling) return;
     resetCallSignalForNewAttempt();
@@ -1183,14 +1187,58 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
     setCallPhase('agent_ringing_1');
     try {
       await postStartCall();
+      // postStartCall threw? caught below. Otherwise call is in flight
+      // — only NOW cache the confirmation. Successful Tata response
+      // means the extension is valid.
+      try {
+        sessionStorage.setItem('mhs_smartflow_confirmed_at', String(Date.now()));
+      } catch { /* sessionStorage disabled */ }
     } catch (e) {
+      // Drop any stale auto-skip timestamp so the next modal mount
+      // shows the card (not a silent auto-retry that would loop on
+      // the same Tata rejection). The caller needs to see the toast,
+      // not have it disappear under another retry.
+      try {
+        sessionStorage.removeItem('mhs_smartflow_confirmed_at');
+      } catch { /* sessionStorage disabled */ }
       setCallPhase('ext_check');
-      setRecallToast(e.message || 'Call failed — Smartflo extension off?');
-      setTimeout(() => setRecallToast(''), t.recallToastMs);
+      // Pass Tata's actual error verbatim — "Invalid Agent Extension
+      // Entered" tells the admin the caller's tata_extension field
+      // needs fixing; the generic "Smartflo extension off?" hid that
+      // diagnosis. Truncate so the toast doesn't overflow.
+      const msg = String(e.message || '').slice(0, 160) || 'Call failed';
+      setRecallToast(msg);
+      setTimeout(() => setRecallToast(''), Math.max(t.recallToastMs || 0, 8000));
     } finally {
       setRecalling(false);
     }
   }
+
+  /* Auto-skip the SmartFlow extension prompt when a recent confirmation
+     exists. The caller confirmed once at session start; we don't want
+     to nag them on every subsequent lead. The timestamp lives in
+     sessionStorage so it resets when the tab closes (a fresh session
+     should re-confirm to catch the "I closed and reopened my browser
+     but my SmartFlow is now off" case). The TTL is admin-tunable via
+     t.smartflowConfirmTtlMs — default 8 hours covers a work-day. */
+  useEffect(() => {
+    if (callPhase !== 'ext_check') return;
+    let ts = 0;
+    try {
+      const raw = sessionStorage.getItem('mhs_smartflow_confirmed_at');
+      if (raw) ts = Number(raw) || 0;
+    } catch { /* sessionStorage disabled */ }
+    const ttl = Number(t.smartflowConfirmTtlMs) > 0 ? Number(t.smartflowConfirmTtlMs) : 8 * 3600 * 1000;
+    if (ts && (Date.now() - ts) < ttl) {
+      // Within the confirmation window — skip the prompt and place the
+      // call immediately. confirmExtensionAndStart writes a fresh
+      // timestamp on its way through, so the TTL slides forward.
+      confirmExtensionAndStart();
+    }
+    // Run once per mount — re-running on phase change would loop the
+    // call placement on every re-render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
 /* Agent missed the SmartFlow ring. attempt 1 → silent auto-redial,
      attempt ≥ 2 → reason card (after 5 reason loops, auto-pause and advance). */
@@ -2053,7 +2101,14 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
       {overlayPhase && (
         <CenteredOverlay
           phase={overlayPhase}
-          onCancelExt={onClose}
+          onCancelExt={() => {
+            // Cancel = "don't dial right now". Clear the auto-skip
+            // confirmation so the next time the caller opens a lead
+            // they get the prompt back (instead of a silent retry of
+            // the same failing call placement they just dismissed).
+            try { sessionStorage.removeItem('mhs_smartflow_confirmed_at'); } catch { /* ignore */ }
+            onClose?.();
+          }}
           onConfirmExt={confirmExtensionAndStart}
           starting={recalling}
           agentReason={agentReason}

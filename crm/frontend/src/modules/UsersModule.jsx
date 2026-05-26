@@ -12,6 +12,16 @@ const ROLES = [
 
 const ROLE_LABEL = ROLES.reduce((acc, r) => { acc[r.value] = r.label; return acc; }, {});
 
+/* Known Tata Smartflo Account Types. Each entry maps to an env var
+   on the backend named TATA_TELE_API_KEY_<value> (see tataClient.js:31).
+   Add a new account here AND set the matching env var when onboarding
+   a new Tata sub-account. */
+const TATA_ACCOUNT_TYPES = [
+  { value: '',          label: 'Default (global Tata API key)' },
+  { value: 'OR165136',  label: 'OR165136 (Hari / Santhosh)' },
+  { value: 'OR188610',  label: 'OR188610 (Deepika)' },
+];
+
 const ROLE_BADGE = {
   junior_caller: { bg: '#FEF9C3', fg: '#A16207' },
   senior_caller: { bg: '#FFEDD5', fg: '#C2410C' },
@@ -852,13 +862,16 @@ function UserFormModal({
                 <div className="uf-grid">
                   <div>
                     <label style={fieldLabelStyle}>Account Type</label>
-                    <input
-                      type="text"
-                      value={tataAccountType}
-                      onChange={e => setTataAccountType(e.target.value)}
-                      placeholder="e.g. OR165136"
-                      style={inputStyle}
-                      maxLength={60}
+                    {/* Known Tata Smartflo Account Types (top of file).
+                        Each value maps to TATA_TELE_API_KEY_<value> on
+                        the backend so the click-to-call resolver picks
+                        the right JWT for each sub-account. When you add
+                        a new Tata account, add a row to
+                        TATA_ACCOUNT_TYPES + set the matching env var. */}
+                    <BrandSelect
+                      value={TATA_ACCOUNT_TYPES.some(o => o.value === tataAccountType) ? tataAccountType : ''}
+                      onChange={setTataAccountType}
+                      options={TATA_ACCOUNT_TYPES}
                     />
                   </div>
                   <div>

@@ -141,6 +141,8 @@ export const TIMER_GROUPS = [
         help: 'When /calls/start fails inside the auto-call loop (often because Tata hasn’t released the previous leg), wait this long and retry once before skipping the lead.' },
       { key: 'hangupCorroborateMs', label: 'Hangup corroboration window', unit: 'ms', default: 5000, min: 1000, max: 15000,
         help: 'When Tata stamps a single terminal signal (ended_at OR status=ended OR hangup_by alone) while the customer is on the call, wait this long for a SECOND corroborating signal before flipping the modal to the 45-second form window. Defends against Tata’s known mid-call leg-blip CDR writes that look like a real hangup but aren’t.' },
+      { key: 'smartflowConfirmTtlMs', label: 'SmartFlow extension confirmation cache', unit: 'ms', default: 28800000, min: 60000, max: 86400000,
+        help: 'Once the caller clicks "Yes & Proceed" on the SmartFlow extension prompt, the modal remembers the confirmation for this long and auto-skips the prompt on subsequent leads (sessionStorage; resets on browser-tab close or admin re-tune). Default 8 hours covers one work-day session.' },
       { key: 'dnpAutoAdvanceDelayMs', label: 'DNP auto-advance delay', unit: 'ms', default: 1500, min: 0, max: 15000,
         help: 'Delay showing the confirmation before auto-advancing after a Did-Not-Pick.' },
       { key: 'dnpAutoPauseDelayMs', label: 'Idle-form auto-pause delay', unit: 'ms', default: 1800, min: 0, max: 15000,
