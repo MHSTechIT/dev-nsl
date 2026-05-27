@@ -12,7 +12,7 @@
  * ===================================================================*/
 
 const ADS_ACCOUNT  = 'AW-17164057977';
-const LEAD_SEND_TO = `${ADS_ACCOUNT}/aYa6COGX_6kcEPn6uvg_`;
+const LEAD_SEND_TO = `${ADS_ACCOUNT}/_uHrCJ_yzq8cEPn6uvg_`;
 
 function safeGtag(...args) {
   try {

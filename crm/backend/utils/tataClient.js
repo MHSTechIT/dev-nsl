@@ -26,12 +26,22 @@ const WEBHOOK_SECRET = process.env.TATA_TELE_WEBHOOK_SECRET || '';
 
 /* ── API key resolution: per-user → per-account → global ── */
 function resolveApiKey({ perUserKey, accountType }) {
-  if (perUserKey) return perUserKey;
-  if (accountType) {
-    const k = process.env[`TATA_TELE_API_KEY_${accountType}`];
-    if (k) return k;
+  if (perUserKey) {
+    console.log('[tata.resolveApiKey]', { source: 'per_user', accountType, keyPrefix: String(perUserKey).slice(0, 16) + '...' });
+    return perUserKey;
   }
-  return process.env.TATA_TELE_API_KEY || '';
+  if (accountType) {
+    const envName = `TATA_TELE_API_KEY_${accountType}`;
+    const k = process.env[envName];
+    if (k) {
+      console.log('[tata.resolveApiKey]', { source: envName, accountType, keyPrefix: String(k).slice(0, 16) + '...' });
+      return k;
+    }
+    console.warn('[tata.resolveApiKey]', { source: 'fallback_to_default', accountType, missingEnv: envName });
+  }
+  const fallback = process.env.TATA_TELE_API_KEY || '';
+  console.log('[tata.resolveApiKey]', { source: 'TATA_TELE_API_KEY_default', accountType: accountType || '(none)', keyPrefix: fallback.slice(0, 16) + '...' });
+  return fallback;
 }
 
 function isConfigured() {

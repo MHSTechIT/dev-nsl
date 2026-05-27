@@ -11,13 +11,17 @@
  * Conversions tracked:
  *   • LPV  (4yTLCLyo_6kcEPn6uvg_)  — Screen1A mount.
  *                                   Counts as "link click" in Google Ads.
- *   • Lead (aYa6COGX_6kcEPn6uvg_)  — Screen3 form-submit success.
- *                                   Counts as confirmed lead.
+ *   • Lead (_uHrCJ_yzq8cEPn6uvg_)  — Screen3 form-submit success +
+ *                                   WhatsApp page mount. Both share
+ *                                   transaction_id = lead_id so Google
+ *                                   Ads dedupes them to one count.
+ *   • ATC  (zuqgCMzKmKocEPn6uvg_)  — Screen4 COMPLETE REGISTRATION
+ *                                   button click (after validation).
  * ===================================================================*/
 
 const ADS_ACCOUNT = 'AW-17164057977';
 const LPV_SEND_TO  = `${ADS_ACCOUNT}/4yTLCLyo_6kcEPn6uvg_`;
-const LEAD_SEND_TO = `${ADS_ACCOUNT}/aYa6COGX_6kcEPn6uvg_`;
+const LEAD_SEND_TO = `${ADS_ACCOUNT}/_uHrCJ_yzq8cEPn6uvg_`;
 const ATC_SEND_TO  = `${ADS_ACCOUNT}/zuqgCMzKmKocEPn6uvg_`;
 
 /* Safe wrapper. If gtag.js failed to load (ad-blocker, network error,
@@ -55,10 +59,11 @@ export function gtagLead({ transactionId, value, currency = 'INR' } = {}) {
   });
 }
 
-/* Add-to-Cart. Fires once per validated COMPLETE REGISTRATION submit click
-   on Screen4 — after form validation passes, before the POST /api/leads.
-   Counts the user's *intent* to register (upper funnel) so Google Ads can
-   optimise bidding separately from confirmed leads (gtagLead). */
+/* Add-to-Cart. Spec trigger = button click. Fires once from Screen4's
+   handleSubmit (the COMPLETE REGISTRATION button's onClick handler via
+   the form's onSubmit) after client-side validation passes and before
+   the POST /api/leads. Counts the user's *intent* to register so Google
+   Ads can optimise bidding separately from confirmed leads (gtagLead). */
 export function gtagAtc() {
   safeGtag('event', 'conversion', { send_to: ATC_SEND_TO });
 }
