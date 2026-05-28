@@ -15,8 +15,12 @@
  *                                   WhatsApp page mount. Both share
  *                                   transaction_id = lead_id so Google
  *                                   Ads dedupes them to one count.
- *   • ATC  (zuqgCMzKmKocEPn6uvg_)  — Screen4 COMPLETE REGISTRATION
- *                                   button click (after validation).
+ *   • ATC  (zuqgCMzKmKocEPn6uvg_)  — Screen4: fires the MOMENT all
+ *                                   three fields (name + WhatsApp +
+ *                                   email) are filled AND pass client-
+ *                                   side validation. No button-click
+ *                                   wait. Covers typed input + browser
+ *                                   autofill via React state updates.
  * ===================================================================*/
 
 const ADS_ACCOUNT = 'AW-17164057977';
@@ -59,11 +63,13 @@ export function gtagLead({ transactionId, value, currency = 'INR' } = {}) {
   });
 }
 
-/* Add-to-Cart. Spec trigger = button click. Fires once from Screen4's
-   handleSubmit (the COMPLETE REGISTRATION button's onClick handler via
-   the form's onSubmit) after client-side validation passes and before
-   the POST /api/leads. Counts the user's *intent* to register so Google
-   Ads can optimise bidding separately from confirmed leads (gtagLead). */
+/* Add-to-Cart. Fires the instant all three Screen4 fields (name +
+   WhatsApp + email) become populated AND pass client-side validation —
+   no submit-click wait. Implemented as a useEffect in Screen4.jsx that
+   watches the three state vars and fires once per Screen4 mount via a
+   ref-guard. Counts the user's *intent* to register, separately from
+   confirmed leads (gtagLead). Catches both manual typing and browser/
+   password-manager autofill (which both end up updating React state). */
 export function gtagAtc() {
   safeGtag('event', 'conversion', { send_to: ATC_SEND_TO });
 }

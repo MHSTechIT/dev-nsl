@@ -68,6 +68,7 @@ async function assignNewLead(leadId, sugarLevel, webinarId) {
        WHERE lsc.webinar_id = $1
          AND lsc.enabled    = TRUE
          AND ('all' = ANY(lsc.allowed_lead_types) OR $2 = ANY(lsc.allowed_lead_types))
+         AND u.deleted_at IS NULL
        ORDER BY lsc.position ASC, lsc.created_at ASC
     `, [webinarId, sugarLevel]);
 

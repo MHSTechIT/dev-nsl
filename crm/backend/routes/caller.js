@@ -233,6 +233,19 @@ router.post('/self-pause', async (req, res) => {
     await activityLogger.logPointEvent(req.caller.id, 'PAUSED_BY_SMARTFLOW', { reason });
     try { callerSse.pushTo(req.caller.id, { type: 'caller.paused' }); } catch (_) {}
     notifyAutoPause(req.caller.id, reason).catch(() => {});
+    // Mark whatever lead this caller had open as Incomplete so it
+    // surfaces in Completed Calls. Mirrors the admin/manager Pause
+    // path; we want every auto-pause / admin-pause / manager-pause
+    // path to converge on the same outcome.
+    try {
+      const { markInFlightLeadIncomplete } = require('../utils/markInFlightLeadIncomplete');
+      markInFlightLeadIncomplete({
+        callerId: req.caller.id,
+        reason:   `self_pause:${reason}`,
+      }).catch(() => {});
+    } catch (e) {
+      console.error('[caller/self-pause] markInFlightLeadIncomplete load error:', e.message);
+    }
     console.log(JSON.stringify({
       type: 'caller.self_pause', caller_id: req.caller.id, reason,
       at: new Date().toISOString(),
@@ -536,13 +549,16 @@ router.post('/leads/reopen', async (req, res) => {
       // "we couldn't reach the customer" and the UX bucket is the same.
       result = await pool.query(
         `UPDATE leads
-            SET last_note_outcome = NULL,
-                last_note_interested = NULL,
-                last_note_at      = NULL,
-                follow_up_at      = NULL,
-                completed_at      = NULL,
-                assigned_at       = NOW(),
-                pinned_at         = NOW()
+            SET last_note_outcome        = NULL,
+                last_note_interested     = NULL,
+                last_note_outcome_subtag = NULL,
+                last_note_at             = NULL,
+                follow_up_at             = NULL,
+                completed_at             = NULL,
+                assigned_at              = NOW(),
+                pinned_at                = NOW(),
+                -- Fresh assignment ⇒ no tag (see admin.js reopen note).
+                lead_tag                 = NULL
           WHERE assigned_user_id  = $1
             AND last_note_outcome IN ('not_picked', 'auto_paused')
           RETURNING id`,
@@ -562,14 +578,17 @@ router.post('/leads/reopen', async (req, res) => {
 
       result = await pool.query(
         `UPDATE leads
-            SET last_note_outcome = NULL,
-                last_note_interested = NULL,
-                last_note_at      = NULL,
-                follow_up_at      = NULL,
-                completed_at      = NULL,
-                assigned_at       = NOW(),
-                pinned_at         = NOW(),
-                assigned_user_id  = COALESCE(assigned_user_id, $1)
+            SET last_note_outcome        = NULL,
+                last_note_interested     = NULL,
+                last_note_outcome_subtag = NULL,
+                last_note_at             = NULL,
+                follow_up_at             = NULL,
+                completed_at             = NULL,
+                assigned_at              = NOW(),
+                pinned_at                = NOW(),
+                assigned_user_id         = COALESCE(assigned_user_id, $1),
+                -- Fresh assignment ⇒ no tag (see admin.js reopen note).
+                lead_tag                 = NULL
           WHERE id IN (
             SELECT DISTINCT lead_id FROM calls
              WHERE direction = 'inbound'
@@ -640,7 +659,12 @@ router.get('/leads/next-batch', async (req, res) => {
 //                  parked AND the caller's own crm_users.is_active is flipped
 //                  to FALSE — only a super admin can resume them via PATCH
 //                  /api/admin/crm-users/:id { is_active: true }.
-const ALLOWED_OUTCOMES = ['completed', 'follow_up', 'not_interested', 'not_picked', 'auto_paused'];
+// 'incomplete' = caller closed the modal (X button) WITHOUT finishing the
+//                 form. The note row captures whatever partial values they
+//                 typed; the lead lands in Completed Calls with the
+//                 INCOMPLETE badge. Discovery-field validations are skipped
+//                 (form was abandoned mid-fill, fields may be empty / invalid).
+const ALLOWED_OUTCOMES = ['completed', 'follow_up', 'not_interested', 'not_picked', 'auto_paused', 'incomplete'];
 const ALLOWED_RANGES   = ['250+', '200-250', '100-200', 'no_diabetes'];
 const ALLOWED_AGES     = ['0-18', '19-24', '25-34', '35-44', '45-54', 'above-54'];
 
@@ -685,9 +709,12 @@ router.post('/leads/:id/note', async (req, res) => {
   if (lead_tag != null && lead_tag !== '' && !ALLOWED_LEAD_TAGS.has(lead_tag)) {
     return res.status(422).json({ error: 'invalid lead_tag' });
   }
-  // 'not_picked' and 'auto_paused' both mean the caller never reached the
-  // customer, so the discovery-field validations don't apply.
-  const NO_CONTACT_OUTCOMES = new Set(['not_picked', 'auto_paused']);
+  // 'not_picked' / 'auto_paused' = caller never reached the customer.
+  // 'incomplete'                  = caller reached the customer but X-ed
+  //                                 out without finishing the form.
+  // All three skip the discovery-field validations because the relevant
+  // fields are either missing (no contact ever) or partial (abandoned).
+  const NO_CONTACT_OUTCOMES = new Set(['not_picked', 'auto_paused', 'incomplete']);
   if (!NO_CONTACT_OUTCOMES.has(outcome)) {
     if (outcome === 'follow_up' && !follow_up_at) {
       return res.status(422).json({ error: 'follow_up_at required when outcome is follow_up' });
@@ -759,7 +786,7 @@ router.post('/leads/:id/note', async (req, res) => {
           SET last_note_outcome         = $2,
               last_note_at              = NOW(),
               follow_up_at              = $3,
-              completed_at              = CASE WHEN $2 IN ('completed','not_interested') THEN NOW() ELSE NULL END,
+              completed_at              = CASE WHEN $2 IN ('completed','not_interested','incomplete') THEN NOW() ELSE NULL END,
               last_note_interested      = $4,
               full_name                 = COALESCE(NULLIF($5, ''), full_name),
               next_batch_parked         = CASE WHEN $7 THEN TRUE  ELSE next_batch_parked    END,

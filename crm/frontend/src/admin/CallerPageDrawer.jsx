@@ -59,7 +59,13 @@ export default function CallerPageDrawer({ token, callerId, callerName, onClose,
      reflect the unfiltered totals (admin still sees how many completed
      leads exist; the visible list shrinks but the badge stays honest). */
   const [search,   setSearch]   = useState('');           // free text — name / phone / email
-  const [sugarF,   setSugarF]   = useState('all');        // 'all' | '150-250' | '250+'
+  // Webinar filter — single-select dropdown. 'all' means show every
+  // webinar; any other value is a webinar UUID matched against the
+  // lead's `webinar_id` column (exposed by /api/admin/caller-leads).
+  // The list of webinars itself is fetched lazily below so we can
+  // label the dropdown with human-readable names.
+  const [webinarF, setWebinarF] = useState('all');
+  const [webinars, setWebinars] = useState([]);           // [{ id, name, ... }]
   // Tags are MULTI-SELECT — admin can combine e.g. HOT + WARM to view
   // both classifications together. Stored as a Set of tag strings; an
   // empty Set means "no tag filter" (show every tag).
@@ -88,6 +94,19 @@ export default function CallerPageDrawer({ token, callerId, callerName, onClose,
     return () => { cancelled = true; };
   }, [token, callerId]);
 
+  /* Fetch the list of webinars once so the filter dropdown can render
+     human-readable names. Independent of `callerId` — webinars are
+     global, so this runs only when the token changes. */
+  useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+    fetch('/api/admin/webinars', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : { webinars: [] })
+      .then(d => { if (!cancelled) setWebinars(d.webinars || []); })
+      .catch(() => { if (!cancelled) setWebinars([]); });
+    return () => { cancelled = true; };
+  }, [token]);
+
   /* Esc closes the drawer. */
   useEffect(() => {
     function onKey(e) { if (e.key === 'Escape') onClose?.(); }
@@ -115,26 +134,43 @@ export default function CallerPageDrawer({ token, callerId, callerName, onClose,
   // name / phone / email; chips narrow by sugar level + lead tag. All
   // three combine with AND — empty search/chip-set means "ignore that
   // filter". Multiple tags combine with OR (lead matches if its tag
-  // appears in tagSet, OR if 2ND_CALL is selected and it's a follow-up).
+  // appears in tagSet, OR if 2ND_CALL is selected and the lead is a
+  // second-call candidate).
+  //
+  // "2nd Call" candidate = a lead worth calling back. Matches BOTH:
+  //   • last_note_outcome === 'follow_up'  (caller explicitly scheduled
+  //                                          a second touch via the
+  //                                          Follow-up toggle)
+  //   • last_note_interested === 'yes'     (caller picked Interested =
+  //                                          Yes on the form, so the
+  //                                          customer signalled buying
+  //                                          intent — worth re-calling
+  //                                          even if the lead landed as
+  //                                          'completed' on the first
+  //                                          call)
+  // Junk / Not Interested / Not Picked / Incomplete are excluded.
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
     return (grouped[tab] || []).filter(l => {
-      if (sugarF !== 'all' && l.sugar_level !== sugarF) return false;
+      if (webinarF !== 'all' && String(l.webinar_id || '') !== webinarF) return false;
       if (tagSet.size > 0) {
         const tagMatch     = l.lead_tag && tagSet.has(l.lead_tag);
-        const isSecondCall = tagSet.has('2ND_CALL') && l.last_note_outcome === 'follow_up';
+        const isSecondCall = tagSet.has('2ND_CALL') && (
+          l.last_note_outcome === 'follow_up' ||
+          l.last_note_interested === 'yes'
+        );
         if (!tagMatch && !isSecondCall) return false;
       }
       if (!q) return true;
       const hay = `${l.full_name || ''} ${l.whatsapp_number || ''} ${l.email || ''}`.toLowerCase();
       return hay.includes(q);
     });
-  }, [grouped, tab, search, sugarF, tagSet]);
+  }, [grouped, tab, search, webinarF, tagSet]);
   const allSelected = visible.length > 0 && visible.every(l => selected.has(l.id));
   // True when any filter is narrowing the view — used to render a clear
   // hint + "Clear filters" button so the admin never wonders why their
   // list is empty.
-  const isFiltered = search.trim() !== '' || sugarF !== 'all' || tagSet.size > 0;
+  const isFiltered = search.trim() !== '' || webinarF !== 'all' || tagSet.size > 0;
 
   // Toggle a tag in/out of the multi-select Set. Returns a new Set so
   // React picks up the state change.
@@ -304,15 +340,39 @@ export default function CallerPageDrawer({ token, callerId, callerName, onClose,
             )}
           </div>
 
-          {/* Sugar level pills */}
-          <Chips label="Sugar"
-            options={[
-              { v: 'all',     l: 'All'    },
-              { v: '150-250', l: '150–250'},
-              { v: '250+',    l: '250+'   },
-            ]}
-            value={sugarF} onChange={setSugarF}
-          />
+          {/* Webinar filter dropdown — single-select. Default 'all' shows
+              every webinar; pick one to scope the list to leads
+              registered through that batch. Replaces the old Sugar
+              pills (Sugar info is still visible in the table column,
+              just not as a filter chip). */}
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            <span style={{
+              fontFamily: 'Outfit, sans-serif', fontWeight: 700,
+              fontSize: '0.70rem', color: 'rgba(91,33,182,0.65)',
+              textTransform: 'uppercase', letterSpacing: '0.06em',
+            }}>
+              Webinar
+            </span>
+            <select
+              value={webinarF}
+              onChange={e => setWebinarF(e.target.value)}
+              style={{
+                height: 30, padding: '0 10px',
+                borderRadius: 8, border: '1px solid rgba(139,92,246,0.25)',
+                background: '#fff', color: '#3B0764',
+                fontFamily: 'Outfit, sans-serif', fontWeight: 600, fontSize: '0.78rem',
+                outline: 'none', cursor: 'pointer',
+                minWidth: 180, maxWidth: 260,
+              }}
+            >
+              <option value="all">All webinars</option>
+              {webinars.map(w => (
+                <option key={w.id} value={w.id}>
+                  {(w.name || '').replace(/^AWS-/, 'AWS - ') || `Webinar ${String(w.id).slice(0, 6)}…`}
+                </option>
+              ))}
+            </select>
+          </div>
 
           {/* Lead tag — MULTI-SELECT. Click "All" to clear; click each
               pill to toggle it in/out of the active filter set. Includes
@@ -334,7 +394,7 @@ export default function CallerPageDrawer({ token, callerId, callerName, onClose,
 
           {isFiltered && (
             <button type="button"
-              onClick={() => { setSearch(''); setSugarF('all'); setTagSet(new Set()); }}
+              onClick={() => { setSearch(''); setWebinarF('all'); setTagSet(new Set()); }}
               style={{
                 height: 26, padding: '0 10px', borderRadius: 6, border: 'none',
                 background: 'rgba(220,38,38,0.10)', color: '#B91C1C',

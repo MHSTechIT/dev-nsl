@@ -29,6 +29,29 @@ function getSource(req) {
   return ALLOWED_SOURCES.has(v) ? v : 'meta';
 }
 
+/* Top-2 recent webinars per source — the same window the caller-side
+   Assigned / Untouched pages use to bucket leads. Inlined as a SQL
+   sub-query so the sales-performance CTEs can reference it without a
+   cross-file import. Mirrors routes/caller.js RECENT_WEBINARS. */
+const RECENT_WEBINARS_SQL = `(
+  SELECT ranked.id FROM (
+    SELECT w.id,
+           ROW_NUMBER() OVER (
+             PARTITION BY w.source
+             ORDER BY w.date_time DESC NULLS LAST, w.id DESC
+           ) AS rn
+      FROM webinars w
+      JOIN (
+        SELECT source,
+               COALESCE(MAX(date_time) FILTER (WHERE is_active), MAX(date_time)) AS cap
+          FROM webinars
+         GROUP BY source
+      ) caps ON caps.source = w.source
+     WHERE w.date_time <= caps.cap
+  ) ranked
+  WHERE ranked.rn <= 2
+)`;
+
 /* ── GET /api/admin/leads ── */
 router.get('/leads', async (req, res) => {
   const source = getSource(req);
@@ -144,7 +167,7 @@ router.get('/completed-calls', async (req, res) => {
            ORDER BY c.started_at DESC
            LIMIT 1
         ) latest_call ON TRUE
-       WHERE l.last_note_outcome IN ('completed', 'not_interested')
+       WHERE l.last_note_outcome IN ('completed', 'not_interested', 'incomplete')
          ${scopeSQL}
        ORDER BY l.last_note_at DESC NULLS LAST
        LIMIT $1
@@ -963,12 +986,16 @@ router.get('/crm-users', async (req, res) => {
     const tl  = req.adminUser && req.adminUser.kind === 'tl';
     let whereSQL = '';
     let params   = [];
+    // Soft-deleted rows are never returned to the Users list. The
+    // deleted_at IS NULL gate goes into the WHERE in every branch.
     if (mgr) {
-      whereSQL = 'WHERE department = $1';
+      whereSQL = 'WHERE deleted_at IS NULL AND department = $1';
       params   = [req.adminUser.department];
     } else if (tl) {
-      whereSQL = 'WHERE id = $1 OR team_leader_id = $1';
+      whereSQL = 'WHERE deleted_at IS NULL AND (id = $1 OR team_leader_id = $1)';
       params   = [req.adminUser.id];
+    } else {
+      whereSQL = 'WHERE deleted_at IS NULL';
     }
     const { rows } = await pool.query(
       `SELECT id, full_name, email, phone, role, is_active,
@@ -1327,6 +1354,22 @@ router.patch('/crm-users/:id', crmUserPatchValidators, async (req, res) => {
         id,
         updates.is_active ? 'UNPAUSED_BY_ADMIN' : 'PAUSED_BY_ADMIN'
       );
+      // If admin/manager just PAUSED this caller, mark whatever lead
+      // they had open as Incomplete so it surfaces in Completed Calls
+      // for review. Same code path activitySpanReaper uses on stale
+      // heartbeat, just triggered immediately instead of after the
+      // 90-second timeout.
+      if (updates.is_active === false) {
+        try {
+          const { markInFlightLeadIncomplete } = require('../utils/markInFlightLeadIncomplete');
+          markInFlightLeadIncomplete({
+            callerId: id,
+            reason:   req.adminUser?.kind === 'manager' ? 'manager_pause' : 'admin_pause',
+          }).catch(() => {});
+        } catch (e) {
+          console.error('[admin] markInFlightLeadIncomplete load error:', e.message);
+        }
+      }
     }
     // Mask the API key in the response (see GET /crm-users for the
     // reasoning — never echo the real secret back to the browser).
@@ -1373,6 +1416,7 @@ router.get('/auto-paused-callers', async (req, res) => {
          FROM crm_users
         WHERE is_active = FALSE
           AND auto_paused_at IS NOT NULL
+          AND deleted_at IS NULL
           ${whereExtra}
         ORDER BY auto_paused_at DESC`,
       params
@@ -1390,11 +1434,15 @@ router.get('/lead-share-config', async (req, res) => {
   if (!webinar_id) return res.status(400).json({ error: 'webinar_id required' });
 
   try {
-    // All callers eligible to be in the rotation (junior + senior caller roles)
+    // All callers eligible to be in the rotation (junior + senior caller
+    // roles). Soft-deleted callers (deleted_at IS NOT NULL) are excluded
+    // so they don't appear in the Leads Logic rotation list — the entire
+    // point of soft-delete is that they're gone from active workflows.
     const callersQuery = pool.query(
       `SELECT id, full_name, email, role, is_active
          FROM crm_users
         WHERE role IN ('junior_caller','senior_caller')
+          AND deleted_at IS NULL
         ORDER BY created_at ASC`
     );
     // Existing config rows for this webinar
@@ -1507,7 +1555,18 @@ router.put('/lead-share-config', async (req, res) => {
   }
 });
 
-/* ── DELETE /api/admin/crm-users/:id ── */
+/* ── DELETE /api/admin/crm-users/:id ──
+   Soft-delete. A physical DELETE would fail Postgres FK checks because
+   lead_assignments / lead_call_notes / leads.assigned_user_id all have
+   ON DELETE NO ACTION (intentional — those rows are historical and
+   shouldn't lose their caller attribution). Instead we stamp
+   deleted_at = NOW() and flip is_active = FALSE. The user disappears
+   from the Users list, the assignment pool, and the performance grid;
+   call history retains the name pointer for audit.
+
+   To restore a soft-deleted user later: UPDATE crm_users SET
+   deleted_at = NULL WHERE id = '<uuid>'. No UI for undelete yet —
+   admin can do it via psql / a follow-up endpoint if needed. */
 router.delete('/crm-users/:id', async (req, res) => {
   const { id } = req.params;
   if (!id) return res.status(400).json({ error: 'id required' });
@@ -1520,8 +1579,25 @@ router.delete('/crm-users/:id', async (req, res) => {
         return res.status(403).json({ error: 'You can only manage users in your own department.' });
       }
     }
-    const result = await pool.query('DELETE FROM crm_users WHERE id = $1', [id]);
-    if (result.rowCount === 0) return res.status(404).json({ error: 'User not found.' });
+    // TL has no delete permission at all — would let them remove their
+    // own reports unilaterally, which is a manager+ decision.
+    if (req.adminUser && req.adminUser.kind === 'tl') {
+      return res.status(403).json({ error: 'Team leaders cannot delete users.' });
+    }
+    const result = await pool.query(
+      `UPDATE crm_users
+          SET deleted_at = NOW(),
+              is_active  = FALSE
+        WHERE id = $1
+          AND deleted_at IS NULL
+        RETURNING id`,
+      [id]
+    );
+    if (result.rowCount === 0) {
+      // Either the user doesn't exist or was already deleted. Either
+      // way the UI's effect is the same (row should disappear).
+      return res.status(404).json({ error: 'User not found.' });
+    }
     res.json({ success: true });
   } catch (err) {
     console.error('Delete crm_user error:', err.message);
@@ -1567,6 +1643,7 @@ router.get('/caller-workload', async (req, res) => {
        FROM crm_users u
        LEFT JOIN leads l ON l.assigned_user_id = u.id
        WHERE u.role IN ('junior_caller','senior_caller')
+         AND u.deleted_at IS NULL
        GROUP BY u.id
        ORDER BY u.is_active DESC, u.full_name ASC`,
       [dayStart, dayEnd]
@@ -2012,14 +2089,18 @@ router.get('/caller-leads/:callerId', async (req, res) => {
   if (!callerId) return res.status(400).json({ error: 'callerId required' });
   try {
     const { rows } = await pool.query(
-      `SELECT id, full_name, whatsapp_number, email, sugar_level,
-              diabetes_duration, on_medication, age_group, occupation,
-              lead_score, lead_tag, last_note_outcome, last_note_at,
-              follow_up_at, completed_at, assigned_at, created_at,
-              wa_clicked, utm_content
-         FROM leads
-        WHERE assigned_user_id = $1
-        ORDER BY COALESCE(last_note_at, assigned_at, created_at) DESC
+      `SELECT l.id, l.full_name, l.whatsapp_number, l.email, l.sugar_level,
+              l.diabetes_duration, l.on_medication, l.age_group, l.occupation,
+              l.lead_score, l.lead_tag, l.last_note_outcome, l.last_note_at,
+              l.last_note_interested, l.last_note_outcome_subtag,
+              l.follow_up_at, l.completed_at, l.assigned_at, l.created_at,
+              l.wa_clicked, l.utm_content,
+              l.webinar_id,
+              w.name AS webinar_name
+         FROM leads l
+         LEFT JOIN webinars w ON w.id = l.webinar_id
+        WHERE l.assigned_user_id = $1
+        ORDER BY COALESCE(l.last_note_at, l.assigned_at, l.created_at) DESC
         LIMIT 1000`,
       [callerId]
     );
@@ -2048,13 +2129,20 @@ router.post('/leads/reopen', async (req, res) => {
   try {
     const { rowCount } = await pool.query(
       `UPDATE leads
-          SET last_note_outcome   = NULL,
-              last_note_interested = NULL,
-              last_note_at         = NULL,
-              follow_up_at         = NULL,
-              completed_at         = NULL,
-              assigned_at          = NOW(),
-              pinned_at            = NOW()
+          SET last_note_outcome        = NULL,
+              last_note_interested     = NULL,
+              last_note_outcome_subtag = NULL,
+              last_note_at             = NULL,
+              follow_up_at             = NULL,
+              completed_at             = NULL,
+              assigned_at              = NOW(),
+              pinned_at                = NOW(),
+              -- Fresh assignment ⇒ no tag. Tag is reapplied by the
+              -- LeadCallNoteModal classifier only AFTER the next call's
+              -- form is submitted. Without this reset, the badge from the
+              -- previous completion (HOT/WARM/COLD/JUNK) would linger
+              -- through the new Assigned cycle and mislead the caller.
+              lead_tag                 = NULL
         WHERE id = ANY($1::uuid[])`,
       [ids]
     );
@@ -2121,6 +2209,9 @@ router.get('/sales-performance', async (req, res) => {
         -- Include paused (is_active = FALSE) callers in the result so the
         -- admin's Sales Performance kebab can show a Paused pill and a
         -- Resume action. The frontend reads is_active per row.
+        -- Soft-deleted callers (deleted_at IS NOT NULL) are excluded —
+        -- they shouldn't appear in the grid even though their historical
+        -- calls / leads still reference them.
         -- Also surfaces the heartbeat columns so the Status column can render
         -- live green/orange/red badges per caller.
         SELECT u.id AS caller_id, u.full_name AS name, u.role, u.is_active,
@@ -2128,21 +2219,71 @@ router.get('/sales-performance', async (req, res) => {
                u.rest_started_at
           FROM crm_users u
          WHERE u.role IN ('junior_caller','senior_caller','team_leader','manager')
+           AND u.deleted_at IS NULL
       ),
       lead_agg AS (
+        -- Per-caller lead counts mirror each caller-side page exactly
+        -- (Assigned / Completed / Untouched / etc.). These are
+        -- CURRENT-STATE metrics, NOT date-windowed, so admins see the
+        -- same number on the dashboard as the caller sees on their
+        -- own page. The only exception is the enrolled field (still
+        -- date-windowed for the conversion-rate / predicted-enrollments
+        -- math the dashboard renders alongside the per-caller cards).
         SELECT l.assigned_user_id AS caller_id,
-               COUNT(*) FILTER (WHERE l.assigned_at >= w.d_start AND l.assigned_at <= w.d_end)::int AS assigned,
-               COUNT(*) FILTER (WHERE l.lead_score >= 4 AND l.assigned_at >= w.d_start AND l.assigned_at <= w.d_end)::int AS hot,
-               COUNT(*) FILTER (WHERE l.lead_score IN (2,3) AND l.assigned_at >= w.d_start AND l.assigned_at <= w.d_end)::int AS warm,
-               COUNT(*) FILTER (WHERE l.last_note_at IS NOT NULL AND l.last_note_at >= w.d_start AND l.last_note_at <= w.d_end AND l.assigned_at >= w.d_start AND l.assigned_at <= w.d_end)::int AS touched,
-               COUNT(*) FILTER (WHERE l.last_note_at IS NULL AND l.assigned_at < NOW() - INTERVAL '24 hours')::int AS untouched_aged,
-               -- Follow-ups: leads currently parked with outcome=follow_up,
-               -- regardless of when the follow_up was scheduled. Reflects
-               -- "how many follow-ups is this caller still on the hook for".
-               COUNT(*) FILTER (WHERE l.last_note_outcome = 'follow_up')::int AS followups,
+               -- ASSIGNED: leads on caller's Assigned page right now.
+               COUNT(*) FILTER (
+                 WHERE l.next_batch_parked = FALSE
+                   AND (l.last_note_outcome IS NULL
+                        OR (l.last_note_outcome = 'follow_up' AND l.follow_up_at <= NOW()))
+                   AND (l.webinar_id IS NULL OR l.webinar_id IN ${RECENT_WEBINARS_SQL})
+               )::int AS assigned,
+               -- HOT / WARM: leads on Completed page whose lead_tag
+               -- (set by classifyLeadTag) matches.
+               COUNT(*) FILTER (
+                 WHERE l.lead_tag = 'HOT'
+                   AND l.next_batch_parked = FALSE
+                   AND (l.last_note_outcome IN ('completed','not_interested','incomplete')
+                        OR (l.last_note_outcome = 'follow_up' AND l.follow_up_at > NOW()))
+               )::int AS hot,
+               COUNT(*) FILTER (
+                 WHERE l.lead_tag = 'WARM'
+                   AND l.next_batch_parked = FALSE
+                   AND (l.last_note_outcome IN ('completed','not_interested','incomplete')
+                        OR (l.last_note_outcome = 'follow_up' AND l.follow_up_at > NOW()))
+               )::int AS warm,
+               -- TOUCHED: total count of rows on caller's Completed
+               -- Calls page. Mirrors GET /api/caller/leads/completed.
+               COUNT(*) FILTER (
+                 WHERE l.next_batch_parked = FALSE
+                   AND (l.last_note_outcome IN ('completed','not_interested','incomplete')
+                        OR (l.last_note_outcome = 'follow_up' AND l.follow_up_at > NOW()))
+               )::int AS touched,
+               -- UNTOUCHED: count of caller's Untouched Leads page
+               -- (uncompleted leads on OLDER webinars). Mirrors
+               -- GET /api/caller/leads/untouched.
+               COUNT(*) FILTER (
+                 WHERE l.next_batch_parked = FALSE
+                   AND (l.last_note_outcome IS NULL
+                        OR (l.last_note_outcome = 'follow_up' AND l.follow_up_at <= NOW()))
+                   AND l.webinar_id IS NOT NULL
+                   AND l.webinar_id NOT IN ${RECENT_WEBINARS_SQL}
+               )::int AS untouched,
+               -- FOLLOW-UPS: leads currently scheduled to come back as
+               -- a follow-up. Shows up on caller's Completed page until
+               -- follow_up_at hits, then moves to Assigned.
+               COUNT(*) FILTER (
+                 WHERE l.last_note_outcome = 'follow_up'
+                   AND l.follow_up_at > NOW()
+                   AND l.next_batch_parked = FALSE
+               )::int AS followups,
                COUNT(*) FILTER (WHERE l.last_note_outcome = 'completed' AND l.completed_at >= w.d_start AND l.completed_at <= w.d_end)::int AS enrolled,
-               -- Leads left Incomplete by a caller disconnect (tab close / network drop).
-               COUNT(*) FILTER (WHERE l.last_note_outcome = 'incomplete' AND l.last_note_at >= w.d_start AND l.last_note_at <= w.d_end)::int AS incomplete
+               -- INCOMPLETE: leads on Completed page with the
+               -- "incomplete" outcome (caller was paused / disconnected
+               -- mid-form). Current-state count, no date filter.
+               COUNT(*) FILTER (
+                 WHERE l.last_note_outcome = 'incomplete'
+                   AND l.next_batch_parked = FALSE
+               )::int AS incomplete
           FROM leads l CROSS JOIN w
          WHERE l.assigned_user_id IS NOT NULL
            AND ($${webinarParamIdx}::text IS NULL OR l.webinar_id::text = $${webinarParamIdx}::text)
@@ -2159,12 +2300,16 @@ router.get('/sales-performance', async (req, res) => {
       ),
       call_agg AS (
         SELECT c.caller_id,
-               COUNT(*)::int AS total_calls,
-               COUNT(*) FILTER (WHERE c.direction = 'inbound')::int  AS incoming,
-               COUNT(*) FILTER (WHERE c.direction = 'outbound')::int AS outgoing,
-               COUNT(*) FILTER (WHERE c.duration_sec > 0)::int       AS connected,
-               COALESCE(SUM(c.duration_sec), 0)::int                 AS total_duration_sec,
-               MAX(c.started_at)                                     AS last_call_at
+               -- TOTAL CALLS: every outbound dial including ones that
+               -- never connected (missed by agent OR customer). Date-
+               -- windowed since calls accrue over time.
+               COUNT(*) FILTER (WHERE c.direction = 'outbound')::int AS total_calls,
+               -- CONNECTED: outbound calls where Tata stamped
+               -- customer_answered_at (true customer pickup, not
+               -- agent-only-leg).
+               COUNT(*) FILTER (WHERE c.direction = 'outbound' AND c.customer_answered_at IS NOT NULL)::int AS connected,
+               COALESCE(SUM(c.duration_sec) FILTER (WHERE c.direction = 'outbound'), 0)::int AS total_duration_sec,
+               MAX(c.started_at) FILTER (WHERE c.direction = 'outbound') AS last_call_at
           FROM calls c CROSS JOIN w
          WHERE c.caller_id IS NOT NULL
            AND c.started_at >= w.d_start AND c.started_at <= w.d_end
@@ -2174,6 +2319,48 @@ router.get('/sales-performance', async (req, res) => {
                     AND ll.webinar_id::text = $${webinarParamIdx}::text
                ))
          GROUP BY c.caller_id
+      ),
+      -- INCOMING: count of rows in the caller's Missed Calls page.
+      -- Mirrors GET /api/caller/calls/missed-inbound. Current-state
+      -- count (no date filter) so the dashboard reflects whatever
+      -- the caller would see on that page right now.
+      missed_in_agg AS (
+        SELECT c.caller_id, COUNT(*)::int AS incoming
+          FROM calls c
+         WHERE c.caller_id IS NOT NULL
+           AND c.direction = 'inbound'
+           AND (
+             c.status IN ('missed','failed')
+             OR (c.status = 'ringing' AND c.started_at < NOW() - INTERVAL '2 minutes')
+             OR (c.status = 'ended' AND c.agent_answered_at IS NULL)
+           )
+         GROUP BY c.caller_id
+      ),
+      -- 1ST / 2ND CALL TRIGGERED: ROW_NUMBER() over (lead_id) ranks
+      -- outbound calls in time order. attempt_num=1 = the original
+      -- trigger, attempt_num=2 = the auto-redial (agent_ringing_2
+      -- flow). We count how many calls answered the customer at each
+      -- attempt level, per caller, within the date window.
+      attempt_ranked AS (
+        SELECT c.id, c.caller_id, c.lead_id, c.customer_answered_at,
+               c.started_at, c.direction,
+               ROW_NUMBER() OVER (PARTITION BY c.lead_id ORDER BY c.started_at) AS attempt_num
+          FROM calls c CROSS JOIN w
+         WHERE c.caller_id IS NOT NULL
+           AND c.direction = 'outbound'
+           AND c.started_at >= w.d_start AND c.started_at <= w.d_end
+           AND ($${webinarParamIdx}::text IS NULL OR EXISTS (
+                 SELECT 1 FROM leads ll
+                  WHERE ll.id = c.lead_id
+                    AND ll.webinar_id::text = $${webinarParamIdx}::text
+               ))
+      ),
+      attempt_agg AS (
+        SELECT caller_id,
+               COUNT(*) FILTER (WHERE attempt_num = 1 AND customer_answered_at IS NOT NULL)::int AS first_call_answered,
+               COUNT(*) FILTER (WHERE attempt_num = 2 AND customer_answered_at IS NOT NULL)::int AS second_call_answered
+          FROM attempt_ranked
+         GROUP BY caller_id
       ),
       call_prev AS (
         SELECT c.caller_id,
@@ -2194,24 +2381,27 @@ router.get('/sales-performance', async (req, res) => {
              COALESCE(la.hot, 0)                 AS hot,
              COALESCE(la.warm, 0)                AS warm,
              COALESCE(la.touched, 0)             AS touched,
-             GREATEST(COALESCE(la.assigned, 0) - COALESCE(la.touched, 0), 0) AS untouched,
-             COALESCE(la.untouched_aged, 0)      AS untouched_aged,
+             COALESCE(la.untouched, 0)           AS untouched,
              COALESCE(la.followups, 0)           AS followups,
              COALESCE(la.incomplete, 0)          AS incomplete,
              COALESCE(ca.total_calls, 0)         AS total_calls,
-             COALESCE(ca.incoming, 0)            AS incoming,
-             COALESCE(ca.outgoing, 0)            AS outgoing,
+             COALESCE(mi.incoming, 0)            AS incoming,
              COALESCE(ca.connected, 0)           AS connected,
              COALESCE(ca.total_duration_sec, 0)  AS total_duration_sec,
              ca.last_call_at                     AS last_call_at,
              COALESCE(la.enrolled, 0)            AS enrolled,
              COALESCE(lp.enrolled_prev, 0)       AS enrolled_prev,
-             COALESCE(cp.total_calls_prev, 0)    AS total_calls_prev
+             COALESCE(cp.total_calls_prev, 0)    AS total_calls_prev,
+             -- Per-attempt customer-pickup counts.
+             COALESCE(att.first_call_answered, 0)  AS first_call_answered,
+             COALESCE(att.second_call_answered, 0) AS second_call_answered
         FROM caller_base cb
         LEFT JOIN lead_agg  la ON la.caller_id = cb.caller_id
         LEFT JOIN lead_prev lp ON lp.caller_id = cb.caller_id
-        LEFT JOIN call_agg  ca ON ca.caller_id = cb.caller_id
-        LEFT JOIN call_prev cp ON cp.caller_id = cb.caller_id
+        LEFT JOIN call_agg     ca  ON ca.caller_id  = cb.caller_id
+        LEFT JOIN call_prev    cp  ON cp.caller_id  = cb.caller_id
+        LEFT JOIN missed_in_agg mi ON mi.caller_id = cb.caller_id
+        LEFT JOIN attempt_agg  att ON att.caller_id = cb.caller_id
         ${salespersonFilter}
        ORDER BY enrolled DESC, name ASC
     `, params);
@@ -2240,15 +2430,15 @@ router.get('/sales-performance', async (req, res) => {
       warm:                sum('warm'),
       touched:             sum('touched'),
       untouched:           sum('untouched'),
-      untouched_aged:      sum('untouched_aged'),
       followups:           sum('followups'),
       incomplete:          sum('incomplete'),
       total_calls:         teamCalls,
       incoming:            sum('incoming'),
-      outgoing:            sum('outgoing'),
       connected:           teamConnected,
       total_duration_sec:  teamDuration,
       enrolled:            teamEnrolled,
+      first_call_answered:  sum('first_call_answered'),
+      second_call_answered: sum('second_call_answered'),
       conversion_pct:      pct(teamEnrolled, teamAssigned),
       connection_rate_pct: pct(teamConnected, teamCalls),
       avg_duration_sec:    teamConnected > 0 ? Math.round(teamDuration / teamConnected) : 0,
@@ -2331,6 +2521,7 @@ router.get('/leads/assignment-pool', async (req, res) => {
          LEFT JOIN leads l ON l.assigned_user_id = u.id
         WHERE u.is_active = TRUE
           AND u.role IN ('junior_caller','senior_caller')
+          AND u.deleted_at IS NULL
         GROUP BY u.id
         ORDER BY u.role DESC, u.full_name ASC`
     );

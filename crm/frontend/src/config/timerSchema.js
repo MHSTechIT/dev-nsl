@@ -55,6 +55,8 @@ export const TIMER_GROUPS = [
         help: 'How often the robot re-asks the caller to fill the post-call reason form.' },
       { key: 'formReasonNudgeCount', label: 'Nudges before auto-pause', unit: 'count', default: 5, min: 1, max: 20,
         help: 'Ignored nudges on the form reason card before the account auto-pauses.' },
+      { key: 'formTimerLongCallThresholdMs', label: 'Long-call threshold (no 45s form timer)', unit: 'min', default: 180000, min: 60000, max: 1800000,
+        help: 'When a connected call lasts AT LEAST this long, the post-call form opens WITHOUT the 45-second countdown — the caller fills it at their own pace. Calls shorter than this are treated as customer-cut and trigger the urgent 45s window. Range: 1 minute to 30 minutes. Default 3 minutes.' },
     ],
   },
   {
@@ -234,6 +236,7 @@ export const EDITABLE_KEYS = [
   'extAlertNudgeIntervalMs', 'extAlertNudgeCount',
   'agentReasonNudgeIntervalMs', 'agentReasonNudgeCount',
   'formReasonNudgeIntervalMs', 'formReasonNudgeCount',
+  'formTimerLongCallThresholdMs',
   'customBreakNudgeIntervalMs', 'customBreakNudgeCount',
   'lateReturnNudgeIntervalMs', 'lateReturnNudgeCount',
   'breakPickerCountdownMs', 'breakPickerStrikeCount',

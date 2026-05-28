@@ -26,23 +26,35 @@ const VISIBLE_GROUPS = TIMER_GROUPS
      unit 'count' → shown as a plain count (unchanged)
    ────────────────────────────────────────────────────────────────────────── */
 
-/* Display-unit suffix. Durations (ms + sec) read as "sec"; counts as "×". */
+/* Display-unit suffix. Most durations read as "sec"; long-scale durations
+   (unit 'min') read as "min"; counts as "×". */
 function unitLabel(unit) {
-  return unit === 'count' ? '×' : 'sec';
+  if (unit === 'count') return '×';
+  if (unit === 'min')   return 'min';
+  return 'sec';
+}
+
+/* Native scale per schema unit. Native is always milliseconds for time
+   fields. Returns how many native units make up ONE display unit. */
+function nativePerDisplay(unit) {
+  if (unit === 'ms')  return 1000;     // 1 display-sec = 1000 ms
+  if (unit === 'min') return 60000;    // 1 display-min = 60000 ms
+  return 1;                            // 'sec' / 'count' are already native
 }
 
 /* ms (or native) → display unit. */
 function toDisplay(item, native) {
   const n = Number(native);
-  if (!Number.isFinite(n)) return item.unit === 'ms' ? item.default / 1000 : item.default;
-  return item.unit === 'ms' ? n / 1000 : n;
+  const scale = nativePerDisplay(item.unit);
+  if (!Number.isFinite(n)) return item.default / scale;
+  return n / scale;
 }
 
 /* display unit → ms (or native), as an integer. */
 function toNative(item, disp) {
   const n = Number(disp);
   if (!Number.isFinite(n)) return item.default;
-  return item.unit === 'ms' ? Math.round(n * 1000) : Math.round(n);
+  return Math.round(n * nativePerDisplay(item.unit));
 }
 
 /* Clamp a display-unit value to the schema bounds (bounds are native, so
@@ -60,12 +72,21 @@ function toDisplayAll(nativeMap) {
   return out;
 }
 
-/* Friendly "≈ N min" hint for durations of a minute or longer. */
+/* Friendly hint shown next to the input.
+     – 'sec'/'ms' fields → "≈ N min" once they cross a minute.
+     – 'min' fields      → "≈ N hour" once they cross an hour, else blank.
+     – 'count'           → no hint. */
 function friendlyHint(item, dispValue) {
   if (item.unit === 'count') return '';
-  const s = Number(dispValue);
-  if (!Number.isFinite(s) || s < 60) return '';
-  const m = s / 60;
+  const v = Number(dispValue);
+  if (!Number.isFinite(v)) return '';
+  if (item.unit === 'min') {
+    if (v < 60) return '';
+    const h = v / 60;
+    return `≈ ${Number.isInteger(h) ? h : h.toFixed(1)} hour`;
+  }
+  if (v < 60) return '';
+  const m = v / 60;
   return `≈ ${Number.isInteger(m) ? m : m.toFixed(1)} min`;
 }
 

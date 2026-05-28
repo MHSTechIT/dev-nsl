@@ -184,6 +184,44 @@ function callDefinitelyEnded(call) {
   return false;
 }
 
+/* Whether the 45-second form-fill timer should run for THIS hangup.
+   Product rule (per the user's spec):
+     - Customer answered + SHORT call (< 3 min) → run timer.
+       Short = the caller had a brief interaction and might forget
+       details fast; the timer prods them to capture answers quickly.
+     - Customer answered + LONG call (≥ 3 min)  → NO timer.
+       Long = a real conversation happened; the caller has full
+       context and shouldn't be rushed.
+     - Customer never answered → form_window isn't reached anyway,
+       so this predicate doesn't apply.
+     - Agent explicitly closes via the X button → handled by
+       handleCloseClick which forces formTimerEnabled = false.
+
+   Why not check hangup_by? Survey of 16k recent calls shows Tata
+   stamps hangup_by as NULL on 99.97% of connected calls, so it can't
+   distinguish customer-cut from agent-cut. duration_sec is the only
+   reliable signal: a sub-3-minute connected call almost always means
+   the customer ended the conversation quickly.
+
+   The threshold is admin-tunable via the Timer page
+   (formTimerLongCallThresholdMs, range 1 min – 30 min, default 3 min).
+   Callers pass the live setting from useTimerSettings() so changes take
+   effect on the next render without needing a reload. The fallback of
+   180_000 ms preserves the original 3-minute behaviour if the setting
+   somehow isn't provided. */
+function shouldRunFormTimerFor(call, longCallThresholdMs) {
+  if (!call?.customer_answered_at) return false;
+  const dur = Number(call?.duration_sec);
+  // No duration recorded yet (call still finalizing) → assume short
+  // so the timer DOES run; the worst case is a 45s window for a
+  // borderline call, which is acceptable noise.
+  if (!Number.isFinite(dur) || dur <= 0) return true;
+  const thresholdSec = Number(longCallThresholdMs) > 0
+    ? Number(longCallThresholdMs) / 1000
+    : 180;
+  return dur < thresholdSec;
+}
+
 /* How MANY independent terminal signals are present? Used to gate the
    mid-call "Customer disconnected" transition: a SINGLE signal during
    customer_on_call is treated as suspicious (Tata leg-blip CDR write)
@@ -236,6 +274,10 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
   const [cutCount, setCutCount]                   = useState(() => restoreState?.cutCount ?? 0);
   const [dnpRetry, setDnpRetry]                   = useState(() => restoreState?.dnpRetry ?? false);
   const [cuttingCall, setCuttingCall]             = useState(false);
+  // Confirm dialog state for the X button. When non-null, the
+  // CloseConfirmDialog overlay renders. `saving` flag inside the dialog
+  // dedups double-clicks and disables the OK button while the POST runs.
+  const [closeConfirm, setCloseConfirm]           = useState(null); // null | { saving: boolean }
 
   /* ── Form-draft persistence ───────────────────────────────────────────
      Browser refreshes during a call would otherwise wipe every value
@@ -374,6 +416,21 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
     if (!dl) return 0;
     return Math.max(0, Math.floor((dl - Date.now()) / 1000));
   });
+  // Whether the 45-second form-window countdown should actually run.
+  // True ⇒ classic behavior (timer + auto-advance to form_reason_card on
+  //         expiry + Complete Call button gated to "before time runs out").
+  // False ⇒ form opens but no countdown UI, no auto-advance, no time
+  //         pressure on the caller. Used when the AGENT (sales rep)
+  //         hangs up the call themselves — they chose to end it, they
+  //         can take their time filling the form. Per product rule:
+  //         only run the timer when hangup_by === 'customer'.
+  // Default true preserves the legacy behavior for any code path that
+  // doesn't explicitly set it (e.g. form_reason_card → form_window
+  // retry, where the caller is actively asking for another 45s window).
+  const [formTimerEnabled, setFormTimerEnabled] = useState(() => {
+    const v = restoreState?.formTimerEnabled;
+    return v == null ? true : !!v;
+  });
   const [activeCallId, setActiveCallId]       = useState(lead?.last_call_id || null);
   // Phase-timer deadline (epoch ms) for the synthetic 35s / 50s
   // ring-timeout safety net. Persists across refresh so the timer
@@ -413,9 +470,10 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
       dnpRetry,
       customerAnsweredOnce,
       formTimerDeadline:   formTimerSecs > 0 ? Date.now() + formTimerSecs * 1000 : null,
+      formTimerEnabled,
       phaseDeadline:       (phaseDeadline && phaseDeadline.phase === callPhase) ? phaseDeadline.when : null,
     });
-  }, [callPhase, cutCount, customerAttempt, agentAttempts, dnpRetry, customerAnsweredOnce, formTimerSecs, phaseDeadline, onStateChange]);
+  }, [callPhase, cutCount, customerAttempt, agentAttempts, dnpRetry, customerAnsweredOnce, formTimerSecs, formTimerEnabled, phaseDeadline, onStateChange]);
 
   // Refs mirror state for closures inside SSE/poll callbacks.
   //   agentAttemptsRef preserves the restored value so the post-refresh
@@ -447,6 +505,10 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
      we STAY on customer_on_call (treating it as a confirmed leg blip).
      The user can manually press Recall / X / DNP if needed. */
   const pendingHangupTimerRef  = useRef(null);
+  // Dedup guard for saveIncompleteAndClose — without it, rapid double-
+  // clicks on the X button could fire two POST /note requests in flight
+  // for the same lead.
+  const savingIncompleteRef    = useRef(false);
   // Unmount safety net: if the modal closes while a hangup corroboration
   // window is still pending, clear the timer so it doesn't fire against
   // a torn-down component (no-op state setters → React warning).
@@ -722,16 +784,25 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
         // events MINUTES into long calls (CDR hiccups, brief audio drops,
         // re-bridging). The 8-second guard above doesn't catch those.
         // Refuse to treat this as a real customer disconnect unless the
-        // calls row carries corroborating evidence the call actually
-        // terminated (ended_at, hangup_by, duration_sec, or terminal
-        // status). The next poll will re-check, so a genuine hangup that
-        // briefly arrives missed-only will land form_window on the very
-        // next tick once ended_at lands too.
-        if (!callDefinitelyEnded(call)) return;
+        // calls row carries `recording_url` — the ONE signal Tata never
+        // writes mid-call (it lands only after the bridge tears down and
+        // the recording is finalized). The other terminal fields
+        // (ended_at, hangup_by, duration_sec, status) can all be stamped
+        // mid-call by Tata's leg-blip CDR writes, so we ignore them as
+        // a stand-alone trigger here. The next poll that brings
+        // recording_url will fire commit naturally.
+        if (!call?.recording_url) return;
 
         if (phase !== 'form_window' && phase !== 'form_reason_card') {
+          // Per product rule: 45s timer only when the customer hung up.
+          // Agent-initiated hangups open the form with no time pressure.
+          const runTimer = shouldRunFormTimerFor(call, t.formTimerLongCallThresholdMs);
+          setFormTimerEnabled(runTimer);
           setCallPhase('form_window');
-          setFormTimerSecs(prev => (prev > 0 ? prev : FORM_WINDOW_SECS));
+          setFormTimerSecs(prev => {
+            if (!runTimer) return 0;
+            return prev > 0 ? prev : FORM_WINDOW_SECS;
+          });
         }
         return;
       }
@@ -800,26 +871,32 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
     if (eventType === 'call.hangup') {
       if (customerAnswered) {
         // Tata's call.hangup fires spuriously mid-call (brief bridge
-        // resets, leg blips, late-arriving CDR events) and the row
-        // sometimes carries ONE terminal column (status='ended', or
-        // ended_at, etc.) while the audio bridge is still up — which
-        // the user sees as the "Customer disconnected" banner
-        // appearing during a live conversation.
+        // resets, leg blips, late-arriving CDR events). On some accounts
+        // the leg-blip CDR write stamps MULTIPLE terminal columns at
+        // once (ended_at + duration_sec + status='ended'), so counting
+        // signals isn't enough — the form was opening while the audio
+        // bridge was still up.
         //
-        // Corroboration strategy:
-        //   0 terminal signals     → ignore
-        //   2+ terminal signals    → commit immediately (high confidence)
-        //   exactly 1 signal       → start a t.hangupCorroborateMs window.
-        //                            Each later poll tick re-enters this
-        //                            handler with the latest merged row;
-        //                            if signal count climbs to ≥2, the
-        //                            check above commits + cancels the
-        //                            pending timer. If the window expires
-        //                            with still only 1 signal, we treat
-        //                            it as a confirmed leg blip and STAY
-        //                            on customer_on_call. The caller can
-        //                            manually press Recall / X / DNP if
-        //                            the call is actually dead.
+        // The ONLY signal Tata cannot fake mid-call is `recording_url`.
+        // It is written strictly AFTER the bridge tears down and the
+        // recording is finalized. So that is now the hard commit gate.
+        //
+        // Strategy:
+        //   recording_url set        → commit immediately (high confidence).
+        //   recording_url missing    → ignore the hangup. The poller fires
+        //                              call.hangup on every tick that the
+        //                              row looks terminal, so as soon as
+        //                              recording_url lands on a later
+        //                              poll we'll come back here and
+        //                              commit. Until then the modal stays
+        //                              on customer_on_call — the caller
+        //                              sees "Customer on call" exactly
+        //                              like the original spec.
+        //
+        // The previous corroboration window (t.hangupCorroborateMs) is
+        // kept only to throttle/log: we log "awaiting recording_url" once
+        // per window so the console doesn't spam, but no state change
+        // happens on window expiry. Subsequent polls retry naturally.
         const sigCount = countTerminalSignals(call);
         if (sigCount === 0) return;
 
@@ -830,41 +907,46 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
           }
           const p = callPhaseRef.current;
           if (p !== 'form_window' && p !== 'form_reason_card') {
+            // Per product rule: 45s timer only when the customer hung up.
+            // Agent-initiated hangups open the form with no time pressure.
+            const runTimer = shouldRunFormTimerFor(call, t.formTimerLongCallThresholdMs);
+            setFormTimerEnabled(runTimer);
             setCallPhase('form_window');
-            setFormTimerSecs(prev => (prev > 0 ? prev : FORM_WINDOW_SECS));
+            setFormTimerSecs(prev => {
+              if (!runTimer) return 0;
+              return prev > 0 ? prev : FORM_WINDOW_SECS;
+            });
           }
         }
 
-        if (sigCount >= 2) {
+        if (call.recording_url) {
+          // Recording finalized → bridge is truly down. Commit.
           commitHangup();
           return;
         }
 
-        // sigCount === 1 → suspicious. Schedule corroboration window
-        // (only once — a window is already running means we've already
-        // seen this signal and are waiting for a 2nd).
+        // No recording_url yet. Keep waiting on customer_on_call and
+        // log the wait (once per window) so the console isn't spammed.
         if (pendingHangupTimerRef.current) return;
         try {
           // eslint-disable-next-line no-console
-          console.warn('[caller] hangup signal awaiting corroboration', {
+          console.warn('[caller] hangup terminal signal seen WITHOUT recording_url — waiting for bridge teardown', {
             leadId: lead?.id,
-            signal: call.ended_at ? 'ended_at'
-                  : call.hangup_by ? 'hangup_by'
-                  : (call.duration_sec != null && Number(call.duration_sec) > 0) ? 'duration_sec'
-                  : TERMINAL_CALL_STATUS.has(call.status) ? 'status'
-                  : 'unknown',
+            sigCount,
+            signals: {
+              ended_at:     !!call.ended_at,
+              hangup_by:    !!call.hangup_by,
+              duration_sec: call.duration_sec ?? null,
+              status:       call.status ?? null,
+            },
             waitMs: t.hangupCorroborateMs,
           });
         } catch { /* console may be stripped */ }
         pendingHangupTimerRef.current = setTimeout(() => {
           pendingHangupTimerRef.current = null;
-          // Window expired with no 2nd signal → treat as leg blip, stay put.
-          try {
-            // eslint-disable-next-line no-console
-            console.warn('[caller] hangup corroboration window expired with 1 signal — treating as leg blip', {
-              leadId: lead?.id,
-            });
-          } catch { /* console may be stripped */ }
+          // Window only throttles the log line — staying on customer_on_call
+          // is the correct behaviour. The next poll that brings recording_url
+          // will fire commitHangup above.
         }, t.hangupCorroborateMs);
       }
       // If customer never answered, the agent.missed / customer.missed events
@@ -1098,7 +1180,11 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
      form_reason_card — leaving the caller staring at a reason card instead of
      the recall banner. */
   useEffect(() => {
-    if (callPhase !== 'form_window' || formTimerSecs <= 0) return;
+    // Gate on formTimerEnabled too: when the agent hung up (not the
+    // customer) we set formTimerEnabled=false and want NO countdown and
+    // NO auto-advance to form_reason_card. The caller fills the form
+    // at their own pace and clicks Complete Call when ready.
+    if (callPhase !== 'form_window' || !formTimerEnabled || formTimerSecs <= 0) return;
     const id = setInterval(() => {
       if (callPhaseRef.current !== 'form_window') {
         clearInterval(id);
@@ -1114,7 +1200,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
       });
     }, 1000);
     return () => clearInterval(id);
-  }, [callPhase, formTimerSecs > 0]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [callPhase, formTimerEnabled, formTimerSecs > 0]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function resetCallSignalForNewAttempt() {
     wasAgentAnsweredRef.current = false;
@@ -1298,6 +1384,9 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
       saveAutoPaused();
       return;
     }
+    // form_reason_card retry: the caller asked for another 45s window,
+    // so make sure the timer is on regardless of the original hangup_by.
+    setFormTimerEnabled(true);
     setFormTimerSecs(FORM_WINDOW_SECS);
     setCallPhase('form_window');
   }
@@ -1390,16 +1479,32 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
     // we don't want yesterday's saved-and-done lead to repopulate if
     // someone reopens it from the Completed Calls list later.
     try { localStorage.removeItem(`mhs_form_draft_${lead?.id || 'x'}`); } catch { /* ignore */ }
-    // Classifier output for the "happy path" — otherwise overridden to
-    // JUNK whenever a subtag is present (either picked from the Not
-    // Interested dropdown OR forced by the second-DNP card via opts).
+    // Classifier output for the "happy path" — otherwise overridden by
+    // one of three special cases:
+    //   1. Already-Attended shortcut (highest priority) — caller picked
+    //      Webinar Attended = Yes on the Interested-Yes path. Lead is
+    //      a strong HOT + auto-stamped 'already_attended' subtag,
+    //      regardless of what the classifier returns.
+    //   2. Subtag present (Not Interested dropdown or second-DNP card)
+    //      → forces JUNK so the lead lands in the right bucket.
+    //   3. Otherwise the classifier's HOT/WARM/COLD/JUNK output stands.
     const classifierTag = classifyLeadTag({
       confirmedRange, hba1c, takesMedicine,
       webinarAttended, availableForWebinar, nextBatchJoining, patientAge,
       workingProfessional,
     });
-    const subtag = (opts && opts.outcome_subtag) || interestedSubtag || null;
-    const leadTag = subtag ? 'JUNK' : classifierTag;
+    let subtag;
+    let leadTag;
+    if (alreadyAttendedShortcut) {
+      // 1. Shortcut wins outright.
+      subtag  = 'already_attended';
+      leadTag = 'HOT';
+    } else {
+      subtag = (opts && opts.outcome_subtag) || interestedSubtag || null;
+      // 2. Subtag (Not Interested / second-DNP) forces JUNK.
+      // 3. Otherwise classifier's call stands.
+      leadTag = subtag ? 'JUNK' : classifierTag;
+    }
     onSaved?.(outcome, { ...(opts || {}), lead_tag: leadTag, outcome_subtag: subtag });
   }
 
@@ -1408,30 +1513,75 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
      hangs up the live leg and surfaces the standard 30-second form_window
      so the caller fills the form and submits. Without this, abandoned
      calls leave the lead at `last_note_outcome = NULL` indefinitely. */
-  const TERMINAL_PHASES = ['form_window','form_reason_card','dnp_alert','auto_paused'];
   function handleCloseClick() {
-    const p = callPhaseRef.current;
-    // Already on a save-path or in the form — let the caller finish the
-    // existing flow rather than re-triggering form_window.
-    if (TERMINAL_PHASES.includes(p)) {
-      // form_window itself: do nothing — caller must submit. Other terminal
-      // phases auto-advance; ignoring the click here lets them complete.
-      return;
-    }
-    // Customer never connected (idle / ext_check / agent_ringing / customer_ringing
-    // pre-pickup) → allow normal close. customerAnsweredOnce is sticky:
-    // it flips true on the first customer.answered and stays true for the
-    // lifetime of this modal, so the state value at click time is reliable.
+    // Customer never connected (idle / ext_check / agent_ringing /
+    // customer_ringing pre-pickup) → no work to save, just close.
+    // customerAnsweredOnce is sticky: flips true on the first
+    // customer.answered and stays true for the lifetime of this modal.
     if (!customerAnsweredOnce) {
       onClose?.();
       return;
     }
-    // Customer WAS on the call — hang up the live leg, force form_window.
-    fetch(`/api/caller/leads/${lead.id}/hangup`, {
-      method: 'POST', headers: { Authorization: `Bearer ${jwt}` },
-    }).catch(() => {});
-    setCallPhase('form_window');
-    setFormTimerSecs(FORM_WINDOW_SECS);
+    // Customer WAS on the call (or already in the form). Show a single
+    // confirmation: OK → save as incomplete + stop the auto-call queue.
+    // Cancel → do nothing, modal stays exactly where it is.
+    setCloseConfirm({ saving: false });
+  }
+
+  /* Save the current partial form as outcome='incomplete' and close the
+     modal WITHOUT auto-advancing to the next lead. Called when the
+     caller confirms the X-close dialog — they explicitly chose to bail,
+     so the auto-call loop must stop (autoAdvance: false). The partial
+     answers they typed are preserved so admin / TL can follow up. */
+  async function confirmCloseAsIncomplete() {
+    if (savingIncompleteRef.current) return;     // dedup double-clicks
+    savingIncompleteRef.current = true;
+    setCloseConfirm(c => (c ? { ...c, saving: true } : c));
+    try {
+      // Hang up the Tata leg if the audio is somehow still up.
+      fetch(`/api/caller/leads/${lead.id}/hangup`, {
+        method: 'POST', headers: { Authorization: `Bearer ${jwt}` },
+      }).catch(() => {});
+
+      // Best-effort save of whatever the caller filled in. Backend
+      // marks 'incomplete' as a NO_CONTACT_OUTCOMES outcome so the
+      // discovery-field validations are skipped and any partial value
+      // is accepted.
+      const sugarConfirmation = confirmedRange
+        ? (confirmedRange === lead.sugar_level ? 'same' : 'different')
+        : null;
+      await fetch(`/api/caller/leads/${lead.id}/note`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+        body: JSON.stringify({
+          full_name:             (fullName || '').trim() || lead.full_name || null,
+          sugar_confirmation:    sugarConfirmation,
+          confirmed_range:       confirmedRange || null,
+          range_for:             rangeFor || null,
+          patient_age:           patientAge || null,
+          takes_medicine:        takesMedicine || null,
+          note:                  (note || '').trim() || 'Caller closed the form without completing.',
+          hba1c:                 hba1c || null,
+          working_professional:  workingProfessional || null,
+          location:              location || null,
+          webinar_attended:      webinarAttended || null,
+          available_for_webinar: availableForWebinar || null,
+          next_batch_joining:    nextBatchJoining || null,
+          outcome:               'incomplete',
+          call_id:               activeCallIdRef.current || lead.last_call_id || null,
+          interested:            interested === 'yes' || interested === 'no' ? interested : null,
+          outcome_subtag:        interestedSubtag || null,
+          lead_tag:              null, // leave the classifier alone — caller didn't finish
+        }),
+      }).catch(() => {});
+    } finally {
+      savingIncompleteRef.current = false;
+      setCloseConfirm(null);
+      // autoAdvance:false → AssignedLeadsModule's onSaved handler will
+      // NOT start the next-call countdown. The auto-call queue stops
+      // exactly as the user requested.
+      callOnSaved('incomplete', { autoAdvance: false });
+    }
   }
 
   /* ── DNP / auto-paused auto-saves ─────────────────────────────────── */
@@ -1548,7 +1698,14 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
 
   const noOverride        = interested === 'no';
   const followUpOnly      = !noOverride && wantsFollowUp;
-  const detailsMandatory  = !noOverride && !wantsFollowUp;
+  /* Already-Attended shortcut. The product rule: if the customer says
+     they already attended a webinar, they're a strong HOT signal —
+     they took the funnel action. Skip every other mandatory field,
+     auto-tag the lead HOT, and stamp outcome_subtag='already_attended'.
+     Activates only on the "Interested = Yes" path (Not Interested
+     already has its own subtag flow). */
+  const alreadyAttendedShortcut = !noOverride && webinarAttended === 'yes';
+  const detailsMandatory  = !noOverride && !wantsFollowUp && !alreadyAttendedShortcut;
 
   function validate() {
     if (!fullName.trim()) return 'Name cannot be empty.';
@@ -1559,6 +1716,11 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
       // Not Interested path: subtag is the ONLY mandatory field.
       // Everything above (range / age / medicine / etc.) is optional.
       if (!interestedSubtag) return 'Pick a reason for "Not interested".';
+      return null;
+    }
+    if (alreadyAttendedShortcut) {
+      // Webinar-Attended-Yes shortcut: nothing else is mandatory.
+      // Lead saves as HOT + already_attended subtag via callOnSaved.
       return null;
     }
     if (followUpOnly) {
@@ -1760,14 +1922,12 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
                 'form_reason_card',
               ]);
               if (!DNP_VISIBLE_PHASES.has(callPhase)) return null;
-              // Once the customer has connected on this lead, DNP no
-              // longer makes sense — the call WAS picked up at some
-              // point, so "Did Not Pick" is the wrong label. Caller
-              // should finish the form (or hit Recall for a callback)
-              // instead. customerAnsweredOnce stays true for the whole
-              // lifecycle of the lead modal so the button stays hidden
-              // even on the form_window after the customer hangs up.
-              if (customerAnsweredOnce) return null;
+              // DNP stays visible even after the customer has answered —
+              // the caller might still want to mark the lead as DNP for
+              // their own reasons (junk call, dropped line, hostile lead,
+              // etc.). The previous `customerAnsweredOnce` hide-guard has
+              // been removed at user request so the button is reachable
+              // throughout the form_window / form_reason_card phases.
               return (
             <button
               onClick={handleCutCall}
@@ -1878,6 +2038,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
         <BannerStatus
           phase={callPhase}
           formTimerSecs={formTimerSecs}
+          formTimerEnabled={formTimerEnabled}
           totalWindow={FORM_WINDOW_SECS}
           customerAttempt={customerAttempt}
           dnpRetry={dnpRetry}
@@ -2135,6 +2296,134 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
           dnpJunkSubtags={DNP_JUNK_SUBTAGS}
         />
       )}
+
+      {/* Centered themed confirm dialog for the X button. Renders ONLY
+          when the caller hit X after the customer connected. OK saves
+          the lead as 'incomplete' (auto-call stops); Cancel just hides
+          the dialog and leaves the modal where it was. */}
+      {closeConfirm && (
+        <CloseConfirmDialog
+          leadName={(fullName || lead.full_name || 'this lead').trim()}
+          saving={!!closeConfirm.saving}
+          onCancel={() => { if (!closeConfirm.saving) setCloseConfirm(null); }}
+          onConfirm={confirmCloseAsIncomplete}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ── Close-confirmation dialog ────────────────────────────────────────
+   Themed overlay shown when the caller clicks the X button while a
+   customer has already connected. Pressing OK saves the lead as
+   incomplete AND stops the auto-call queue (the parent receives
+   autoAdvance:false from callOnSaved). Pressing Cancel hides the
+   dialog without touching anything. Esc = Cancel, Enter = OK. */
+function CloseConfirmDialog({ leadName, saving, onCancel, onConfirm }) {
+  useEffect(() => {
+    function onKey(e) {
+      if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+      if (e.key === 'Enter')  { e.preventDefault(); if (!saving) onConfirm(); }
+    }
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onCancel, onConfirm, saving]);
+
+  return (
+    <div
+      onClick={() => { if (!saving) onCancel(); }}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 9700,
+        background: 'rgba(15,0,40,0.55)',
+        backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: 20,
+        animation: 'fadeIn 180ms ease',
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          width: 'min(440px, 100%)',
+          background: '#fff',
+          borderRadius: 18,
+          boxShadow: '0 24px 60px rgba(15,0,40,0.45), 0 4px 12px rgba(15,0,40,0.18)',
+          padding: '22px 22px 18px',
+          fontFamily: 'Outfit, sans-serif',
+          animation: 'scaleIn 180ms ease',
+        }}
+      >
+        {/* Icon + title */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10 }}>
+          <div style={{
+            width: 40, height: 40, borderRadius: 12,
+            background: 'rgba(245,158,11,0.12)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            flexShrink: 0,
+          }}>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#D97706" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="12" y1="8"  x2="12" y2="12"/>
+              <line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+          </div>
+          <div style={{ flex: 1 }}>
+            <h3 style={{ margin: 0, color: '#3B0764', fontWeight: 800, fontSize: '1.05rem' }}>
+              Close this lead?
+            </h3>
+            <p style={{ margin: '4px 0 0', color: 'rgba(91,33,182,0.65)', fontSize: '0.82rem' }}>
+              The lead will move to <strong>Completed Calls</strong> with the <strong>Incomplete</strong> tag, and the auto-call will stop.
+            </p>
+          </div>
+        </div>
+
+        {/* Lead being closed */}
+        <div style={{
+          padding: '10px 14px',
+          background: 'rgba(237,234,248,0.55)',
+          border: '1px solid rgba(209,196,240,0.55)',
+          borderRadius: 10,
+          margin: '6px 0 16px',
+          fontSize: '0.88rem', fontWeight: 700, color: '#3B0764',
+        }}>
+          {leadName}
+        </div>
+
+        {/* Actions */}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={saving}
+            style={{
+              padding: '9px 18px', borderRadius: 10,
+              border: '1px solid rgba(91,33,182,0.20)',
+              background: '#fff', color: '#3B0764',
+              fontFamily: 'Outfit, sans-serif', fontWeight: 700, fontSize: '0.86rem',
+              cursor: saving ? 'not-allowed' : 'pointer',
+              opacity: saving ? 0.55 : 1,
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={saving}
+            style={{
+              padding: '9px 22px', borderRadius: 10,
+              border: 'none',
+              background: '#5B21B6', color: '#fff',
+              fontFamily: 'Outfit, sans-serif', fontWeight: 700, fontSize: '0.86rem',
+              cursor: saving ? 'not-allowed' : 'pointer',
+              boxShadow: saving ? 'none' : '0 4px 14px rgba(91,33,182,0.32)',
+              opacity: saving ? 0.7 : 1,
+            }}
+          >
+            {saving ? 'Saving…' : 'OK'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2179,7 +2468,7 @@ function RadioRow({ options, value, onChange, wrap }) {
 /* Yellow status banner — the in-flight call message at the top of the modal.
    Action prompts (extension check, reason cards, DNP alert) live in the
    centered overlay rendered separately. */
-function BannerStatus({ phase, formTimerSecs, totalWindow, customerAttempt, dnpRetry }) {
+function BannerStatus({ phase, formTimerSecs, formTimerEnabled = true, totalWindow, customerAttempt, dnpRetry }) {
   const cardBase = {
     marginBottom: 16, padding: '14px 18px',
     borderRadius: 6, border: '1.5px dashed #F59E0B',
@@ -2253,6 +2542,26 @@ function BannerStatus({ phase, formTimerSecs, totalWindow, customerAttempt, dnpR
     return <div style={cardBase}><Row>{dot}<span>{msg}</span></Row></div>;
   }
   if (phase === 'form_window') {
+    // When the timer is disabled (agent ended the call themselves),
+    // we drop the urgency styling entirely and show no countdown digits.
+    // The caller fills the form at their own pace.
+    if (!formTimerEnabled) {
+      return (
+        <div style={{
+          ...cardBase,
+          border: '1.5px solid rgba(91,33,182,0.25)',
+          background: 'rgba(237,234,248,0.55)',
+          color: '#3B0764',
+        }}>
+          <Row>
+            <span style={{
+              width: 8, height: 8, borderRadius: '50%', background: '#5B21B6', flexShrink: 0,
+            }} />
+            <span>Call ended. Fill the form when you're ready, then press Complete Call.</span>
+          </Row>
+        </div>
+      );
+    }
     const urgent = formTimerSecs <= 10;
     return (
       <div style={{

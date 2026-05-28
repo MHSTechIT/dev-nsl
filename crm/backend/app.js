@@ -313,6 +313,12 @@ const _crmOrgMigration = pool.query(`
   -- (Admin-explicit choice — the hash in password_hash is still what login
   -- verifies against.)
   ALTER TABLE crm_users ADD COLUMN IF NOT EXISTS password_plain TEXT;
+  -- deleted_at: soft-delete tombstone. Set instead of running a physical
+  -- DELETE so that historical attribution on leads / calls / notes /
+  -- assignments stays intact (the FKs from those tables are ON DELETE
+  -- NO ACTION and would otherwise block deletion). All caller-list +
+  -- assignment-pool queries filter WHERE deleted_at IS NULL.
+  ALTER TABLE crm_users ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
 `);
 if (_crmOrgMigration && typeof _crmOrgMigration.catch === 'function') {
   _crmOrgMigration.catch(err => console.error('[Migration] crm_users org fields error:', err.message));
@@ -725,9 +731,17 @@ app.use('/api',        eventsRouter);
 app.use('/api/auth',   authLimiter, authRouter);
 app.use('/api/admin/telegram-alerts', telegramAlertsRouter);
 app.use('/api/admin',  adminRouter);
+// Recordings MUST be mounted before /api/caller — callerRouter uses
+// the bearer-JWT callerAuth middleware which rejects any request that
+// doesn't carry an Authorization header. The recordings proxy
+// authenticates via a query-string token (?token=...) instead because
+// the <audio> element can't send Authorization headers. Mounting after
+// /api/caller meant every recording request was hitting callerAuth
+// first and getting a 401 before the recordings auth could even run —
+// which made admin Completed Calls audio players show 0:00 / 0:00.
+app.use('/api/caller/recordings', recordingsRouter);
 app.use('/api/caller', callerRouter);
 app.use('/api/caller', callsRouter);
-app.use('/api/caller/recordings', recordingsRouter);
 app.use('/api/webhooks', webhooksRouter);
 
 module.exports = app;

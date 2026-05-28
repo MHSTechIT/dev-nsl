@@ -127,21 +127,40 @@ export default function UsersModule({
     });
   }
 
-  async function handleDelete(id, name) {
-    if (!window.confirm(`Delete ${name}? This cannot be undone.`)) return;
+  /* Pending-delete state — when non-null, the centered ConfirmDialog
+     below renders. We previously used window.confirm() which dropped
+     the user into a top-of-window OS-styled alert that didn't match
+     the rest of the CRM. The dialog is fully themed (purple + Outfit)
+     and lives in the body's centered overlay. */
+  const [pendingDelete, setPendingDelete] = useState(null);
+  const [deleting,      setDeleting]      = useState(false);
+  const [deleteError,   setDeleteError]   = useState('');
+
+  function handleDelete(id, name) {
+    setDeleteError('');
+    setPendingDelete({ id, name });
+  }
+
+  async function confirmDelete() {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    setDeleteError('');
     try {
-      const res = await fetch(`/api/admin/crm-users/${id}`, {
+      const res = await fetch(`/api/admin/crm-users/${pendingDelete.id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        alert(data.error || 'Failed to delete.');
+        setDeleteError(data.error || 'Failed to delete.');
         return;
       }
-      setUsers(prev => prev.filter(u => u.id !== id));
+      setUsers(prev => prev.filter(u => u.id !== pendingDelete.id));
+      setPendingDelete(null);
     } catch {
-      alert('Network error. Please try again.');
+      setDeleteError('Network error. Please try again.');
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -462,6 +481,146 @@ export default function UsersModule({
           }}
         />
       )}
+
+      {/* Themed delete-confirmation dialog. Replaces window.confirm()
+          which was OS-styled and broke the CRM aesthetic. Centered
+          overlay, purple accent, matches the rest of the UI. */}
+      {pendingDelete && (
+        <ConfirmDeleteDialog
+          name={pendingDelete.name}
+          loading={deleting}
+          error={deleteError}
+          onCancel={() => { if (!deleting) { setPendingDelete(null); setDeleteError(''); } }}
+          onConfirm={confirmDelete}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ── Centered delete-confirm dialog ───────────────────────────────────
+   Themed to match the rest of the CRM (Outfit font, purple accents,
+   white card on a dim backdrop). Renders into a fixed-position overlay
+   so it always centers in the viewport regardless of scroll position.
+   Esc + backdrop click dismiss; ⌫/⏎ confirm via keyboard handlers. */
+function ConfirmDeleteDialog({ name, loading, error, onCancel, onConfirm }) {
+  // Keyboard shortcuts — Esc cancels, Enter confirms.
+  useEffect(() => {
+    function onKey(e) {
+      if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+      if (e.key === 'Enter')  { e.preventDefault(); onConfirm(); }
+    }
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onCancel, onConfirm]);
+
+  return (
+    <div
+      onClick={onCancel}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 9500,
+        background: 'rgba(15,0,40,0.55)',
+        backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: 20,
+      }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          width: 'min(420px, 100%)',
+          background: '#fff',
+          borderRadius: 18,
+          boxShadow: '0 24px 60px rgba(15,0,40,0.45), 0 4px 12px rgba(15,0,40,0.18)',
+          padding: '22px 22px 18px',
+          fontFamily: 'Outfit, sans-serif',
+        }}
+      >
+        {/* Warning icon + title */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10 }}>
+          <div style={{
+            width: 40, height: 40, borderRadius: 12,
+            background: 'rgba(220,38,38,0.10)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            flexShrink: 0,
+          }}>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#DC2626" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 6h18"/>
+              <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+              <line x1="10" y1="11" x2="10" y2="17"/>
+              <line x1="14" y1="11" x2="14" y2="17"/>
+            </svg>
+          </div>
+          <div style={{ flex: 1 }}>
+            <h3 style={{ margin: 0, color: '#3B0764', fontWeight: 800, fontSize: '1.05rem' }}>
+              Delete this user?
+            </h3>
+            <p style={{ margin: '4px 0 0', color: 'rgba(91,33,182,0.65)', fontSize: '0.82rem' }}>
+              This cannot be undone.
+            </p>
+          </div>
+        </div>
+
+        {/* User being deleted */}
+        <div style={{
+          padding: '10px 14px',
+          background: 'rgba(237,234,248,0.55)',
+          border: '1px solid rgba(209,196,240,0.55)',
+          borderRadius: 10,
+          margin: '6px 0 16px',
+          fontSize: '0.88rem', fontWeight: 700, color: '#3B0764',
+        }}>
+          {name}
+        </div>
+
+        {/* Error (if backend rejected) */}
+        {error && (
+          <div style={{
+            padding: '8px 12px', borderRadius: 8,
+            background: 'rgba(254,226,226,0.55)', border: '1px solid rgba(220,38,38,0.30)',
+            color: '#991B1B', fontSize: '0.80rem', fontWeight: 600,
+            marginBottom: 12,
+          }}>
+            {error}
+          </div>
+        )}
+
+        {/* Actions */}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={loading}
+            style={{
+              height: 38, padding: '0 18px', borderRadius: 10,
+              border: '1px solid rgba(91,33,182,0.20)',
+              background: '#fff', color: '#5B21B6',
+              fontFamily: 'Outfit, sans-serif', fontWeight: 700, fontSize: '0.86rem',
+              cursor: loading ? 'not-allowed' : 'pointer',
+              opacity: loading ? 0.5 : 1,
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={loading}
+            style={{
+              height: 38, padding: '0 22px', borderRadius: 10,
+              border: 'none',
+              background: loading ? 'rgba(220,38,38,0.45)' : '#DC2626',
+              color: '#fff',
+              fontFamily: 'Outfit, sans-serif', fontWeight: 800, fontSize: '0.86rem',
+              cursor: loading ? 'wait' : 'pointer',
+              boxShadow: loading ? 'none' : '0 4px 14px rgba(220,38,38,0.30)',
+            }}
+          >
+            {loading ? 'Deleting…' : 'Delete'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

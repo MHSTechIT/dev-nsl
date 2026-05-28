@@ -131,6 +131,10 @@ function PricingPerfTable({
   const roleCategories = Array.from(new Set(rows.map(r => r.role))).sort();
 
   // Each metric row: label, optional drill filter, and a value-extractor.
+  // Order matches the product spec exactly: Outgoing was removed (per
+  // user request — total_calls already covers outbound dial volume);
+  // 1st / 2nd Call Triggered were added at the bottom of the call-
+  // metrics group.
   const METRICS = [
     { label: 'Assigned',    key: 'assigned',       drill: 'assigned'  },
     { label: 'Hot',         key: 'hot',            drill: 'hot',
@@ -144,11 +148,18 @@ function PricingPerfTable({
       style: v => ({ color: v > 0 ? '#C2410C' : 'rgba(91,33,182,0.55)', fontWeight: v > 0 ? 700 : 500 }) },
     { label: 'Total Calls', key: 'total_calls',    drill: 'calls', trend: 'total_calls_prev' },
     { label: 'Incoming',    key: 'incoming',       drill: 'in'        },
-    { label: 'Outgoing',    key: 'outgoing',       drill: 'out'       },
     { label: 'Connected',   key: 'connected',      drill: 'connected' },
     { label: 'Conn %',      render: r => `${r.connection_rate_pct}%` },
     { label: 'Avg Dur',     render: r => fmtDuration(r.avg_duration_sec) },
     { label: 'Total Dur',   render: r => fmtHMS(r.total_duration_sec) },
+    // 1st-trigger / 2nd-trigger pickup counts. Sourced from the
+    // attempt_agg CTE on the backend (ROW_NUMBER() over lead_id,
+    // ordered by started_at). 1st = customer picked up on the
+    // original trigger; 2nd = customer picked up on the auto-redial.
+    { label: '1st Call Triggered', key: 'first_call_answered',
+      style: v => ({ color: v > 0 ? '#15803D' : 'rgba(91,33,182,0.55)', fontWeight: v > 0 ? 700 : 500 }) },
+    { label: '2nd Call Triggered', key: 'second_call_answered',
+      style: v => ({ color: v > 0 ? '#15803D' : 'rgba(91,33,182,0.55)', fontWeight: v > 0 ? 700 : 500 }) },
   ];
 
   // Inline CSS scoped to this grid.
@@ -914,18 +925,33 @@ export default function SalesPerformanceView({ token, actionsSlotEl }) {
   const [error, setError]       = useState('');
   const [lastUpdated, setLastUpdated] = useState('');
 
-  const [preset, setPreset]     = useState('today');
-  const [customFrom, setCustomFrom] = useState('');
-  const [customTo, setCustomTo] = useState('');
-  const [webinarId,  setWebinarId]  = useState('');     // '' = all webinars
+  /* Persisted filter state — survives tab navigation AND logout/login.
+     Lives in localStorage under mhs_sales_perf_filters as a JSON blob;
+     Sets are serialised to arrays. The useEffect below writes back on
+     every filter change. Bumps the storage key version (`v1`) if the
+     shape ever changes so a stale blob can't corrupt new hydration. */
+  const FILTER_STORAGE_KEY = 'mhs_sales_perf_filters_v1';
+  const _storedFilters = (() => {
+    try {
+      const raw = localStorage.getItem(FILTER_STORAGE_KEY);
+      if (!raw) return {};
+      const obj = JSON.parse(raw);
+      return (obj && typeof obj === 'object') ? obj : {};
+    } catch { return {}; }
+  })();
+
+  const [preset, setPreset]     = useState(_storedFilters.preset || 'today');
+  const [customFrom, setCustomFrom] = useState(_storedFilters.customFrom || '');
+  const [customTo, setCustomTo] = useState(_storedFilters.customTo || '');
+  const [webinarId,  setWebinarId]  = useState(_storedFilters.webinarId || '');     // '' = all webinars
   const [webinars,   setWebinars]   = useState([]);     // for the dropdown
   /* Multi-select set of caller-ids. Empty set = "all salespeople". */
-  const [salespeopleSel, setSalespeopleSel] = useState(() => new Set());
+  const [salespeopleSel, setSalespeopleSel] = useState(() => new Set(Array.isArray(_storedFilters.salespeopleSel) ? _storedFilters.salespeopleSel : []));
   /* Tri-state status quick-filter:
        'all'    — every caller (default)
        'active' — only is_active = true
        'paused' — only is_active = false */
-  const [statusFilter, setStatusFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState(_storedFilters.statusFilter || 'all');
   const [salespeopleOpen, setSalespeopleOpen] = useState(false);
   const salespeopleRef = useRef(null);
   const [salespeopleQuery, setSalespeopleQuery] = useState('');
@@ -954,7 +980,7 @@ export default function SalesPerformanceView({ token, actionsSlotEl }) {
      the callers reporting to them (plus the TL themselves). '' = no
      filter. Cascades into BOTH the Salesperson dropdown's option list
      AND the visibleRows filter applied to the table. */
-  const [tlFilter, setTlFilter] = useState('');
+  const [tlFilter, setTlFilter] = useState(_storedFilters.tlFilter || '');
   const [tlOpen,   setTlOpen]   = useState(false);
   const tlRef = useRef(null);
 
@@ -962,9 +988,31 @@ export default function SalesPerformanceView({ token, actionsSlotEl }) {
      role (Junior/Senior/Team Lead/Manager/Trainer/Admin) into a single
      filter pane with checkboxes. Values are namespaced strings like
      'status:active' or 'role:junior_caller'. Empty set = no filtering. */
-  const [categoriesSel,  setCategoriesSel]  = useState(() => new Set());
+  const [categoriesSel,  setCategoriesSel]  = useState(() => new Set(Array.isArray(_storedFilters.categoriesSel) ? _storedFilters.categoriesSel : []));
   const [categoriesOpen, setCategoriesOpen] = useState(false);
   const categoriesRef = useRef(null);
+
+  /* Filter-state persistence. Writes every filter change to
+     localStorage so the dashboard reopens with the same view after
+     tab navigation OR logout/login (the key intentionally does NOT
+     scope to a user — sales admins typically want their last filter
+     restored even across re-auth). Sets are serialised to arrays. */
+  useEffect(() => {
+    try {
+      const blob = {
+        preset,
+        customFrom,
+        customTo,
+        webinarId,
+        salespeopleSel: Array.from(salespeopleSel),
+        statusFilter,
+        tlFilter,
+        categoriesSel: Array.from(categoriesSel),
+      };
+      localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify(blob));
+    } catch { /* quota / sandbox — ignore */ }
+  }, [preset, customFrom, customTo, webinarId, salespeopleSel, statusFilter, tlFilter, categoriesSel]);
+
   function toggleCategory(value) {
     setCategoriesSel(prev => {
       const next = new Set(prev);
@@ -1092,8 +1140,14 @@ export default function SalesPerformanceView({ token, actionsSlotEl }) {
     fetch('/api/admin/crm-users', { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.json())
       .then(d => {
+        // Performance view only shows DIALING callers — junior + senior.
+        // Managers, team leaders, trainers, and admin/assistant-manager
+        // staff are excluded per product decision: this page is the
+        // "who's making calls" dashboard, not an org-chart view. The
+        // Salesperson dropdown, the per-caller table columns, and the
+        // Team Total all narrow to this set.
         const filtered = (d.users || []).filter(u =>
-          u.is_active && ['junior_caller','senior_caller','team_leader','manager'].includes(u.role)
+          u.is_active && ['junior_caller','senior_caller'].includes(u.role)
         );
         setCallers(filtered);
       })
@@ -1215,6 +1269,12 @@ export default function SalesPerformanceView({ token, actionsSlotEl }) {
   const catStatuses = Array.from(categoriesSel).filter(v => v.startsWith('status:')).map(v => v.slice(7));
   const catRoles    = Array.from(categoriesSel).filter(v => v.startsWith('role:'  )).map(v => v.slice(5));
   const visibleRows = data.rows.filter(r => {
+    // Hard role gate — Performance only shows DIALING callers. Managers,
+    // team leaders, trainers, and admin/assistant-manager rows that the
+    // backend caller_base CTE still includes get filtered out here.
+    // (Backend stays role-permissive so other consumers can read those
+    // rows, but the Performance UI is junior + senior only.)
+    if (r.role !== 'junior_caller' && r.role !== 'senior_caller') return false;
     if (statusFilter === 'active' && r.is_active === false) return false;
     if (statusFilter === 'paused' && r.is_active !== false) return false;
     if (tlFilter && !callersForViewIds.has(r.caller_id)) return false;
@@ -2302,7 +2362,6 @@ export default function SalesPerformanceView({ token, actionsSlotEl }) {
                   <th title="Leads parked with outcome = follow_up">Follow-ups</th>
                   <th>Total Calls</th>
                   <th>In</th>
-                  <th>Out</th>
                   <th>Connected</th>
                   <th>Conn %</th>
                   <th>Avg Dur</th>
@@ -2368,7 +2427,6 @@ export default function SalesPerformanceView({ token, actionsSlotEl }) {
                         <TrendArrow now={r.total_calls} prev={r.total_calls_prev} />
                       </DrillCell>
                       <DrillCell value={r.incoming}  onOpen={() => openDrill(r.caller_id, 'in')}        title="View incoming calls" />
-                      <DrillCell value={r.outgoing}  onOpen={() => openDrill(r.caller_id, 'out')}       title="View outgoing calls" />
                       <DrillCell value={r.connected} onOpen={() => openDrill(r.caller_id, 'connected')} title="View connected calls" />
                       <td>
                         {r.connection_rate_pct}%
@@ -2414,7 +2472,6 @@ export default function SalesPerformanceView({ token, actionsSlotEl }) {
                     <td>{tt.followups}</td>
                     <td>{tt.total_calls}</td>
                     <td>{tt.incoming}</td>
-                    <td>{tt.outgoing}</td>
                     <td>{tt.connected}</td>
                     <td>{tt.connection_rate_pct}%</td>
                     <td>{fmtDuration(tt.avg_duration_sec)}</td>

@@ -90,13 +90,39 @@ export default function Screen4() {
     fetch('/api/health').catch(() => {});
   }, []);
 
-  /* Google Ads ATC — Spec is "Trigger – Button click" on COMPLETE
-     REGISTRATION. We fire from inside handleSubmit (the form's onSubmit
-     is what the button triggers) AFTER client-side validation passes so
-     we never fire on an obviously broken submit, and BEFORE the POST so
-     the conversion is recorded even if the API call later fails. The
-     ref-guard keeps the fire idempotent if the user submits twice. */
+  /* Google Ads ATC — fires the MOMENT all three fields (name, WhatsApp
+     number, email) are populated AND pass client-side validation.
+     Independent of the submit-button click — we don't want to wait for
+     the user to press the button before counting them as a registration
+     intent.
+
+     Covers both manual typing and browser/password-manager autofill:
+       • Typed input  — every keystroke updates state → the useEffect
+                        below re-runs → fires when all three valid.
+       • Autofill     — modern browsers (Chrome/Edge/Firefox) emit a
+                        synthetic `change` event when filling controlled
+                        inputs, which lands the value in React state the
+                        same way a keystroke does. The useEffect then
+                        catches it on the next render.
+       • Navigate-back — when the user returns to Screen4 with values
+                        already in FunnelContext (state.fullName etc.),
+                        the useState initialisers seed the local state
+                        and the useEffect runs immediately on mount.
+
+     `atcFiredRef` keeps the fire idempotent for the lifetime of THIS
+     Screen4 mount — fixing a typo, blurring/refocusing, or editing one
+     field after triggering doesn't re-fire. A full remount (e.g. the
+     user navigates away and back) does reset the ref — intentional: a
+     fresh visit is a fresh intent. */
   const atcFiredRef = useRef(false);
+  useEffect(() => {
+    if (atcFiredRef.current) return;
+    const errs = validate(fullName, whatsappNumber, email);
+    if (Object.keys(errs).length === 0) {
+      atcFiredRef.current = true;
+      gtagAtc();
+    }
+  }, [fullName, whatsappNumber, email]);
 
   function handlePhoneInput(e) {
     const val = e.target.value.replace(/\D/g, '').slice(0, 10);
@@ -109,12 +135,10 @@ export default function Screen4() {
     setErrors(errs);
     if (Object.keys(errs).length > 0) return;
 
-    // Google Ads ATC — fired on the button click that produced this
-    // submit, gated by client-side validation. Idempotent via ref-guard.
-    if (!atcFiredRef.current) {
-      atcFiredRef.current = true;
-      gtagAtc();
-    }
+    // ATC fire used to live here (gated on this same submit click). It
+    // moved to the field-watching useEffect above — by the time the user
+    // gets here, ATC has already fired the moment all three fields became
+    // valid. No fire path remains in handleSubmit.
 
     setSubmitting(true);
     setServerError('');

@@ -21,6 +21,7 @@ const router  = express.Router();
 const pool    = require('../db');
 const tata    = require('../utils/tataClient');
 const { verify } = require('../utils/jwt');
+const { getPassword } = require('../utils/adminConfig');
 
 const UPLOADS_ROOT = path.join(__dirname, '..', 'uploads');
 
@@ -31,7 +32,15 @@ function authViaQuery(req, res, next) {
   // also unlocks recording playback so the Sales → Completed Calls view
   // can render <audio> tags for any caller's recording. The check is
   // length-checked + constant-time to avoid a timing oracle.
-  const adminPwd = process.env.ADMIN_PASSWORD || '';
+  //
+  // Read via getPassword() so the runtime-rotatable admin secret in
+  // data/admin.json takes precedence over the .env fallback — matches
+  // how middleware/adminAuth.js resolves the same credential. Reading
+  // process.env.ADMIN_PASSWORD directly here was the bug that caused
+  // the admin Completed Calls audio player to show 0:00/0:00 (the
+  // proxy returned 401 because it compared against the stale env
+  // value while the admin was signed in with the rotated JSON value).
+  const adminPwd = getPassword();
   if (adminPwd && token.length === adminPwd.length) {
     try {
       const a = Buffer.from(token);

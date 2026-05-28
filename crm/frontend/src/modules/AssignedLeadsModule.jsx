@@ -1349,6 +1349,16 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
             // Call was successfully completed — full-screen celebration
             // (centred bot + confetti) for ~4.5s, then back to idle corner.
             if (typeof setMood === 'function') setMood('happy', t.postCallCelebrationMs);
+            // Caller hit X → CloseConfirmDialog OK. We sent
+            // outcome:'incomplete' + autoAdvance:false meaning "stop
+            // the auto-call right now". Honour that BEFORE both
+            // queue paths below.
+            if (outcome === 'incomplete' && meta?.autoAdvance === false) {
+              setAutoMode('off');
+              clearAdvanceTimer();
+              setAdvanceLeft(0);
+              return;
+            }
             if (autoMode === 'calling') {
               // Legacy autoMode keeps its own queue
               startCooldown();
