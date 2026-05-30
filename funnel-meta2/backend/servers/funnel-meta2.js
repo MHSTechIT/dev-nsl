@@ -35,6 +35,7 @@ app.use('/api',          require('../routes/leads'));
 app.use('/api',          require('../routes/events'));
 app.use('/api/auth',     authLimiter(), require('../routes/auth'));   // duplicated for embedded admin
 app.use('/api/admin',    require('../routes/admin'));                 // duplicated for embedded admin
+app.use('/api/meta',     require('../routes/meta'));                  // Meta Pixel/CAPI server-side mirror
 
 const PORT = process.env.PORT || 3004;
 app.listen(PORT, () => {

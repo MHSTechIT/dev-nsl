@@ -1,5 +1,7 @@
+import { useEffect } from 'react';
 import { m } from 'framer-motion';
 import { trackEvent } from '../utils/trackEvent';
+import { trackScreenView, trackSearch } from '../utils/metaPixel';
 
 const slideIn = {
   initial: { opacity: 0, y: 12 },
@@ -11,6 +13,10 @@ const PRODUCTS_URL =
   'https://docs.google.com/forms/d/e/1FAIpQLSfFkRVY__WZgzQd219vO9rPMA5nc5d3TwKuBAwlQsMHgcN8MA/viewform';
 
 export default function NotTamil() {
+  useEffect(() => {
+    trackScreenView('disqualified_non_tamil', { reason: 'non_tamil' });
+    trackSearch('non_tamil', { reason: 'non_tamil', surface: 'not_tamil' });
+  }, []);
   return (
     <m.div
       variants={slideIn} initial="initial" animate="animate" exit="exit"

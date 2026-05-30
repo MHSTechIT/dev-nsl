@@ -4,6 +4,10 @@ import { m } from 'framer-motion';
 import { useFunnel } from '../context/FunnelContext';
 import { t } from '../translations';
 import { trackEvent, getVisitorId } from '../utils/trackEvent';
+import {
+  trackScreenView, trackViewContent, trackFieldFocus, trackFieldBlur,
+  trackAddToCart, trackLead, trackSubmitApplication,
+} from '../utils/metaPixel';
 
 const slideIn = {
   initial: { opacity: 0, y: 12 },
@@ -87,6 +91,17 @@ export default function Screen4() {
     if (!state.sugarLevel) { dispatch({ type: 'SET_STAGE', payload: 'funnel' }); return; }
     // Pre-warm Render backend so it's ready when user submits
     fetch('/api/health').catch(() => {});
+    // Meta: alternative form path. ViewContent + AddToCart = the
+    // form rendered, user "added" the offer to their cart. Lead
+    // fires only on submit success (below).
+    trackScreenView('screen4_form', { sugar_level: state.sugarLevel, lang: state.lang });
+    trackViewContent('Registration Form', { step: 4 });
+    trackAddToCart({
+      sugar_level:       state.sugarLevel,
+      diabetes_duration: state.diabetesDuration,
+      content_name:      'Webinar Registration Form',
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function handlePhoneInput(e) {
@@ -99,6 +114,14 @@ export default function Screen4() {
     const errs = validate(fullName, whatsappNumber, email);
     setErrors(errs);
     if (Object.keys(errs).length > 0) return;
+    // Meta: SubmitApplication fires on validated submit attempt,
+    // BEFORE the network round-trip. Lead only fires below on
+    // success. Both share the same lead context for dedup.
+    trackSubmitApplication({
+      sugar_level:       state.sugarLevel,
+      diabetes_duration: state.diabetesDuration,
+      lang:              state.lang,
+    });
 
     setSubmitting(true);
     setServerError('');
@@ -147,6 +170,17 @@ export default function Screen4() {
       });
 
       trackEvent('registration_submitted', state.webinarConfig?.next_webinar_at);
+      // Meta: the Lead conversion. Hashed email + phone are forwarded
+      // via mpTrack opts.user_data → server CAPI (NOT fbq custom_data).
+      trackLead({
+        leadId:   data.lead_id,
+        score:    data.lead_score,
+        sugar:    state.sugarLevel,
+        duration: state.diabetesDuration,
+        lang:     state.lang,
+        email:    email.trim().toLowerCase(),
+        phone:    whatsappNumber,
+      });
       setSubmitting(false);
       if (data.lead_id) localStorage.setItem('mhs_lead_id', data.lead_id);
       // Single-URL funnel: swap to the WhatsApp surface in place (URL stays "/").
@@ -345,8 +379,8 @@ export default function Screen4() {
             placeholder="Ramaswamy"
             autoCapitalize="words"
             style={inputStyle(errors.fullName)}
-            onFocus={e => { e.target.style.borderColor = 'rgba(139,92,246,0.55)'; e.target.style.boxShadow = '0 0 0 3px rgba(91,33,182,0.15), inset 0 1.5px 0 rgba(255,255,255,0.12)'; }}
-            onBlur={e => { e.target.style.borderColor = errors.fullName ? 'rgba(248,113,113,0.60)' : 'rgba(255,255,255,0.18)'; e.target.style.boxShadow = 'inset 0 1.5px 0 rgba(255,255,255,0.12), 0 2px 8px rgba(0,0,0,0.20)'; }}
+            onFocus={e => { trackFieldFocus('full_name'); e.target.style.borderColor = 'rgba(139,92,246,0.55)'; e.target.style.boxShadow = '0 0 0 3px rgba(91,33,182,0.15), inset 0 1.5px 0 rgba(255,255,255,0.12)'; }}
+            onBlur={e => { trackFieldBlur('full_name', fullName); e.target.style.borderColor = errors.fullName ? 'rgba(248,113,113,0.60)' : 'rgba(255,255,255,0.18)'; e.target.style.boxShadow = 'inset 0 1.5px 0 rgba(255,255,255,0.12), 0 2px 8px rgba(0,0,0,0.20)'; }}
           />
           {errors.fullName && (
             <p style={{ fontFamily: 'Outfit, sans-serif', color: '#F87171', fontSize: '0.75rem', marginTop: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -376,6 +410,8 @@ export default function Screen4() {
             <input
               type="tel" inputMode="numeric"
               value={whatsappNumber} onChange={handlePhoneInput}
+              onFocus={() => trackFieldFocus('whatsapp_number')}
+              onBlur={() => trackFieldBlur('whatsapp_number', whatsappNumber)}
               placeholder="98XXX XXXXX"
               style={{
                 flex: 1, padding: '0 12px', background: 'transparent', border: 'none', outline: 'none',
@@ -405,8 +441,8 @@ export default function Screen4() {
             onChange={e => { setEmail(e.target.value); }}
             placeholder="yourname@gmail.com"
             style={inputStyle(errors.email)}
-            onFocus={e => { e.target.style.borderColor = 'rgba(139,92,246,0.55)'; e.target.style.boxShadow = '0 0 0 3px rgba(91,33,182,0.15), inset 0 1.5px 0 rgba(255,255,255,0.12)'; }}
-            onBlur={e => { e.target.style.borderColor = errors.email ? 'rgba(248,113,113,0.60)' : 'rgba(255,255,255,0.18)'; e.target.style.boxShadow = 'inset 0 1.5px 0 rgba(255,255,255,0.12), 0 2px 8px rgba(0,0,0,0.20)'; }}
+            onFocus={e => { trackFieldFocus('email'); e.target.style.borderColor = 'rgba(139,92,246,0.55)'; e.target.style.boxShadow = '0 0 0 3px rgba(91,33,182,0.15), inset 0 1.5px 0 rgba(255,255,255,0.12)'; }}
+            onBlur={e => { trackFieldBlur('email', email); e.target.style.borderColor = errors.email ? 'rgba(248,113,113,0.60)' : 'rgba(255,255,255,0.18)'; e.target.style.boxShadow = 'inset 0 1.5px 0 rgba(255,255,255,0.12), 0 2px 8px rgba(0,0,0,0.20)'; }}
           />
           <p style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.72rem', color: '#7c5cbf', marginTop: 4 }}>
             ✉ Workshop Free Joining link will be sent to your email

@@ -5,6 +5,10 @@ import { useFunnel } from '../context/FunnelContext';
 import { t } from '../translations';
 import CountdownTimer, { stopTick } from '../components/CountdownTimer';
 import { trackEvent } from '../utils/trackEvent';
+import {
+  trackScreenView, trackViewContent, trackFieldSelect, trackSearch,
+  trackButtonClick,
+} from '../utils/metaPixel';
 import Confetti from '../components/Confetti';
 
 /* ── Live social proof messages ───────────────────────────────────────── */
@@ -218,6 +222,15 @@ export default function Screen1A() {
     return () => clearTimeout(t);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Meta: announce the funnel's first interactive screen. ViewContent
+  // gives Smart Bidding the "user landed and saw the offer" signal
+  // even when they bounce before picking sugar level.
+  useEffect(() => {
+    trackScreenView('screen1a_landing', { lang: state.lang });
+    trackViewContent('Funnel Landing', { step: 1 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Intercept browser/device back button while popup is open
   useEffect(() => {
     if (!expanded) return;
@@ -260,7 +273,19 @@ export default function Screen1A() {
     stopTick();
     const sugarEventMap = { '150-250': 'sugar_150_250', '250+': 'sugar_250_plus', 'none': 'disqualified_no_diabetes' };
     if (sugarEventMap[opt.id]) trackEvent(sugarEventMap[opt.id], state.webinarConfig?.next_webinar_at);
+    // Meta: stamp the picked sugar value. Smart Bidding learns this
+    // is the strongest gating signal for downstream Lead quality.
+    trackFieldSelect('sugar_level', opt.id, {
+      disqualified: !!opt.disqualify,
+      lang:         state.lang,
+    });
     if (opt.disqualify) {
+      // Search = no-diabetes path; lets us segment "wrong audience"
+      // out of optimization audiences in Ads Manager.
+      trackSearch('no_diabetes', {
+        reason:      'no_diabetes',
+        sugar_level: opt.id,
+      });
       dispatch({ type: 'SET_NAV_DIRECTION', payload: 'forward' });
       setLeaving(true);
       setTimeout(() => {
@@ -275,6 +300,7 @@ export default function Screen1A() {
 
   function handleZoomYes() {
     trackEvent('tamil_yes', state.webinarConfig?.next_webinar_at);
+    trackFieldSelect('language_qualified', 'yes', { lang: 'tamil' });
     setPopupLeaving(true);
     setTimeout(() => {
       setExpanded(false);
@@ -287,6 +313,8 @@ export default function Screen1A() {
 
   function handleZoomNo() {
     trackEvent('tamil_no', state.webinarConfig?.next_webinar_at);
+    trackFieldSelect('language_qualified', 'no', { lang: 'tamil' });
+    trackSearch('non_tamil', { reason: 'not_tamil_speaker' });
     dispatch({ type: 'SET_NAV_DIRECTION', payload: 'forward' });
     setLeaving(true);
     setTimeout(() => {
@@ -338,7 +366,7 @@ export default function Screen1A() {
   const ctaButton = (
     <div style={{ position: 'relative' }}>
       <button
-        onClick={() => { stopTick(); trackEvent('cta_clicked', state.webinarConfig?.next_webinar_at); setExpanded(true); }}
+        onClick={() => { stopTick(); trackEvent('cta_clicked', state.webinarConfig?.next_webinar_at); trackButtonClick('landing_cta', { screen: 'screen1a' }); setExpanded(true); }}
         className="cta-pulse"
         style={{
           position: 'relative', zIndex: 1,

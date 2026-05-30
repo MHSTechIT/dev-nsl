@@ -5,6 +5,10 @@ import { useFunnel } from '../context/FunnelContext';
 import { t } from '../translations';
 import { formatISTDateTime } from '../utils/time';
 import { trackEvent } from '../utils/trackEvent';
+import {
+  trackScreenView, trackCompleteRegistration, trackContact, trackSchedule,
+  trackButtonClick,
+} from '../utils/metaPixel';
 const slideIn = {
   initial: { opacity: 0, y: 12 },
   animate: { opacity: 1, y: 0, transition: { duration: 0.22, ease: 'easeOut' } },
@@ -20,6 +24,27 @@ export default function Screen5() {
 
   useEffect(() => {
     if (!state.submittedLeadId) navigate('/', { replace: true });
+    // Meta: CompleteRegistration is THE post-form conversion event.
+    // It mirrors Lead but signals "user reached the success surface"
+    // — Smart Bidding can optimise toward this as a stronger
+    // downstream proxy. Schedule confirms the webinar slot was shown.
+    trackScreenView('screen5_success', {
+      lead_id: state.submittedLeadId,
+      score:   state.leadScore,
+    });
+    trackCompleteRegistration({
+      lead_id:  state.submittedLeadId,
+      score:    state.leadScore,
+      value:    state.leadScore || 0,
+      currency: 'INR',
+    });
+    if (state.webinarConfig?.next_webinar_at) {
+      trackSchedule({
+        webinar_at: state.webinarConfig.next_webinar_at,
+        lead_id:    state.submittedLeadId,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -31,6 +56,14 @@ export default function Screen5() {
     if (!state.whatsappGroupLink) return;
     setJoinState('joining');
     trackEvent('wa_join_clicked', state.webinarConfig?.next_webinar_at);
+    trackContact({
+      channel:  'whatsapp',
+      lead_id:  state.submittedLeadId,
+      score:    state.leadScore,
+      sugar:    state.sugarLevel,
+      duration: state.diabetesDuration,
+    });
+    trackButtonClick('join_whatsapp', { screen: 'screen5' });
     window.open(state.whatsappGroupLink, '_blank');
     setTimeout(() => setJoinState('joined'), 2000);
   }

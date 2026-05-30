@@ -13,6 +13,7 @@ const callerRouter        = require('./routes/caller');
 const callsRouter         = require('./routes/calls');
 const webhooksRouter      = require('./routes/webhooks');
 const recordingsRouter    = require('./routes/recordings');
+const metaRouter          = require('./routes/meta');
 
 const app = express();
 
@@ -579,5 +580,6 @@ app.use('/api/caller', callerRouter);
 app.use('/api/caller', callsRouter);
 app.use('/api/caller/recordings', recordingsRouter);
 app.use('/api/webhooks', webhooksRouter);
+app.use('/api/meta',     metaRouter);
 
 module.exports = app;

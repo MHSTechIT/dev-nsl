@@ -2,6 +2,9 @@ import { useEffect, useState } from 'react';
 import { m } from 'framer-motion';
 import { useFunnel } from '../context/FunnelContext';
 import { trackEvent } from '../utils/trackEvent';
+import {
+  trackScreenView, trackCompleteRegistration, trackContact, trackButtonClick,
+} from '../utils/metaPixel';
 
 /* ── Link expiry countdown ── */
 function LinkExpiryTimer() {
@@ -31,12 +34,26 @@ function LinkExpiryTimer() {
 
 export default function WhatsAppPage() {
   const { state } = useFunnel();
+
+  // Meta: the WhatsApp redirect surface — typically reached AFTER form
+  // submit. CompleteRegistration here gives Smart Bidding a second,
+  // post-redirect ping for the same lead_id (dedups via event_id) so
+  // attribution survives even if the success-overlay event was
+  // blocked.
+  useEffect(() => {
+    const leadId = (typeof window !== 'undefined' && localStorage.getItem('mhs_lead_id')) || state.submittedLeadId;
+    trackScreenView('whatsapp_page', { lead_id: leadId });
+    trackCompleteRegistration({ lead_id: leadId, surface: 'whatsapp_page' });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // Live link — comes from FunnelContext which already has SSE + initial fetch
   const waLink = state.webinarConfig?.tuesday_whatsapp_link || '';
 
   function handleJoinClick() {
     trackEvent('wa_join_clicked', state.webinarConfig?.next_webinar_at);
     const leadId = localStorage.getItem('mhs_lead_id');
+    trackContact({ channel: 'whatsapp', lead_id: leadId, surface: 'whatsapp_page' });
+    trackButtonClick('join_whatsapp', { screen: 'whatsapp_page' });
     if (leadId) {
       fetch(`/api/leads/${leadId}/wa-click`, { method: 'PATCH' }).catch(() => {});
     }

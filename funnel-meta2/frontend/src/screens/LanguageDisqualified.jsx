@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { m } from 'framer-motion';
 import { useFunnel } from '../context/FunnelContext';
 import { t } from '../translations';
+import { trackScreenView, trackSearch, trackButtonClick } from '../utils/metaPixel';
 
 const slideIn = {
   initial: { opacity: 0, y: 12 },
@@ -16,10 +17,18 @@ export default function LanguageDisqualified() {
   const lang = state.lang;
   const [copied, setCopied] = useState(false);
 
+  // Meta: same custom-audience-exclusion pattern as Disqualified.jsx.
+  useEffect(() => {
+    trackScreenView('disqualified_language', { reason: 'non_tamil' });
+    trackSearch('non_tamil', { reason: 'non_tamil', surface: 'language_disqualified' });
+  }, []);
+
   function shareWA() {
+    trackButtonClick('share_whatsapp', { screen: 'language_disqualified' });
     window.open('https://wa.me/?text=' + encodeURIComponent('Check out this diabetes reversal webinar: ' + SHARE_URL), '_blank');
   }
   function copyLink() {
+    trackButtonClick('copy_link', { screen: 'language_disqualified' });
     navigator.clipboard.writeText(SHARE_URL).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);

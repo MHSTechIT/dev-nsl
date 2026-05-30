@@ -6,6 +6,7 @@ import { t } from '../translations';
 import TopBar from '../components/TopBar';
 import CountdownTimerCompact from '../components/CountdownTimerCompact';
 import { trackEvent } from '../utils/trackEvent';
+import { trackScreenView, trackFieldSelect, trackSearch } from '../utils/metaPixel';
 
 const slideIn = {
   initial: { x: '100%', opacity: 0 },
@@ -20,10 +21,18 @@ export default function Screen2() {
 
   useEffect(() => {
     if (!state.sugarLevel) navigate('/', { replace: true });
+    trackScreenView('screen2_language', {
+      sugar_level: state.sugarLevel,
+      lang:        state.lang,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function handleYes() {
     trackEvent('tamil_yes', state.webinarConfig?.next_webinar_at);
+    trackFieldSelect('language_qualified', 'yes', {
+      sugar_level: state.sugarLevel,
+    });
     dispatch({ type: 'SET_LANGUAGE_QUALIFIED', payload: true });
     dispatch({ type: 'SET_NAV_DIRECTION', payload: 'forward' });
     navigate('/duration');
@@ -31,6 +40,8 @@ export default function Screen2() {
 
   function handleNo() {
     trackEvent('tamil_no', state.webinarConfig?.next_webinar_at);
+    trackFieldSelect('language_qualified', 'no', { sugar_level: state.sugarLevel });
+    trackSearch('non_tamil', { reason: 'language_disqualified' });
     dispatch({ type: 'SET_NAV_DIRECTION', payload: 'forward' });
     window.location.href = (import.meta.env.VITE_DISQUALIFIED_URL || '') + '/language';
   }

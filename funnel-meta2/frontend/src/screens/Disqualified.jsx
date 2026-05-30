@@ -1,5 +1,7 @@
+import { useEffect } from 'react';
 import { m } from 'framer-motion';
 import { trackEvent } from '../utils/trackEvent';
+import { trackScreenView, trackSearch } from '../utils/metaPixel';
 
 const slideIn = {
   initial: { opacity: 0, y: 12 },
@@ -10,6 +12,14 @@ const slideIn = {
 const YOUTUBE_URL = 'https://www.youtube.com/@DoctorFarmer';
 
 export default function Disqualified() {
+  // Meta: fire a custom event so admins can build a "wrong audience"
+  // CUSTOM AUDIENCE in Ads Manager and add it to ad-set EXCLUSIONS.
+  // Reduces wasted impressions on prospects who already self-selected
+  // out via the diabetes-status gate.
+  useEffect(() => {
+    trackScreenView('disqualified_no_diabetes', { reason: 'no_diabetes' });
+    trackSearch('no_diabetes', { reason: 'no_diabetes', surface: 'disqualified' });
+  }, []);
   return (
     <m.div
       variants={slideIn} initial="initial" animate="animate" exit="exit"

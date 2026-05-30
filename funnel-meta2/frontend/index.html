@@ -4,7 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
-    <!-- Meta Pixel Code — Pixel Name: Qualified Leads - WEB APP FORM -->
+    <!-- ─────────────────────────────────────────────────────────────────
+         Meta Pixel — base bootstrap.
+         Pixel ID: 1866739047322363 (MHS Qualified Leads — WEB APP FORM).
+         We DELIBERATELY don't fire `fbq('track','PageView')` here. The
+         PageView (and every other event) is fired from React in
+         utils/metaPixel.js with:
+           • a fresh event_id per fire (for CAPI deduplication),
+           • the visitor's source / lang / utm context,
+           • fbp / fbc cookies forwarded server-side,
+         so Meta sees richer signals than the bare landing-page ping.
+         ───────────────────────────────────────────────────────────────── -->
     <script>
       !function(f,b,e,v,n,t,s)
       {if(f.fbq)return;n=f.fbq=function(){n.callMethod?
@@ -15,9 +25,10 @@
       s.parentNode.insertBefore(t,s)}(window, document,'script',
       'https://connect.facebook.net/en_US/fbevents.js');
       fbq('init', '1866739047322363');
-      fbq('track', 'PageView');
     </script>
-    <!-- End Meta Pixel Code -->
+    <!-- End Meta Pixel Code (head bootstrap). The noscript <img> fallback
+         lives at the top of <body> — HTML5 disallows <noscript><img></noscript>
+         inside <head> (parse5 error: disallowed-content-in-noscript-in-head). -->
 
     <title>My Health School – Diabetes Reversal Webinar</title>
     <link rel="icon" type="image/png" href="/favicon.png" />
@@ -34,11 +45,10 @@
     <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@900&family=Outfit:wght@400;500;600;700;800&family=Noto+Sans+Tamil:wght@400;600;700&display=swap" /></noscript>
   </head>
   <body>
-    <!-- Meta Pixel Code (noscript) -->
+    <!-- Meta Pixel — noscript img beacon. Body-level per HTML5 spec. -->
     <noscript><img height="1" width="1" style="display:none"
       src="https://www.facebook.com/tr?id=1866739047322363&ev=PageView&noscript=1"
     /></noscript>
-    <!-- End Meta Pixel Code (noscript) -->
     <div id="root">
       <!-- Inline skeleton — shown instantly before React loads -->
       <style>

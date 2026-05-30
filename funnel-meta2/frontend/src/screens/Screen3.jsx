@@ -8,6 +8,11 @@ import TopBar from '../components/TopBar';
 import Confetti from '../components/Confetti';
 import { FlipUnit } from '../components/FlipCard';
 import { trackEvent, getVisitorId } from '../utils/trackEvent';
+import {
+  trackScreenView, trackFieldSelect, trackFieldFocus, trackFieldBlur,
+  trackInitiateCheckout, trackAddPaymentInfo, trackAddToCart,
+  trackLead, trackContact, trackViewContent, trackButtonClick,
+} from '../utils/metaPixel';
 
 const durationOptions = ['new', 'mid', 'long'];
 const HALF = 280; // ms per half-flip
@@ -138,6 +143,23 @@ export default function Screen3() {
 
   useEffect(() => {
     if (!state.sugarLevel) navigate('/', { replace: true });
+    // Meta: Screen3 = qualification (diabetes duration) → checkout start.
+    // ViewContent narrates the funnel step; InitiateCheckout signals
+    // commit intent. Both ride the dedup-event-id so server CAPI can
+    // mirror.
+    trackScreenView('screen3_duration', {
+      sugar_level: state.sugarLevel,
+      lang:        state.lang,
+    });
+    trackViewContent('Diabetes Duration Question', {
+      step: 3,
+      sugar_level: state.sugarLevel,
+    });
+    trackInitiateCheckout({
+      step: 3,
+      sugar_level: state.sugarLevel,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* flip helper: fold to 90°, swap content, unfold back to 0° */
@@ -159,12 +181,34 @@ export default function Screen3() {
   function handleFirstInput() {
     if (!hasStartedRef.current) {
       hasStartedRef.current = true;
+      // Meta: AddToCart = user has begun the form (first keystroke).
+      // Earlier signal than Lead — Smart Bidding can use it to find
+      // buyers who don't necessarily finish in this session.
+      trackAddToCart({
+        sugar_level:       state.sugarLevel,
+        diabetes_duration: state.diabetesDuration,
+        content_name:      'Webinar Registration Form',
+        content_category:  'form_started',
+      });
     }
   }
 
   function handleSelect(durKey) {
     const durationEventMap = { new: 'duration_new', mid: 'duration_mid', long: 'duration_long' };
     if (durationEventMap[durKey]) trackEvent(durationEventMap[durKey], state.webinarConfig?.next_webinar_at);
+    // Meta: stamp the picked value so Smart Bidding sees the granular
+    // qualification answer. AddPaymentInfo signals BOTH qualification
+    // questions are now answered (sugar + duration) — that's our
+    // strongest "commit" intent before name/phone capture.
+    trackFieldSelect('diabetes_duration', durKey, {
+      sugar_level: state.sugarLevel,
+      lang:        state.lang,
+    });
+    trackAddPaymentInfo({
+      sugar_level:       state.sugarLevel,
+      diabetes_duration: durKey,
+      content_category:  'qualified_lead',
+    });
     dispatch({ type: 'SET_DURATION', payload: durKey });
     dispatch({ type: 'SET_NAV_DIRECTION', payload: 'forward' });
     /* grow card first, then flip into form */
@@ -194,6 +238,18 @@ export default function Screen3() {
       dispatch({ type: 'SET_FORM_FIELD', field: 'email', value: email });
       dispatch({ type: 'SET_SUBMITTED', payload: { leadId: data.lead_id, leadScore: data.lead_score, whatsappGroupLink: data.whatsapp_link } });
       trackEvent('registration_submitted', state.webinarConfig?.next_webinar_at);
+      // Meta: Lead — the main conversion event. Carries hashed
+      // email + phone via mpTrack opts.user_data (server-side
+      // CAPI hashes; client-side fbq sees only custom_data here).
+      trackLead({
+        leadId:   data.lead_id,
+        score:    data.lead_score,
+        sugar:    state.sugarLevel,
+        duration: state.diabetesDuration,
+        lang:     state.lang,
+        email:    email.trim().toLowerCase(),
+        phone:    phone,
+      });
       setWLink(data.whatsapp_link || '');
 
       /* show overlay immediately; confetti plays on top (z-index 9999) */
@@ -209,6 +265,18 @@ export default function Screen3() {
 
   function handleJoinWA() {
     trackEvent('wa_join_clicked', state.webinarConfig?.next_webinar_at);
+    // Meta: Contact = downstream channel engagement. Combined with
+    // Lead this gives Meta a two-step conversion ladder for Smart
+    // Bidding to optimise toward (people who CLICK WA vs. just
+    // submit the form).
+    trackContact({
+      channel:   'whatsapp',
+      lead_id:   state.submittedLeadId,
+      score:     state.leadScore,
+      sugar:     state.sugarLevel,
+      duration:  state.diabetesDuration,
+    });
+    trackButtonClick('join_whatsapp', { screen: 'screen3' });
     stopUrgencyTick();
     /* fire-and-forget: record that this lead clicked the WA button */
     const leadId = state.submittedLeadId;
@@ -415,6 +483,8 @@ export default function Screen3() {
                 <label style={labelStyle}>{t.screen4.nameLabel[lang]}</label>
                 <input type="text" value={fullName} placeholder={t.screen4.namePlaceholder[lang]} autoCapitalize="words"
                   onChange={e => { setFullName(e.target.value); handleFirstInput(); }}
+                  onFocus={() => trackFieldFocus('full_name')}
+                  onBlur={() => trackFieldBlur('full_name', fullName)}
                   style={{ ...inputStyle, borderColor: errors.fullName ? 'rgba(248,113,113,0.6)' : undefined }} />
                 {errors.fullName && <p style={{ color: '#EF4444', fontSize: '0.72rem', marginTop: 4, fontFamily: 'Outfit,sans-serif' }}>⚠ {t.screen4.errorName[lang]}</p>}
               </Field>
@@ -424,6 +494,8 @@ export default function Screen3() {
                   <span style={{ padding: '0 10px', fontFamily: 'Outfit,sans-serif', fontWeight: 600, color: 'rgba(91,33,182,0.55)', fontSize: '0.85rem', borderRight: '1px solid rgba(91,33,182,0.12)', height: '100%', display: 'flex', alignItems: 'center', background: 'rgba(237,234,248,0.5)', flexShrink: 0 }}>+91</span>
                   <input type="tel" inputMode="numeric" value={phone} placeholder="98XXX XXXXX"
                     onChange={e => { setPhone(e.target.value.replace(/\D/g, '').slice(0, 10)); handleFirstInput(); }}
+                    onFocus={() => trackFieldFocus('whatsapp_number')}
+                    onBlur={() => trackFieldBlur('whatsapp_number', phone)}
                     style={{ flex: 1, padding: '0 10px', fontFamily: 'Outfit,sans-serif', fontSize: '0.9rem', color: '#3B0764', background: 'transparent', border: 'none', outline: 'none' }} />
                   {/^\d{10}$/.test(phone) && <span style={{ paddingRight: 10, color: '#22C55E', fontWeight: 700 }}>✓</span>}
                 </div>
@@ -433,6 +505,8 @@ export default function Screen3() {
                 <label style={labelStyle}>{t.screen4.emailLabel[lang]}</label>
                 <input type="email" value={email} placeholder={t.screen4.emailPlaceholder[lang]}
                   onChange={e => { setEmail(e.target.value); handleFirstInput(); }}
+                  onFocus={() => trackFieldFocus('email')}
+                  onBlur={() => trackFieldBlur('email', email)}
                   style={{ ...inputStyle, borderColor: errors.email ? 'rgba(248,113,113,0.6)' : undefined }} />
                 {errors.email && <p style={{ color: '#EF4444', fontSize: '0.72rem', marginTop: 4, fontFamily: 'Outfit,sans-serif' }}>⚠ {t.screen4.errorEmail[lang]}</p>}
               </Field>
