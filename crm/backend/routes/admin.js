@@ -18,8 +18,48 @@ const {
   attributeViewsToWebinars,
   metaConfigured,
   fetchAllCampaigns,
+  fetchAllPromotePages,
+  fetchAllLeadgenForms,
   clearMetaCache,
 } = require('../utils/metaInsights');
+const { syncAllBatches, assignUnassigned } = require('../utils/nsmLeadsSync');
+const whapi = require('../utils/whapiClient');
+const { mergeNsmSettings } = require('../utils/nsmSettingsDefaults');
+const nsmWa = require('../utils/nsmWhatsappScheduler');
+const nsmTestForm = require('../utils/nsmTestForm'); // TEMP: removable test form
+
+/* Merged NSM settings (saved JSONB overlaid on code defaults). */
+async function loadNsmSettings() {
+  try {
+    const { rows } = await pool.query('SELECT settings FROM nsm_settings WHERE id = 1');
+    return mergeNsmSettings(rows[0] && rows[0].settings);
+  } catch (e) { return mergeNsmSettings(null); }
+}
+
+/* Best-effort WhatsApp COMMUNITY creation for a batch. Stores the community id
+   + its announce-group id (whatsapp_group_id, reused for adding members +
+   messaging). Mutates `batch` and persists; never throws. */
+async function createBatchGroup(batch) {
+  if (!whapi.isConfigured()) return;
+  const settings = await loadNsmSettings();
+  if (!settings.whatsapp.enabled) return;
+  try {
+    const { communityId, groupId, invite } = await whapi.createCommunity({ subject: batch.batch_name });
+    if (!groupId) throw new Error('community created but no announce group returned');
+    await pool.query(
+      `UPDATE nsm_batches SET whatsapp_community_id = $1, whatsapp_group_id = $2, whatsapp_group_invite = $3, whatsapp_group_error = NULL WHERE id = $4`,
+      [communityId, groupId, invite, batch.id]
+    );
+    batch.whatsapp_community_id = communityId;
+    batch.whatsapp_group_id = groupId;
+    batch.whatsapp_group_invite = invite;
+    batch.whatsapp_group_error = null;
+  } catch (err) {
+    console.error('[nsm] createBatchGroup (community) failed:', err.message);
+    await pool.query('UPDATE nsm_batches SET whatsapp_group_error = $1 WHERE id = $2', [err.message.slice(0, 300), batch.id]).catch(() => {});
+    batch.whatsapp_group_error = err.message;
+  }
+}
 
 router.use(adminAuth);
 
@@ -51,6 +91,386 @@ const RECENT_WEBINARS_SQL = `(
   ) ranked
   WHERE ranked.rn <= 2
 )`;
+
+/* ════════════════════════════════════════════════════════════════════════
+   NSM-Caller workspace — Webinar "batches"
+   ------------------------------------------------------------------------
+   GET    /api/admin/nsm/lead-forms   → selectable Meta Lead Gen forms
+                                        (leadgen_forms union across every page
+                                        promotable from the configured ad
+                                        accounts; pages the token can't read
+                                        are skipped)
+   GET    /api/admin/nsm/batches      → list batches, newest first
+   POST   /api/admin/nsm/batches      → create a batch
+   DELETE /api/admin/nsm/batches/:id  → remove a batch
+   ════════════════════════════════════════════════════════════════════════ */
+
+router.get('/nsm/lead-forms', async (req, res) => {
+  try {
+    const force = req.query.refresh === '1' || req.query.refresh === 'true';
+    const forms = await fetchAllLeadgenForms(force);
+    res.json({ forms: [nsmTestForm.testFormDescriptor(), ...forms] }); // TEMP test form first
+  } catch (err) {
+    console.error('[admin] GET /nsm/lead-forms error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch Meta forms', forms: [] });
+  }
+});
+
+router.get('/nsm/batches', async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT b.id, b.batch_name, b.start_at, b.end_at, b.webinar_at, b.webinar_link, b.webinar_meeting_id,
+              b.whatsapp_community_id, b.whatsapp_group_id, b.whatsapp_group_invite, b.whatsapp_group_count, b.whatsapp_group_error,
+              b.meta_forms, b.created_at,
+              COALESCE((SELECT COUNT(*) FROM nsm_leads l WHERE l.batch_id = b.id AND l.deleted_at IS NULL), 0)::int AS leads_number
+         FROM nsm_batches b
+        ORDER BY b.created_at DESC`
+    );
+    res.json({ batches: rows });
+  } catch (err) {
+    console.error('[admin] GET /nsm/batches error:', err.message);
+    res.status(500).json({ error: 'Failed to load batches' });
+  }
+});
+
+/* Pull leads from Meta for every batch (forms × date window) into nsm_leads.
+   Triggered by the Leads page "Sync from Meta" button. */
+router.post('/nsm/sync', async (_req, res) => {
+  try {
+    const results = await syncAllBatches();
+    const upserted = results.reduce((s, r) => s + (r.upserted || 0), 0);
+    res.json({ ok: true, upserted, results });
+  } catch (err) {
+    console.error('[admin] POST /nsm/sync error:', err.message);
+    res.status(500).json({ error: 'Sync failed' });
+  }
+});
+
+/* Read synced leads (all batches, or one via ?batch_id=). Builds the dynamic
+   column set from the union of field_data keys across the returned rows. */
+router.get('/nsm/leads', async (req, res) => {
+  const batchId = req.query.batch_id || null;
+  try {
+    const { rows } = await pool.query(
+      `SELECT l.id, l.meta_lead_id, l.batch_id, b.batch_name, l.form_name,
+              l.created_time, l.full_name, l.phone, l.email, l.city, l.field_data,
+              l.assigned_user_id, u.full_name AS assigned_name
+         FROM nsm_leads l
+         LEFT JOIN nsm_batches b ON b.id = l.batch_id
+         LEFT JOIN nsm_users   u ON u.id = l.assigned_user_id
+        WHERE l.deleted_at IS NULL AND ($1::uuid IS NULL OR l.batch_id = $1::uuid)
+        ORDER BY l.created_time DESC NULLS LAST
+        LIMIT 5000`,
+      [batchId]
+    );
+
+    // Dynamic columns = union of field_data keys (name/phone/email/city first).
+    const order = [];
+    const seen = new Set();
+    for (const r of rows) {
+      for (const k of Object.keys(r.field_data || {})) {
+        if (!seen.has(k)) { seen.add(k); order.push(k); }
+      }
+    }
+    const rank = (k) => {
+      const l = k.toLowerCase();
+      if (l.includes('name')) return 0;
+      if (l.includes('phone') || l.includes('mobile') || l.includes('whatsapp') || l.includes('number')) return 1;
+      if (l.includes('email')) return 2;
+      if (l.includes('city') || l.includes('town') || l.includes('location')) return 3;
+      return 4;
+    };
+    const columns = order
+      .sort((a, b) => rank(a) - rank(b))
+      .map(key => ({ key, label: key.replace(/_/g, ' ').replace(/\?\s*$/, '').replace(/\s+/g, ' ').trim() }));
+
+    res.json({ leads: rows, columns, total: rows.length });
+  } catch (err) {
+    console.error('[admin] GET /nsm/leads error:', err.message);
+    res.status(500).json({ error: 'Failed to load leads' });
+  }
+});
+
+/* Soft-delete leads by id. They stay tombstoned (deleted_at) so the 30s sync
+   never re-adds them. Body: { ids: [uuid, ...] }. */
+router.post('/nsm/leads/delete', async (req, res) => {
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.filter(Boolean).map(String) : [];
+  if (ids.length === 0) return res.status(400).json({ error: 'No lead ids provided' });
+  try {
+    const { rowCount } = await pool.query(
+      `UPDATE nsm_leads SET deleted_at = NOW() WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL`,
+      [ids]
+    );
+    res.json({ ok: true, deleted: rowCount });
+  } catch (err) {
+    console.error('[admin] POST /nsm/leads/delete error:', err.message);
+    res.status(500).json({ error: 'Failed to delete leads' });
+  }
+});
+
+router.post('/nsm/batches',
+  body('batch_name').trim().isLength({ min: 1 }).withMessage('Batch name is required'),
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ error: errors.array()[0].msg });
+
+    const { batch_name, start_at, end_at, webinar_at, webinar_link, webinar_meeting_id } = req.body;
+
+    // Normalise meta_forms to a clean [{id, name}] array. (Accept legacy
+    // `meta_pages` key too so older clients don't break.)
+    const rawForms = Array.isArray(req.body.meta_forms) ? req.body.meta_forms
+                   : Array.isArray(req.body.meta_pages) ? req.body.meta_pages
+                   : [];
+    const metaForms = rawForms
+      .filter(f => f && f.id != null)
+      .map(f => ({ id: String(f.id), name: String(f.name ?? f.id) }));
+
+    // Lead-collection window: from the batch start time (admin-set; defaults to
+    // creation time) up to the webinar (end = webinar_at). end_at is always the
+    // webinar time; the admin no longer sets it directly.
+    const startAt = start_at || new Date().toISOString();
+    const endAt = webinar_at || null;
+
+    try {
+      // Only one webinar may run at a time: reject a [start, webinar] window
+      // that overlaps an existing batch's window (others must be scheduled later).
+      if (webinar_at) {
+        const { rows: clash } = await pool.query(
+          `SELECT batch_name, webinar_at FROM nsm_batches
+            WHERE start_at IS NOT NULL AND webinar_at IS NOT NULL
+              AND start_at < $1::timestamptz AND $2::timestamptz < webinar_at
+            ORDER BY webinar_at LIMIT 1`,
+          [webinar_at, startAt]
+        );
+        if (clash.length) {
+          const w = new Date(clash[0].webinar_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true });
+          return res.status(409).json({ error: `Only one webinar can run at a time. "${clash[0].batch_name}" runs until its webinar (${w}). Set this batch's start time after that.` });
+        }
+      }
+      const { rows } = await pool.query(
+        `INSERT INTO nsm_batches (batch_name, start_at, end_at, webinar_at, webinar_link, webinar_meeting_id, meta_forms)
+              VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+           RETURNING id, batch_name, start_at, end_at, webinar_at, webinar_link, webinar_meeting_id, meta_forms, created_at`,
+        [batch_name.trim(), startAt, endAt, webinar_at || null,
+         (typeof webinar_link === 'string' && webinar_link.trim()) ? webinar_link.trim() : null,
+         (typeof webinar_meeting_id === 'string' && webinar_meeting_id.trim()) ? webinar_meeting_id.trim() : null,
+         JSON.stringify(metaForms)]
+      );
+      const batch = { ...rows[0], leads_number: 0 };
+      // Best-effort: auto-create the batch's WhatsApp group (won't fail creation).
+      await createBatchGroup(batch);
+      res.status(201).json({ batch });
+    } catch (err) {
+      console.error('[admin] POST /nsm/batches error:', err.message);
+      res.status(500).json({ error: 'Failed to create batch' });
+    }
+  }
+);
+
+/* Edit a batch's details (name, webinar/start/end times, link, meeting id,
+   meta_forms). Does NOT recreate the WhatsApp group. */
+router.patch('/nsm/batches/:id',
+  body('batch_name').trim().isLength({ min: 1 }).withMessage('Batch name is required'),
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ error: errors.array()[0].msg });
+    const { batch_name, start_at, end_at, webinar_at, webinar_link, webinar_meeting_id } = req.body;
+    const rawForms = Array.isArray(req.body.meta_forms) ? req.body.meta_forms
+                   : Array.isArray(req.body.meta_pages) ? req.body.meta_pages : [];
+    const metaForms = rawForms.filter(f => f && f.id != null).map(f => ({ id: String(f.id), name: String(f.name ?? f.id) }));
+    try {
+      // One-webinar-at-a-time: reject if the (effective) window overlaps another batch.
+      if (webinar_at) {
+        let effStart = start_at;
+        if (!effStart) { const cur = await pool.query('SELECT start_at FROM nsm_batches WHERE id = $1', [req.params.id]); effStart = cur.rows[0]?.start_at; }
+        if (effStart) {
+          const { rows: clash } = await pool.query(
+            `SELECT batch_name, webinar_at FROM nsm_batches
+              WHERE id <> $3 AND start_at IS NOT NULL AND webinar_at IS NOT NULL
+                AND start_at < $1::timestamptz AND $2::timestamptz < webinar_at
+              ORDER BY webinar_at LIMIT 1`,
+            [webinar_at, effStart, req.params.id]
+          );
+          if (clash.length) {
+            const w = new Date(clash[0].webinar_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: true });
+            return res.status(409).json({ error: `Only one webinar can run at a time. "${clash[0].batch_name}" runs until its webinar (${w}). Set this batch's start time after that.` });
+          }
+        }
+      }
+      // start_at = admin-set batch start (COALESCE keeps existing if omitted);
+      // end follows the webinar.
+      const { rows } = await pool.query(
+        `UPDATE nsm_batches
+            SET batch_name = $2, start_at = COALESCE($3::timestamptz, start_at),
+                end_at = $4, webinar_at = $5,
+                webinar_link = $6, webinar_meeting_id = $7, meta_forms = $8::jsonb
+          WHERE id = $1
+          RETURNING id, batch_name, start_at, end_at, webinar_at, webinar_link, webinar_meeting_id, meta_forms, created_at`,
+        [req.params.id, batch_name.trim(), start_at || null, webinar_at || null, webinar_at || null,
+         (typeof webinar_link === 'string' && webinar_link.trim()) ? webinar_link.trim() : null,
+         (typeof webinar_meeting_id === 'string' && webinar_meeting_id.trim()) ? webinar_meeting_id.trim() : null,
+         JSON.stringify(metaForms)]
+      );
+      if (rows.length === 0) return res.status(404).json({ error: 'Batch not found' });
+      res.json({ batch: rows[0] });
+    } catch (err) {
+      console.error('[admin] PATCH /nsm/batches error:', err.message);
+      res.status(500).json({ error: 'Failed to update batch' });
+    }
+  }
+);
+
+router.delete('/nsm/batches/:id', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT whatsapp_community_id, whatsapp_group_id FROM nsm_batches WHERE id = $1', [req.params.id]);
+    const cid = rows[0] && rows[0].whatsapp_community_id;
+    const gid = rows[0] && rows[0].whatsapp_group_id;
+    await pool.query('DELETE FROM nsm_batches WHERE id = $1', [req.params.id]);
+    if (whapi.isConfigured()) {                                  // best-effort cleanup
+      if (cid) whapi.deleteCommunity(cid).catch(() => {});
+      else if (gid) whapi.leaveGroup(gid).catch(() => {});       // legacy group batches
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[admin] DELETE /nsm/batches error:', err.message);
+    res.status(500).json({ error: 'Failed to delete batch' });
+  }
+});
+
+/* Lead → caller assignment roster for one batch (which NSM callers receive
+   this batch's leads, round-robin, in `position` order). */
+router.get('/nsm/batches/:id/share-config', async (req, res) => {
+  try {
+    const { rows: callers } = await pool.query(
+      `SELECT id, full_name, email, role FROM nsm_users
+        WHERE deleted_at IS NULL AND is_active = TRUE
+        ORDER BY full_name ASC`
+    );
+    const { rows: config } = await pool.query(
+      `SELECT caller_id, enabled, position FROM nsm_lead_share_config
+        WHERE batch_id = $1 ORDER BY position ASC`,
+      [req.params.id]
+    );
+    res.json({ callers, config });
+  } catch (err) {
+    console.error('[admin] GET /nsm/share-config error:', err.message);
+    res.status(500).json({ error: 'Failed to load assignment config' });
+  }
+});
+
+router.put('/nsm/batches/:id/share-config', async (req, res) => {
+  const batchId = req.params.id;
+  const entries = Array.isArray(req.body.entries) ? req.body.entries : [];
+  const clean = entries
+    .filter(e => e && e.caller_id)
+    .map((e, i) => ({
+      caller_id: String(e.caller_id),
+      enabled:   e.enabled !== false,
+      position:  Number.isInteger(e.position) ? e.position : i,
+    }));
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('DELETE FROM nsm_lead_share_config WHERE batch_id = $1', [batchId]);
+    for (const e of clean) {
+      await client.query(
+        `INSERT INTO nsm_lead_share_config (batch_id, caller_id, enabled, position) VALUES ($1,$2,$3,$4)`,
+        [batchId, e.caller_id, e.enabled, e.position]
+      );
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    client.release();
+    console.error('[admin] PUT /nsm/share-config error:', err.message);
+    return res.status(500).json({ error: 'Failed to save assignment config' });
+  }
+  client.release();
+
+  // Immediately distribute any still-unassigned leads to the new roster.
+  let assigned = 0;
+  try { assigned = await assignUnassigned(batchId); } catch (e) { /* non-fatal */ }
+  res.json({ ok: true, assigned });
+});
+
+/* Retry WhatsApp group creation for a batch whose group failed/never created. */
+router.post('/nsm/batches/:id/whatsapp/retry', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT id, batch_name FROM nsm_batches WHERE id = $1', [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Batch not found' });
+    const batch = rows[0];
+    await createBatchGroup(batch);
+    res.json({ ok: !!batch.whatsapp_group_id, whatsapp_group_id: batch.whatsapp_group_id || null, error: batch.whatsapp_group_error || null });
+  } catch (err) {
+    console.error('[admin] whatsapp/retry error:', err.message);
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+/* Send one template to a batch's WhatsApp group now (for testing; bypasses the
+   schedule, not logged in nsm_batch_messages). Body: { template_key }. */
+router.post('/nsm/batches/:id/whatsapp/test', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, batch_name, webinar_at, webinar_link, webinar_meeting_id, whatsapp_group_id
+         FROM nsm_batches WHERE id = $1`, [req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Batch not found' });
+    if (!rows[0].whatsapp_group_id) return res.status(400).json({ error: 'No WhatsApp group for this batch' });
+    const settings = await loadNsmSettings();
+    const tpl = (settings.whatsapp.templates || []).find(t => t.key === (req.body && req.body.template_key));
+    if (!tpl) return res.status(400).json({ error: 'template_key not found' });
+    const resp = await nsmWa.sendTemplate(rows[0], tpl);
+    res.json({ ok: true, resp });
+  } catch (err) {
+    console.error('[admin] whatsapp/test error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* NSM settings (WhatsApp message templates etc.) — single JSONB row, merged
+   with code defaults. Mirrors the timer-settings pattern. */
+router.get('/nsm/settings', async (_req, res) => {
+  try {
+    res.json({ settings: await loadNsmSettings() });
+  } catch (err) {
+    console.error('[admin] GET /nsm/settings error:', err.message);
+    res.status(500).json({ error: 'Failed to load settings' });
+  }
+});
+
+router.put('/nsm/settings', async (req, res) => {
+  const incoming = req.body && req.body.settings;
+  if (!incoming || typeof incoming !== 'object') return res.status(400).json({ error: 'settings object required' });
+  const merged = mergeNsmSettings(incoming);
+  try {
+    await pool.query(
+      `INSERT INTO nsm_settings (id, settings, updated_at) VALUES (1, $1::jsonb, NOW())
+       ON CONFLICT (id) DO UPDATE SET settings = EXCLUDED.settings, updated_at = NOW()`,
+      [JSON.stringify(merged)]
+    );
+    res.json({ settings: merged });
+  } catch (err) {
+    console.error('[admin] PUT /nsm/settings error:', err.message);
+    res.status(500).json({ error: 'Failed to save settings' });
+  }
+});
+
+/* whapi channel status for the Settings UI. */
+router.get('/nsm/whatsapp/status', async (_req, res) => {
+  if (!whapi.isConfigured()) return res.json({ configured: false });
+  try {
+    const h = await whapi.health();
+    res.json({
+      configured: true,
+      connected: (h.status && h.status.text) === 'AUTH',
+      account: h.user ? { name: h.user.name, id: h.user.id } : null,
+    });
+  } catch (err) {
+    res.json({ configured: true, connected: false, error: err.message });
+  }
+});
 
 /* ── GET /api/admin/leads ── */
 router.get('/leads', async (req, res) => {
@@ -1032,13 +1452,13 @@ function isMaskedKey(v) {
 }
 
 /* ── POST /api/admin/crm-users ── */
-const ALLOWED_ROLES = ['junior_caller','senior_caller','manager','trainer','admin','team_leader'];
+const ALLOWED_ROLES = ['junior_caller','senior_caller','manager','trainer','admin','team_leader','webinar','l1_sales'];
 
 const crmUserValidators = [
   body('full_name').trim().notEmpty().withMessage('Full name is required.').isLength({ max: 120 }),
   body('email').trim().isEmail().withMessage('Valid email required.').isLength({ max: 200 }),
   body('phone').optional({ checkFalsy: true }).trim().isLength({ max: 30 }),
-  body('role').isIn(ALLOWED_ROLES).withMessage('Role must be one of the 6 allowed values.'),
+  body('role').isIn(ALLOWED_ROLES).withMessage('Role must be one of the allowed values.'),
   body('password').isLength({ min: 6, max: 128 }).withMessage('Password must be 6–128 characters.'),
   body('department').optional({ nullable: true, checkFalsy: true }).isIn(['sales','marketing']).withMessage('Department must be "sales" or "marketing".'),
   body('team_leader_id').optional({ nullable: true, checkFalsy: true }).isUUID().withMessage('Team leader must be a valid user.'),
@@ -1163,7 +1583,7 @@ const crmUserPatchValidators = [
   body('full_name').optional().trim().notEmpty().withMessage('Full name cannot be empty.').isLength({ max: 120 }),
   body('email').optional().trim().isEmail().withMessage('Valid email required.').isLength({ max: 200 }),
   body('phone').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 30 }),
-  body('role').optional().isIn(ALLOWED_ROLES).withMessage('Role must be one of the 6 allowed values.'),
+  body('role').optional().isIn(ALLOWED_ROLES).withMessage('Role must be one of the allowed values.'),
   body('password').optional({ checkFalsy: true }).isLength({ min: 6, max: 128 }).withMessage('Password must be 6–128 characters.'),
   body('department').optional({ nullable: true, checkFalsy: true }).isIn(['sales','marketing']).withMessage('Department must be "sales" or "marketing".'),
   body('team_leader_id').optional({ nullable: true, checkFalsy: true }).isUUID().withMessage('Team leader must be a valid user.'),
@@ -1387,6 +1807,132 @@ router.patch('/crm-users/:id', crmUserPatchValidators, async (req, res) => {
     }
     console.error('Update crm_user error:', err.message);
     res.status(500).json({ error: 'Failed to update user.' });
+  }
+});
+
+/* ════════════════════════════════════════════════════════════════════════
+   NSM-Caller — independent staff directory (nsm_users).
+   Same CRUD + validators + scrypt hashing + key masking as /crm-users, but
+   against its own table and WITHOUT the manager/TL JWT scoping (NSM admin
+   uses the super-admin token). Meta's crm_users is left entirely untouched.
+   ════════════════════════════════════════════════════════════════════════ */
+const NSM_USER_COLS = `id, full_name, email, phone, role, is_active,
+  department, team_leader_id, manager_id, password_plain,
+  tata_extension, tata_account_type, tata_agent_number, tata_caller_id,
+  tata_smartflo_api_key, tata_outbound_route, created_at`;
+
+function maskNsmUser(u) {
+  const tata = require('../utils/tataClient');
+  return {
+    ...u,
+    tata_smartflo_api_key: u.tata_smartflo_api_key ? tata.maskKey(u.tata_smartflo_api_key) : null,
+    tata_smartflo_api_key_set: !!u.tata_smartflo_api_key,
+  };
+}
+
+router.get('/nsm/users', async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT ${NSM_USER_COLS} FROM nsm_users WHERE deleted_at IS NULL ORDER BY created_at DESC`
+    );
+    const users = rows.map(maskNsmUser);
+    res.json({ users, total: users.length });
+  } catch (err) {
+    console.error('[admin] GET /nsm/users error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
+
+router.post('/nsm/users', crmUserValidators, async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(422).json({ error: errors.array()[0].msg, fields: errors.array() });
+
+  const { full_name, email, phone, role, password, department, team_leader_id, manager_id,
+    tata_extension, tata_account_type, tata_agent_number, tata_caller_id,
+    tata_smartflo_api_key, tata_outbound_route } = req.body;
+  try {
+    const password_hash = await hashPassword(password);
+    const { rows } = await pool.query(
+      `INSERT INTO nsm_users
+         (full_name, email, phone, role, password_hash, department, team_leader_id,
+          tata_extension, tata_account_type, tata_agent_number, tata_caller_id,
+          tata_smartflo_api_key, tata_outbound_route, manager_id, password_plain)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+       RETURNING ${NSM_USER_COLS}`,
+      [
+        full_name.trim(), email.trim().toLowerCase(), phone?.trim() || null, role, password_hash,
+        department ? String(department).trim() : null, team_leader_id || null,
+        tata_extension?.trim() || null, tata_account_type?.trim() || null, tata_agent_number?.trim() || null,
+        tata_caller_id?.trim() || null, tata_smartflo_api_key?.trim() || null,
+        (tata_outbound_route === 'agent' || tata_outbound_route === 'did') ? tata_outbound_route : 'extension',
+        manager_id || null, password,
+      ]
+    );
+    res.status(201).json({ user: maskNsmUser(rows[0]) });
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'A user with this email already exists.' });
+    console.error('[admin] POST /nsm/users error:', err.message);
+    res.status(500).json({ error: 'Failed to create user.' });
+  }
+});
+
+router.patch('/nsm/users/:id', crmUserPatchValidators, async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(422).json({ error: errors.array()[0].msg, fields: errors.array() });
+
+  const { id } = req.params;
+  const allowed = ['full_name', 'email', 'phone', 'role', 'department', 'team_leader_id', 'manager_id',
+    'tata_extension', 'tata_account_type', 'tata_agent_number', 'tata_caller_id',
+    'tata_smartflo_api_key', 'tata_outbound_route', 'is_active'];
+  const tataKeys = new Set(['tata_extension', 'tata_account_type', 'tata_agent_number', 'tata_caller_id', 'tata_smartflo_api_key', 'tata_outbound_route']);
+  const updates = {};
+  for (const key of allowed) {
+    if (req.body[key] === undefined) continue;
+    const raw = req.body[key];
+    if (key === 'email') updates[key] = String(raw).trim().toLowerCase();
+    else if (tataKeys.has(key)) {
+      if (key === 'tata_smartflo_api_key' && isMaskedKey(raw)) continue;
+      if (key === 'tata_outbound_route') { const v = typeof raw === 'string' ? raw.trim() : raw; updates[key] = (v === 'agent' || v === 'did') ? v : 'extension'; }
+      else updates[key] = raw === null || raw === '' ? null : String(raw).trim() || null;
+    }
+    else if (key === 'is_active') updates[key] = !!raw;
+    else if (key === 'department' || key === 'team_leader_id' || key === 'manager_id') { const v = typeof raw === 'string' ? raw.trim() : raw; updates[key] = v ? v : null; }
+    else if (typeof raw === 'string') updates[key] = raw.trim();
+    else updates[key] = raw;
+  }
+  if (req.body.password) {
+    try { updates.password_hash = await hashPassword(req.body.password); updates.password_plain = String(req.body.password); }
+    catch (e) { return res.status(500).json({ error: 'Failed to hash password.' }); }
+  }
+  if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No fields to update.' });
+
+  const setClause = Object.keys(updates).map((k, i) => `${k} = $${i + 1}`).join(', ');
+  const values = Object.keys(updates).map(k => updates[k]);
+  values.push(id);
+  try {
+    const { rows } = await pool.query(
+      `UPDATE nsm_users SET ${setClause} WHERE id = $${values.length} AND deleted_at IS NULL RETURNING ${NSM_USER_COLS}`,
+      values
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'User not found.' });
+    res.json({ user: maskNsmUser(rows[0]) });
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'A user with this email already exists.' });
+    console.error('[admin] PATCH /nsm/users error:', err.message);
+    res.status(500).json({ error: 'Failed to update user.' });
+  }
+});
+
+router.delete('/nsm/users/:id', async (req, res) => {
+  try {
+    const { rowCount } = await pool.query(
+      `UPDATE nsm_users SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL`, [req.params.id]
+    );
+    if (rowCount === 0) return res.status(404).json({ error: 'User not found.' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[admin] DELETE /nsm/users error:', err.message);
+    res.status(500).json({ error: 'Failed to delete user.' });
   }
 });
 
@@ -1619,6 +2165,8 @@ router.get('/caller-workload', async (req, res) => {
     : istNow.toISOString().slice(0, 10);
   const dayStart = new Date(`${ymd}T00:00:00+05:30`).toISOString();
   const dayEnd   = new Date(`${ymd}T23:59:59.999+05:30`).toISOString();
+  // Workspace scope — count only this source's leads per caller.
+  const source = getSource(req);
 
   try {
     const { rows } = await pool.query(
@@ -1641,12 +2189,12 @@ router.get('/caller-workload', async (req, res) => {
               OR l.last_note_outcome = 'follow_up'
          )::int AS total_open
        FROM crm_users u
-       LEFT JOIN leads l ON l.assigned_user_id = u.id
+       LEFT JOIN leads l ON l.assigned_user_id = u.id AND l.source = $3
        WHERE u.role IN ('junior_caller','senior_caller')
          AND u.deleted_at IS NULL
        GROUP BY u.id
        ORDER BY u.is_active DESC, u.full_name ASC`,
-      [dayStart, dayEnd]
+      [dayStart, dayEnd, source]
     );
     res.json({ date: ymd, callers: rows });
   } catch (err) {
@@ -2087,6 +2635,8 @@ router.get('/sales-performance/leads-export', async (req, res) => {
 router.get('/caller-leads/:callerId', async (req, res) => {
   const { callerId } = req.params;
   if (!callerId) return res.status(400).json({ error: 'callerId required' });
+  // Workspace scope — keep YT / Meta 2.0 leads off the Meta caller page.
+  const source = getSource(req);
   try {
     const { rows } = await pool.query(
       `SELECT l.id, l.full_name, l.whatsapp_number, l.email, l.sugar_level,
@@ -2101,9 +2651,10 @@ router.get('/caller-leads/:callerId', async (req, res) => {
          FROM leads l
          LEFT JOIN webinars w ON w.id = l.webinar_id
         WHERE l.assigned_user_id = $1
+          AND l.source = $2
         ORDER BY COALESCE(l.last_note_at, l.assigned_at, l.created_at) DESC
         LIMIT 1000`,
-      [callerId]
+      [callerId, source]
     );
     res.json({ leads: rows });
   } catch (err) {
@@ -2312,6 +2863,11 @@ router.get('/sales-performance', async (req, res) => {
   const webinarId = req.query.webinar_id ? String(req.query.webinar_id) : null;
   params.push(webinarId);
   const webinarParamIdx = params.length;  // e.g. $5 if no salesperson filter
+  // Workspace scope — with "All webinars" (no webinar_id) keep the report
+  // within this source; YT / Meta 2.0 leads & their calls never count here.
+  const source = getSource(req);
+  params.push(source);
+  const sourceParamIdx = params.length;
 
   try {
     // Predicted-enrollments coefficient: enrolled-hot / total-hot over last 30 days, globally.
@@ -2411,6 +2967,7 @@ router.get('/sales-performance', async (req, res) => {
           FROM leads l CROSS JOIN w
          WHERE l.assigned_user_id IS NOT NULL
            AND ($${webinarParamIdx}::text IS NULL OR l.webinar_id::text = $${webinarParamIdx}::text)
+           AND ($${webinarParamIdx}::text IS NOT NULL OR l.source = $${sourceParamIdx}::text)
          GROUP BY l.assigned_user_id
       ),
       lead_prev AS (
@@ -2420,6 +2977,7 @@ router.get('/sales-performance', async (req, res) => {
           FROM leads l CROSS JOIN w
          WHERE l.assigned_user_id IS NOT NULL
            AND ($${webinarParamIdx}::text IS NULL OR l.webinar_id::text = $${webinarParamIdx}::text)
+           AND ($${webinarParamIdx}::text IS NOT NULL OR l.source = $${sourceParamIdx}::text)
          GROUP BY l.assigned_user_id
       ),
       call_agg AS (
@@ -2441,6 +2999,11 @@ router.get('/sales-performance', async (req, res) => {
                  SELECT 1 FROM leads ll
                   WHERE ll.id = c.lead_id
                     AND ll.webinar_id::text = $${webinarParamIdx}::text
+               ))
+           AND ($${webinarParamIdx}::text IS NOT NULL OR EXISTS (
+                 SELECT 1 FROM leads ll
+                  WHERE ll.id = c.lead_id
+                    AND ll.source = $${sourceParamIdx}::text
                ))
          GROUP BY c.caller_id
       ),
@@ -2478,6 +3041,11 @@ router.get('/sales-performance', async (req, res) => {
                   WHERE ll.id = c.lead_id
                     AND ll.webinar_id::text = $${webinarParamIdx}::text
                ))
+           AND ($${webinarParamIdx}::text IS NOT NULL OR EXISTS (
+                 SELECT 1 FROM leads ll
+                  WHERE ll.id = c.lead_id
+                    AND ll.source = $${sourceParamIdx}::text
+               ))
       ),
       attempt_agg AS (
         SELECT caller_id,
@@ -2496,6 +3064,11 @@ router.get('/sales-performance', async (req, res) => {
                  SELECT 1 FROM leads ll
                   WHERE ll.id = c.lead_id
                     AND ll.webinar_id::text = $${webinarParamIdx}::text
+               ))
+           AND ($${webinarParamIdx}::text IS NOT NULL OR EXISTS (
+                 SELECT 1 FROM leads ll
+                  WHERE ll.id = c.lead_id
+                    AND ll.source = $${sourceParamIdx}::text
                ))
          GROUP BY c.caller_id
       )
@@ -2601,7 +3174,12 @@ router.get('/caller-report', async (req, res) => {
   const dayStart = new Date(`${fromYmd}T00:00:00+05:30`).toISOString();
   const dayEnd   = new Date(`${toYmd}T23:59:59.999+05:30`).toISOString();
   const webinarId = req.query.webinar_id ? String(req.query.webinar_id) : null;
-  const params = [dayStart, dayEnd, webinarId]; // $1, $2, $3
+  // Workspace scope. With "All webinars" (no webinar_id) the report must stay
+  // within the current workspace's source — otherwise a caller who also works
+  // YT / Meta 2.0 leads would have those counted on the Meta page. Defaults to
+  // 'meta' (see getSource). Mirrors the source filter on /api/admin/webinars.
+  const source = getSource(req);
+  const params = [dayStart, dayEnd, webinarId, source]; // $1, $2, $3, $4
 
   try {
     const { rows } = await pool.query(`
@@ -2634,6 +3212,12 @@ router.get('/caller-report', async (req, res) => {
            AND ($3::text IS NULL OR EXISTS (
                  SELECT 1 FROM leads ll
                   WHERE ll.id = c.lead_id AND ll.webinar_id::text = $3::text
+               ))
+           -- With no specific webinar, keep activity within the workspace
+           -- source: only count calls tied to a lead of this source.
+           AND ($3::text IS NOT NULL OR EXISTS (
+                 SELECT 1 FROM leads ll
+                  WHERE ll.id = c.lead_id AND ll.source = $4::text
                ))
          GROUP BY c.caller_id
       ),
@@ -2684,6 +3268,9 @@ router.get('/caller-report', async (req, res) => {
           LEFT JOIN webinars web ON web.id = l.webinar_id
          WHERE l.assigned_user_id IS NOT NULL
            AND ($3::text IS NULL OR l.webinar_id::text = $3::text)
+           -- "All webinars" means "all webinars of THIS source" — exclude
+           -- YT / Meta 2.0 (and test) leads from the Meta page.
+           AND ($3::text IS NOT NULL OR l.source = $4::text)
          GROUP BY l.assigned_user_id
       )
       SELECT cb.caller_id, cb.name, cb.role, cb.is_active, cb.tata_extension,
@@ -2800,15 +3387,19 @@ router.get('/leads/assignment-pool', async (req, res) => {
   if (!from || !to) {
     return res.status(400).json({ error: 'from and to ISO datetime params are required' });
   }
+  // Workspace scope — the manual-assign pool must only ever offer THIS source's
+  // leads, so YT / Meta 2.0 leads can never be handed to a Meta caller.
+  const source = getSource(req);
   try {
     const { rows: poolRows } = await pool.query(
       `SELECT COUNT(*)::int AS available
          FROM leads
         WHERE assigned_user_id IS NULL
+          AND source = $4::text
           AND created_at >= $1::timestamptz
           AND created_at <= $2::timestamptz
           AND ($3::text IS NULL OR webinar_id::text = $3::text)`,
-      [from, to, webinar_id || null]
+      [from, to, webinar_id || null, source]
     );
     const { rows: callers } = await pool.query(
       `SELECT u.id, u.full_name, u.role, u.is_active,
@@ -2817,12 +3408,13 @@ router.get('/leads/assignment-pool', async (req, res) => {
                    OR l.last_note_outcome = 'follow_up'
               )::int AS open_count
          FROM crm_users u
-         LEFT JOIN leads l ON l.assigned_user_id = u.id
+         LEFT JOIN leads l ON l.assigned_user_id = u.id AND l.source = $1
         WHERE u.is_active = TRUE
           AND u.role IN ('junior_caller','senior_caller')
           AND u.deleted_at IS NULL
         GROUP BY u.id
-        ORDER BY u.role DESC, u.full_name ASC`
+        ORDER BY u.role DESC, u.full_name ASC`,
+      [source]
     );
     res.json({ available: poolRows[0]?.available || 0, callers });
   } catch (err) {
@@ -2881,6 +3473,10 @@ router.post('/leads/manual-assign', async (req, res) => {
   }
 
   const totalRequested = distribution.reduce((s, r) => s + r.count, 0);
+  // Workspace scope — only ever hand out THIS source's leads. Without this a
+  // manual "assign all" on the Meta page would pull YT / Meta 2.0 unassigned
+  // leads into Meta callers' queues.
+  const source = getSource(req);
 
   const client = await pool.connect();
   try {
@@ -2904,13 +3500,14 @@ router.post('/leads/manual-assign', async (req, res) => {
     const { rows: pool_ } = await client.query(
       `SELECT id FROM leads
         WHERE assigned_user_id IS NULL
+          AND source = $5::text
           AND created_at >= $1::timestamptz
           AND created_at <= $2::timestamptz
           AND ($4::text IS NULL OR webinar_id::text = $4::text)
         ORDER BY created_at ASC
         FOR UPDATE SKIP LOCKED
         LIMIT $3`,
-      [from, to, totalRequested, webinar_id || null]
+      [from, to, totalRequested, webinar_id || null, source]
     );
     const available = pool_.length;
 

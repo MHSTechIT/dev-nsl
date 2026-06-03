@@ -43,8 +43,10 @@ function extFromContentType(ct) {
  * @param {string} args.callId        – calls.id (primary key, used for filename)
  * @param {string} args.recordingUrl  – Smartflo URL from the webhook payload
  * @param {string} [args.callerId]    – crm_users.id; used to resolve auth key
+ * @param {string} [args.callsTable]  – calls table to update (Meta 'calls' default, NSM 'nsm_calls')
+ * @param {string} [args.usersTable]  – users table for the API-key lookup ('crm_users' default, NSM 'nsm_users')
  */
-async function downloadRecording({ callId, recordingUrl, callerId }) {
+async function downloadRecording({ callId, recordingUrl, callerId, callsTable = 'calls', usersTable = 'crm_users' }) {
   if (!callId || !recordingUrl) return;
   ensureDir();
 
@@ -54,7 +56,7 @@ async function downloadRecording({ callId, recordingUrl, callerId }) {
     if (callerId) {
       const { rows } = await pool.query(
         `SELECT tata_account_type, tata_smartflo_api_key
-           FROM crm_users WHERE id = $1`,
+           FROM ${usersTable} WHERE id = $1`,
         [callerId]
       );
       if (rows[0]) {
@@ -101,7 +103,7 @@ async function downloadRecording({ callId, recordingUrl, callerId }) {
   const localUrl = `/uploads/recordings/${file}`;
   try {
     await pool.query(
-      `UPDATE calls SET recording_url = $1, updated_at = NOW() WHERE id = $2`,
+      `UPDATE ${callsTable} SET recording_url = $1, updated_at = NOW() WHERE id = $2`,
       [localUrl, callId]
     );
   } catch (err) {

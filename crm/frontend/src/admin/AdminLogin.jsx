@@ -9,6 +9,8 @@ const ROLE_ROUTE = {
   trainer:       '/caller/senior',  // placeholder
   admin:         '/caller/senior',  // placeholder
   team_leader:   '/tl',             // dedicated TL dashboard (Web Reminder, team-scoped)
+  webinar:       '/caller/senior',  // placeholder — give Webinar its own view later
+  l1_sales:      '/caller/senior',  // placeholder — give L1 Sales its own view later
 };
 
 export default function AdminLogin({ onLogin }) {

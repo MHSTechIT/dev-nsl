@@ -26,11 +26,11 @@ let _lastResult = { ranAt: null, fetched: 0, upserted: 0, error: null };
  * reopened, unparks Next-Batch leads, and pins the lead to the top of the
  * owner's Assigned page. Pushes SSE so the page refreshes live.
  */
-async function autoAssignMissedCallLead(leadId) {
+async function autoAssignMissedCallLead(leadId, leadsTable = 'leads') {
   if (!leadId) return;
   try {
     const { rows } = await pool.query(
-      `UPDATE leads
+      `UPDATE ${leadsTable}
           SET last_note_outcome    = NULL,
               last_note_interested = NULL,
               last_note_at         = NULL,
@@ -56,7 +56,7 @@ async function autoAssignMissedCallLead(leadId) {
   }
 }
 
-async function syncOnce({ lookbackMinutes = 30 } = {}) {
+async function syncOnce({ lookbackMinutes = 30, calls = 'calls', leads = 'leads', phoneCol = 'whatsapp_number' } = {}) {
   if (_running) return { skipped: 'already_running' };
   _running = true;
   const startedAt = new Date();
@@ -76,16 +76,16 @@ async function syncOnce({ lookbackMinutes = 30 } = {}) {
       let leadId = null, callerUserId = null;
       if (n.phone10 && n.phone10.length === 10) {
         try {
-          const { rows: leads } = await pool.query(
-            `SELECT id, assigned_user_id FROM leads
-              WHERE RIGHT(REGEXP_REPLACE(whatsapp_number, '\\D', '', 'g'), 10) = $1
+          const { rows: leadRows } = await pool.query(
+            `SELECT id, assigned_user_id FROM ${leads}
+              WHERE RIGHT(REGEXP_REPLACE(${phoneCol}, '\\D', '', 'g'), 10) = $1
               ORDER BY assigned_at DESC NULLS LAST
               LIMIT 1`,
             [n.phone10]
           );
-          if (leads[0]) {
-            leadId = leads[0].id;
-            callerUserId = leads[0].assigned_user_id;
+          if (leadRows[0]) {
+            leadId = leadRows[0].id;
+            callerUserId = leadRows[0].assigned_user_id;
           }
         } catch (_) { /* lookup failure is non-fatal */ }
       }
@@ -93,7 +93,7 @@ async function syncOnce({ lookbackMinutes = 30 } = {}) {
       // Upsert by provider_call_id. If the row exists, refresh status fields.
       try {
         const existing = await pool.query(
-          'SELECT id, status FROM calls WHERE provider_call_id = $1 LIMIT 1',
+          `SELECT id, status FROM ${calls} WHERE provider_call_id = $1 LIMIT 1`,
           [n.provider_call_id]
         );
         const callerPhone10 = n.phone10 && n.phone10.length === 10 ? n.phone10 : null;
@@ -105,7 +105,7 @@ async function syncOnce({ lookbackMinutes = 30 } = {}) {
           // auto-assign exactly once. Re-polls of an already-missed call skip.
           const wasMissed = existing.rows[0].status === 'missed';
           await pool.query(
-            `UPDATE calls
+            `UPDATE ${calls}
                 SET status        = COALESCE($2, status),
                     duration_sec  = COALESCE($3, duration_sec),
                     recording_url = COALESCE($4, recording_url),
@@ -133,10 +133,10 @@ async function syncOnce({ lookbackMinutes = 30 } = {}) {
           );
           // Just transitioned into 'missed' — pin the lead to the caller's
           // Assigned page as their next call.
-          if (!wasMissed && leadId) await autoAssignMissedCallLead(leadId);
+          if (!wasMissed && leadId) await autoAssignMissedCallLead(leadId, leads);
         } else {
           await pool.query(
-            `INSERT INTO calls
+            `INSERT INTO ${calls}
                (lead_id, caller_id, provider_call_id, direction, status,
                 duration_sec, recording_url, started_at, raw_payload, caller_phone, did_number)
              VALUES ($1, $2, $3, 'inbound', 'missed', $4, $5,
@@ -157,7 +157,7 @@ async function syncOnce({ lookbackMinutes = 30 } = {}) {
 
           // New inbound missed call — pin the lead to the caller's Assigned
           // page as their next call.
-          if (leadId) await autoAssignMissedCallLead(leadId);
+          if (leadId) await autoAssignMissedCallLead(leadId, leads);
 
           // Push SSE so the Missed Calls page refreshes instantly if it's open
           if (callerUserId) {

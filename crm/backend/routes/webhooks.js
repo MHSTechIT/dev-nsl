@@ -1,8 +1,13 @@
 /**
- * Public webhook receivers. Mounted at /api/webhooks.
+ * Public webhook receivers. Tata posts here with NO auth and NO workspace
+ * marker, so each workspace gets its OWN public mount running the SAME handler
+ * against its own tables (app.js):
  *
- *   POST /api/webhooks/tata                   – original Tata endpoint (kept for back-compat)
- *   POST /api/webhooks/tata-tele/recording    – Smartflo's expected path (new alias)
+ *   /api/webhooks/*       → Meta tables (calls / leads / crm_users)   [byte-identical to the original]
+ *   /api/nsm-webhooks/*   → NSM tables  (nsm_calls / nsm_leads / nsm_users)
+ *
+ *   POST .../tata                   – original Tata endpoint (kept for back-compat)
+ *   POST .../tata-tele/recording    – Smartflo's expected path (alias)
  *
  * Tata posts JSON when a call's state changes (initiated/ringing/answered/
  * ended/missed/failed) or when a recording becomes available. The handler:
@@ -14,9 +19,11 @@
  *   5. If recording_url arrived, schedules a background download to local disk
  *      so the URL never expires.
  *   6. Pushes SSE 'call.update' to the caller so their CRM tab updates live.
+ *
+ * Exported as a factory so the per-workspace table set is injected once at
+ * mount time. Default args reproduce the Meta literals byte-for-byte.
  */
 const express   = require('express');
-const router    = express.Router();
 const pool      = require('../db');
 const tata      = require('../utils/tataClient');
 const callerSse = require('../utils/callerSse');
@@ -54,45 +61,64 @@ function rawBodyParser(req, res, next) {
   });
 }
 
-/* 4-tier lead matching. Returns lead_id or null. */
-async function resolveLeadId(event, payload) {
-  // 1. custom_identifier.lead_id (from our outbound payload)
-  if (event.custom_lead_id) {
-    const { rows } = await pool.query('SELECT id FROM leads WHERE id = $1', [event.custom_lead_id]);
-    if (rows[0]) return rows[0].id;
-  }
+/**
+ * Build a webhook router bound to one workspace's tables. Default args are the
+ * exact Meta literals, so the Meta mount's SQL is unchanged.
+ *
+ *   calls – calls table   (Meta 'calls'      | NSM 'nsm_calls')
+ *   leads – leads table   (Meta 'leads'      | NSM 'nsm_leads')
+ *   users – users table   (Meta 'crm_users'  | NSM 'nsm_users') — only used to
+ *           resolve the recording-download auth key.
+ */
+function createWebhooksRouter({ calls = 'calls', leads = 'leads', users = 'crm_users' } = {}) {
+  const router = express.Router();
 
-  // 2. body-level lead_id from various payload shapes
-  const bodyLead = payload?.lead_id || payload?.leadId || payload?.LeadID || null;
-  if (bodyLead) {
-    const { rows } = await pool.query('SELECT id FROM leads WHERE id = $1', [bodyLead]);
-    if (rows[0]) return rows[0].id;
-  }
+  // Lead-table column differences between workspaces:
+  //   phone:   Meta leads.whatsapp_number  vs  NSM nsm_leads.phone
+  //   created: Meta leads.created_at       vs  NSM nsm_leads.created_time
+  const isMeta     = leads === 'leads';
+  const phoneCol   = isMeta ? 'whatsapp_number' : 'phone';
+  const createdCol = isMeta ? 'created_at'      : 'created_time';
 
-  // 3. previous calls row for the same provider_call_id
-  if (event.provider_call_id) {
-    const { rows } = await pool.query(
-      'SELECT lead_id FROM calls WHERE provider_call_id = $1 AND lead_id IS NOT NULL LIMIT 1',
-      [event.provider_call_id]
-    );
-    if (rows[0]?.lead_id) return rows[0].lead_id;
-  }
+  /* 4-tier lead matching. Returns lead_id or null. */
+  async function resolveLeadId(event, payload) {
+    // 1. custom_identifier.lead_id (from our outbound payload)
+    if (event.custom_lead_id) {
+      const { rows } = await pool.query(`SELECT id FROM ${leads} WHERE id = $1`, [event.custom_lead_id]);
+      if (rows[0]) return rows[0].id;
+    }
 
-  // 4. phone last-10 match against leads.whatsapp_number
-  const customer = String(event.customer_number || '').replace(/\D/g, '').slice(-10);
-  if (customer.length === 10) {
-    const { rows } = await pool.query(
-      `SELECT id FROM leads
-        WHERE RIGHT(REGEXP_REPLACE(whatsapp_number, '\\D', '', 'g'), 10) = $1
-        ORDER BY created_at DESC
-        LIMIT 1`,
-      [customer]
-    );
-    if (rows[0]) return rows[0].id;
-  }
+    // 2. body-level lead_id from various payload shapes
+    const bodyLead = payload?.lead_id || payload?.leadId || payload?.LeadID || null;
+    if (bodyLead) {
+      const { rows } = await pool.query(`SELECT id FROM ${leads} WHERE id = $1`, [bodyLead]);
+      if (rows[0]) return rows[0].id;
+    }
 
-  return null;
-}
+    // 3. previous calls row for the same provider_call_id
+    if (event.provider_call_id) {
+      const { rows } = await pool.query(
+        `SELECT lead_id FROM ${calls} WHERE provider_call_id = $1 AND lead_id IS NOT NULL LIMIT 1`,
+        [event.provider_call_id]
+      );
+      if (rows[0]?.lead_id) return rows[0].lead_id;
+    }
+
+    // 4. phone last-10 match against the lead phone column
+    const customer = String(event.customer_number || '').replace(/\D/g, '').slice(-10);
+    if (customer.length === 10) {
+      const { rows } = await pool.query(
+        `SELECT id FROM ${leads}
+          WHERE RIGHT(REGEXP_REPLACE(${phoneCol}, '\\D', '', 'g'), 10) = $1
+          ORDER BY ${createdCol} DESC
+          LIMIT 1`,
+        [customer]
+      );
+      if (rows[0]) return rows[0].id;
+    }
+
+    return null;
+  }
 
 /* Single handler used by every Tata webhook path. The `routeKind` argument
    identifies which Tata trigger fired and drives:
@@ -144,7 +170,7 @@ function makeTataHandler(routeKind) {
     try {
       if (leadId) {
         const existing = await pool.query(
-          `SELECT id, provider_call_id FROM calls
+          `SELECT id, provider_call_id FROM ${calls}
              WHERE provider_call_id = $1
              LIMIT 1`,
           [event.provider_call_id]
@@ -153,11 +179,11 @@ function makeTataHandler(routeKind) {
           // No row yet for this Tata id — try to adopt a recent unmatched
           // /calls/start row for this lead.
           await pool.query(
-            `UPDATE calls
+            `UPDATE ${calls}
                 SET provider_call_id = $2,
                     updated_at = NOW()
               WHERE id = (
-                SELECT id FROM calls
+                SELECT id FROM ${calls}
                  WHERE lead_id = $1
                    AND started_at > NOW() - INTERVAL '5 minutes'
                    AND status NOT IN ('ended','missed','failed')
@@ -202,7 +228,7 @@ function makeTataHandler(routeKind) {
       if (leadId) { sets.push(`lead_id = COALESCE(lead_id, $${i++})`); params.push(leadId); }
 
       const { rows } = await pool.query(
-        `UPDATE calls SET ${sets.join(', ')}
+        `UPDATE ${calls} SET ${sets.join(', ')}
           WHERE provider_call_id = $1
           RETURNING id, lead_id, caller_id, status, recording_url, duration_sec, provider_call_id,
                     agent_answered_at, customer_answered_at, customer_missed_at, ended_at, hangup_by,
@@ -214,7 +240,7 @@ function makeTataHandler(routeKind) {
         // Webhook for a call we never recorded (e.g. inbound, or out-of-order arrival)
         // Insert a fresh row so we don't lose the recording.
         const ins = await pool.query(
-          `INSERT INTO calls (lead_id, provider_call_id, status, duration_sec,
+          `INSERT INTO ${calls} (lead_id, provider_call_id, status, duration_sec,
                               recording_url, error_message, raw_payload,
                               answered_at, ended_at,
                               agent_answered_at, customer_answered_at, customer_missed_at, hangup_by)
@@ -332,13 +358,15 @@ function makeTataHandler(routeKind) {
           callId:       callRow.id,
           recordingUrl: event.recording_url,
           callerId:     callRow.caller_id,
+          callsTable:   calls,
+          usersTable:   users,
         })
         .then(() => {
           // Push a follow-up SSE so the audio src refreshes to the local copy
           if (callRow.caller_id) {
             pool.query(
               `SELECT id, lead_id, caller_id, status, recording_url, duration_sec
-                 FROM calls WHERE id = $1`,
+                 FROM ${calls} WHERE id = $1`,
               [callRow.id]
             ).then(r => {
               if (r.rows[0]) callerSse.pushTo(callRow.caller_id, { type: 'call.update', call: r.rows[0] });
@@ -380,8 +408,8 @@ router.post('/tata/dialplan', express.json(), async (req, res) => {
       try {
         const { rows } = await pool.query(
           `SELECT id, full_name, assigned_user_id
-             FROM leads
-            WHERE RIGHT(REGEXP_REPLACE(whatsapp_number, '\\D', '', 'g'), 10) = $1
+             FROM ${leads}
+            WHERE RIGHT(REGEXP_REPLACE(${phoneCol}, '\\D', '', 'g'), 10) = $1
             ORDER BY assigned_at DESC NULLS LAST
             LIMIT 1`,
           [phone10]
@@ -399,7 +427,7 @@ router.post('/tata/dialplan', express.json(), async (req, res) => {
     if (uuid) {
       try {
         await pool.query(
-          `INSERT INTO calls
+          `INSERT INTO ${calls}
              (lead_id, caller_id, provider_call_id, direction, status, raw_payload)
            VALUES ($1, $2, $3, 'inbound', 'ringing', $4)
            ON CONFLICT (provider, provider_call_id) DO NOTHING`,
@@ -410,7 +438,7 @@ router.post('/tata/dialplan', express.json(), async (req, res) => {
         // index doesn't exist; the row just won't be deduped.
         try {
           await pool.query(
-            `INSERT INTO calls (lead_id, caller_id, provider_call_id, direction, status, raw_payload)
+            `INSERT INTO ${calls} (lead_id, caller_id, provider_call_id, direction, status, raw_payload)
              VALUES ($1, $2, $3, 'inbound', 'ringing', $4)`,
             [leadRow?.id || null, leadRow?.assigned_user_id || null, uuid, body]
           );
@@ -437,6 +465,12 @@ router.post('/tata/dialplan', express.json(), async (req, res) => {
     console.error('[webhooks/tata/dialplan] error:', e.message);
     res.status(200).json({});  // never block Tata's call routing
   }
-});
+  });
 
-module.exports = router;
+  return router;
+}
+
+module.exports = createWebhooksRouter;
+// Back-compat default export shape: callers that did `require('./webhooks')`
+// previously got a router. They now get the factory; app.js calls it explicitly
+// per workspace.

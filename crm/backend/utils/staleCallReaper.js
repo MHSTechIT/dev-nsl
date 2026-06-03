@@ -22,11 +22,11 @@ const DEFAULT_STALE_AFTER_MS = 3 * 60 * 1000;    // 3 min — generous enough
 
 let _timer = null;
 
-async function reapOnce(staleAfterMs) {
+async function reapOnce(staleAfterMs, { calls = 'calls', activity = 'caller_activity_events' } = {}) {
   const cutoffMin = Math.ceil(staleAfterMs / 60000);
   try {
     const { rows } = await pool.query(
-      `UPDATE calls
+      `UPDATE ${calls}
           SET status      = 'failed',
               ended_at    = COALESCE(ended_at, NOW()),
               error_message = COALESCE(error_message, 'stale-call-reaper'),
@@ -57,7 +57,7 @@ async function reapOnce(staleAfterMs) {
       if (r.caller_id) {
         try {
           await pool.query(
-            `UPDATE caller_activity_events
+            `UPDATE ${activity}
                 SET ended_at     = NOW(),
                     duration_sec = GREATEST(0, EXTRACT(EPOCH FROM (NOW() - started_at))::int),
                     context      = COALESCE(context, '{}'::jsonb) ||
@@ -95,12 +95,13 @@ async function reapOnce(staleAfterMs) {
 function startStaleCallReaper({
   intervalMs    = DEFAULT_INTERVAL_MS,
   staleAfterMs  = DEFAULT_STALE_AFTER_MS,
+  tables,   // { calls, activity } — omit for Meta (defaults inside reapOnce)
 } = {}) {
   if (_timer) return;
   console.log(`[staleCallReaper] scheduler started — every ${Math.round(intervalMs/1000)}s, stale ≥ ${Math.round(staleAfterMs/60000)}min`);
-  _timer = setInterval(() => { reapOnce(staleAfterMs); }, intervalMs);
+  _timer = setInterval(() => { reapOnce(staleAfterMs, tables); }, intervalMs);
   // Fire once on startup so stuck rows from a previous restart get cleared.
-  setTimeout(() => reapOnce(staleAfterMs), 5000);
+  setTimeout(() => reapOnce(staleAfterMs, tables), 5000);
 }
 
 function stopStaleCallReaper() {

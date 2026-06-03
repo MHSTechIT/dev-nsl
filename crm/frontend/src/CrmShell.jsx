@@ -3,6 +3,10 @@ import AdminLogin           from './admin/AdminLogin';
 import MarketingModule      from './modules/MarketingModule';
 import UsersModule          from './modules/UsersModule';
 import SalesDashboardModule from './modules/SalesDashboardModule';
+import ZoomModule           from './modules/ZoomModule';
+import NsmMarketingModule   from './modules/NsmMarketingModule';
+import NsmUsersModule       from './modules/NsmUsersModule';
+import NsmSalesDashboard    from './modules/NsmSalesDashboard';
 
 const MODULES = [
   {
@@ -41,12 +45,24 @@ const MODULES = [
     ),
     enabled: true,
   },
+  {
+    id: 'zoom',
+    label: 'Zoom',
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polygon points="23 7 16 12 23 17 23 7"/>
+        <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+      </svg>
+    ),
+    enabled: true,
+  },
 ];
 
 const MODULE_TITLES = {
   marketing: { title: 'Page Performance', subtitle: 'Marketing dashboard' },
   users:     { title: 'Users',            subtitle: 'Manage staff and access' },
   sales:     { title: 'Web Reminder',     subtitle: 'Revenue and pipeline metrics' },
+  zoom:      { title: 'Zoom',             subtitle: 'Webinar & meeting integration' },
 };
 
 function ComingSoonPanel({ label }) {
@@ -67,9 +83,11 @@ function ComingSoonPanel({ label }) {
 }
 
 const WORKSPACES = [
-  { id: 'meta',  label: 'Meta'     },
-  { id: 'yt',    label: 'YT'       },
-  { id: 'meta2', label: 'Meta 2.0' },
+  { id: 'meta',       label: 'Meta'       },
+  { id: 'yt',         label: 'YT'         },
+  { id: 'meta2',      label: 'Meta 2.0'   },
+  { id: 'nsm-caller', label: 'NSM-Caller' },
+  { id: 'nsm-ivr',    label: 'NSM-IVR'    },
 ];
 
 export default function CrmShell() {
@@ -237,7 +255,7 @@ export default function CrmShell() {
                   return (
                     <button
                       key={w.id}
-                      onClick={() => { setWorkspace(w.id); setWsOpen(false); if (w.id === 'meta') setActive('marketing'); }}
+                      onClick={() => { setWorkspace(w.id); setWsOpen(false); if (w.id === 'meta' || w.id === 'nsm-ivr') setActive('marketing'); }}
                       style={{
                         width: '100%', display: 'flex', alignItems: 'center', gap: 8,
                         padding: '8px 10px', borderRadius: 8, border: 'none',
@@ -260,7 +278,7 @@ export default function CrmShell() {
           </div>
           )}
 
-          {MODULES.map(m => {
+          {MODULES.filter(m => workspace !== 'nsm-ivr' || m.id === 'marketing').map(m => {
             const isActive = activeModule === m.id;
             return (
               <button
@@ -372,14 +390,33 @@ export default function CrmShell() {
         </div>
 
         {/* Active module — Marketing is wired for both Meta and YT (filtered by source).
-            Users + Sales are Meta-only for now; YT shows a coming-soon placeholder. */}
-        {activeModule === 'marketing' && <MarketingModule token={token} source={workspace} />}
-        {activeModule === 'users' && (workspace === 'meta'
-          ? <UsersModule token={token} />
-          : <ComingSoonPanel label="YT · Users" />)}
-        {activeModule === 'sales' && (workspace === 'meta'
-          ? <SalesDashboardModule token={token} />
-          : <ComingSoonPanel label="YT · Sales" />)}
+            Users + Sales are Meta-only for now; YT shows a coming-soon placeholder.
+            NSM-Caller is a brand-new workspace with no modules wired yet — show a
+            placeholder for every tab so it never falls back to Meta's source data. */}
+        {workspace === 'nsm-caller' ? (
+          activeModule === 'marketing'
+            ? <NsmMarketingModule token={token} />
+            : activeModule === 'users'
+            ? <NsmUsersModule token={token} />
+            : activeModule === 'sales'
+            ? <NsmSalesDashboard token={token} />
+            : <ComingSoonPanel label={`NSM-Caller · ${MODULE_TITLES[activeModule]?.title || 'Dashboard'}`} />
+        ) : workspace === 'nsm-ivr' ? (
+          activeModule === 'marketing'
+            ? <NsmMarketingModule token={token} source="nsm-ivr" apiBase="/api/admin/nsm-ivr" />
+            : <ComingSoonPanel label={`NSM-IVR · ${MODULE_TITLES[activeModule]?.title || 'Dashboard'}`} />
+        ) : (
+          <>
+            {activeModule === 'marketing' && <MarketingModule token={token} source={workspace} />}
+            {activeModule === 'users' && (workspace === 'meta'
+              ? <UsersModule token={token} />
+              : <ComingSoonPanel label="YT · Users" />)}
+            {activeModule === 'sales' && (workspace === 'meta'
+              ? <SalesDashboardModule token={token} />
+              : <ComingSoonPanel label="YT · Sales" />)}
+            {activeModule === 'zoom' && <ZoomModule token={token} source={workspace} />}
+          </>
+        )}
       </main>
     </div>
   );

@@ -38,6 +38,11 @@ const schedulerManager                          = require('../utils/schedulerMan
 const { mergeTimerSettings }                    = require('../utils/timerDefaults');
 const leadsAlertScheduler                       = require('../utils/leadsAlertScheduler');
 const { startLinkSwapScheduler }                = require('../utils/linkSwapScheduler');
+const nsmLeadsSync                              = require('../utils/nsmLeadsSync');
+const nsmWhatsappScheduler                      = require('../utils/nsmWhatsappScheduler');
+const nsmIvrLeadsSync                           = require('../utils/nsmIvrLeadsSync');
+const nsmIvrWhatsappScheduler                   = require('../utils/nsmIvrWhatsappScheduler');
+const nsmIvrCallScheduler                       = require('../utils/nsmIvrCallScheduler');
 
 const { startListener }                         = require('../utils/pgListener');
 const { handleLeadCreated, sweepUnassignedLeads } = require('../utils/leadCreatedListener');
@@ -94,7 +99,38 @@ app.listen(PORT, () => {
     });
     console.log('[Sheets Sync] Daily sync scheduled at 11:55 PM IST');
     startDailyReconciliation();
+
+    // NSM-IVR CloudShope before/after voice calls — a real, paid, person-
+    // reaching mutation, so it is GATED (only the prod instance dials; local
+    // dev with DISABLE_SCHEDULERS=true never places calls). Exactly-once across
+    // instances is also guaranteed by the per-lead DB claim.
+    nsmIvrCallScheduler.startScheduler();
+    // NSM-Caller IVR (same Cloudshope engine, scheduled from the caller
+    // workspace's own IVR page against nsm_leads). Also gated.
+    nsmIvrCallScheduler.startCallerScheduler();
   }
+
+  // Local NSM-IVR test dialing: when DISABLE_SCHEDULERS=true (dev) but
+  // NSM_IVR_LOCAL_DIAL=true, start ONLY the NSM-IVR Cloudshope scheduler on this
+  // box so calls can be tested end-to-end. NSM-Caller + Meta stay off. These are
+  // real, paid, person-reaching calls — enable deliberately in .env.
+  if (DISABLE_SCHEDULERS && process.env.NSM_IVR_LOCAL_DIAL === 'true') {
+    console.log('[crm] NSM_IVR_LOCAL_DIAL=true → starting NSM-IVR Cloudshope scheduler locally (NSM-IVR ONLY; places REAL calls)');
+    nsmIvrCallScheduler.startScheduler();
+  }
+
+  // NSM-Caller lead sync runs on EVERY instance (NOT gated by
+  // DISABLE_SCHEDULERS) because it's idempotent: it only reads from Meta and
+  // upserts into nsm_leads keyed by meta_lead_id, so double-running across
+  // dev + prod is harmless (just redundant Meta reads). Pulls every 30s and is
+  // incremental, so steady-state ticks are cheap.
+  nsmLeadsSync.startScheduler();
+  // WhatsApp reminder scheduler — also idempotent (DB-locked per template), so
+  // it runs on every instance too.
+  nsmWhatsappScheduler.startScheduler();
+  // NSM-IVR (independent) — same idempotent, DB-locked schedulers on nsm_ivr_* tables.
+  nsmIvrLeadsSync.startScheduler();
+  nsmIvrWhatsappScheduler.startScheduler();
 
   if (DISABLE_LEAD_LISTENER) {
     console.log('[crm] DISABLE_LEAD_LISTENER=true → skipping lead.created LISTEN + boot sweep');

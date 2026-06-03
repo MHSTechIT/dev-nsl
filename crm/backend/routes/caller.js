@@ -10,6 +10,7 @@ const router  = express.Router();
 const pool    = require('../db');
 const callerSse = require('../utils/callerSse');
 const { callerAuth } = require('../middleware/callerAuth');
+const { workspaceConfig } = require('../utils/callerWorkspace');
 const tataInboundSync = require('../utils/tataInboundSync');
 const activityLogger = require('../utils/activityLogger');
 const { notifyAutoPause } = require('../utils/telegramNotifier');
@@ -37,11 +38,12 @@ router.post('/heartbeat', async (req, res) => {
   if (!allowed.has(status)) {
     return res.status(422).json({ error: 'status must be one of: working, on_break, idle' });
   }
+  const cfg = workspaceConfig(req.caller.workspace);
   try {
     // Fetch previous state so we can update rest_started_at correctly,
     // and detect transitions for the activity audit log.
     const { rows: prev } = await pool.query(
-      'SELECT activity_status, rest_started_at, last_heartbeat_at, is_active FROM crm_users WHERE id = $1',
+      `SELECT activity_status, rest_started_at, last_heartbeat_at, is_active FROM ${cfg.users} WHERE id = $1`,
       [req.caller.id]
     );
     const prevStatus = prev[0]?.activity_status || null;
@@ -59,7 +61,7 @@ router.post('/heartbeat', async (req, res) => {
     }
 
     await pool.query(
-      `UPDATE crm_users
+      `UPDATE ${cfg.users}
           SET activity_status   = $1,
               activity_break    = $2::jsonb,
               last_heartbeat_at = NOW(),
@@ -80,7 +82,7 @@ router.post('/heartbeat', async (req, res) => {
       const callerId = req.caller.id;
       const gapMs = prevHb ? Date.now() - new Date(prevHb).getTime() : Infinity;
       if (!prevHb || gapMs > 90_000) {
-        await activityLogger.logPointEvent(callerId, 'LOGGED_IN');
+        await activityLogger.logPointEvent(callerId, 'LOGGED_IN', null, cfg.activity);
       }
 
       // Break-overrun auto-pause: >10 min past the break's end time pauses
@@ -93,13 +95,13 @@ router.post('/heartbeat', async (req, res) => {
         const isOther    = ![TEA_LABEL, LUNCH_LABEL, TWOHR_LABEL].includes(breakInfo.reason);
         if (overtimeMs > 10 * 60_000 && (!isOther || elapsedMs > 30 * 60_000)) {
           await pool.query(
-            `UPDATE crm_users
+            `UPDATE ${cfg.users}
                 SET is_active = FALSE, auto_paused_at = NOW(), auto_pause_reason = $2
               WHERE id = $1`,
             [callerId, 'break_overrun']
           );
           try { callerSse.pushTo(callerId, { type: 'caller.paused' }); } catch (_) {}
-          await activityLogger.switchTag(callerId, 'BLOCKED', { reason: 'break_overrun' });
+          await activityLogger.switchTag(callerId, 'BLOCKED', { reason: 'break_overrun' }, cfg.activity);
           notifyAutoPause(callerId, 'break_overrun').catch(() => {});
           autoPaused = true;
         }
@@ -107,7 +109,7 @@ router.post('/heartbeat', async (req, res) => {
 
       // Switch the single open span to the frontend-derived tag.
       if (!autoPaused && tag && activityLogger.SPAN_TAGS.has(tag)) {
-        await activityLogger.switchTag(callerId, tag, context || null);
+        await activityLogger.switchTag(callerId, tag, context || null, cfg.activity);
       }
     } catch (logErr) {
       console.error('caller/heartbeat activity log error:', logErr.message);
@@ -146,11 +148,12 @@ const TEA_LABEL   = 'Tea Break';
 const LUNCH_LABEL = 'Lunch Break';
 const TWOHR_LABEL = '2 Hour Permission';
 router.get('/break-budget', async (req, res) => {
+  const cfg = workspaceConfig(req.caller.workspace);
   try {
     const { rows } = await pool.query(
       `SELECT context->>'reason' AS reason,
               COALESCE(duration_sec, GREATEST(0, EXTRACT(EPOCH FROM (NOW() - started_at))::int)) AS dur_sec
-         FROM caller_activity_events
+         FROM ${cfg.activity}
         WHERE caller_id = $1 AND tag = 'ON_BREAK' AND started_at >= $2`,
       [req.caller.id, breakBudgetWindowStart()]
     );
@@ -178,10 +181,11 @@ router.get('/break-budget', async (req, res) => {
 /* ── GET /api/caller/timer-settings ──
    Returns the merged admin-tuned timing values (stored clamped over defaults)
    so the caller frontend can drive its timers from server config. */
-router.get('/timer-settings', async (_req, res) => {
+router.get('/timer-settings', async (req, res) => {
+  const cfg = workspaceConfig(req.caller.workspace);
   try {
     const { mergeTimerSettings } = require('../utils/timerDefaults');
-    const { rows } = await pool.query('SELECT settings FROM timer_settings WHERE id = 1');
+    const { rows } = await pool.query(`SELECT settings FROM ${cfg.timer} WHERE id = 1`);
     res.json({ settings: mergeTimerSettings(rows[0]?.settings || {}) });
   } catch (err) {
     console.error('caller/timer-settings error:', err.message);
@@ -197,10 +201,11 @@ router.post('/late-reason', async (req, res) => {
   const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 500) : '';
   const overBySec = Number(req.body?.over_by_sec) || 0;
   if (!reason) return res.status(422).json({ error: 'reason is required' });
+  const cfg = workspaceConfig(req.caller.workspace);
   try {
     await activityLogger.logPointEvent(req.caller.id, 'LATE_RETURN', {
       reason, over_by_sec: overBySec,
-    });
+    }, cfg.activity);
     console.log(JSON.stringify({
       type: 'caller.late_return', caller_id: req.caller.id,
       over_by_sec: overBySec, reason, at: new Date().toISOString(),
@@ -221,30 +226,34 @@ router.post('/late-reason', async (req, res) => {
 router.post('/self-pause', async (req, res) => {
   const reason = typeof req.body?.reason === 'string'
     ? req.body.reason.trim().slice(0, 200) : 'robot nudge ignored';
+  const cfg = workspaceConfig(req.caller.workspace);
   try {
     await pool.query(
-      `UPDATE crm_users
+      `UPDATE ${cfg.users}
           SET is_active        = FALSE,
               auto_paused_at    = NOW(),
               auto_pause_reason = $2
         WHERE id = $1`,
       [req.caller.id, reason]
     );
-    await activityLogger.logPointEvent(req.caller.id, 'PAUSED_BY_SMARTFLOW', { reason });
+    await activityLogger.logPointEvent(req.caller.id, 'PAUSED_BY_SMARTFLOW', { reason }, cfg.activity);
     try { callerSse.pushTo(req.caller.id, { type: 'caller.paused' }); } catch (_) {}
     notifyAutoPause(req.caller.id, reason).catch(() => {});
     // Mark whatever lead this caller had open as Incomplete so it
     // surfaces in Completed Calls. Mirrors the admin/manager Pause
     // path; we want every auto-pause / admin-pause / manager-pause
-    // path to converge on the same outcome.
-    try {
-      const { markInFlightLeadIncomplete } = require('../utils/markInFlightLeadIncomplete');
-      markInFlightLeadIncomplete({
-        callerId: req.caller.id,
-        reason:   `self_pause:${reason}`,
-      }).catch(() => {});
-    } catch (e) {
-      console.error('[caller/self-pause] markInFlightLeadIncomplete load error:', e.message);
+    // path to converge on the same outcome. (Meta-only for now — the NSM
+    // in-flight-cleanup util lands with the rest of NSM telephony.)
+    if (cfg.workspace === 'meta') {
+      try {
+        const { markInFlightLeadIncomplete } = require('../utils/markInFlightLeadIncomplete');
+        markInFlightLeadIncomplete({
+          callerId: req.caller.id,
+          reason:   `self_pause:${reason}`,
+        }).catch(() => {});
+      } catch (e) {
+        console.error('[caller/self-pause] markInFlightLeadIncomplete load error:', e.message);
+      }
     }
     console.log(JSON.stringify({
       type: 'caller.self_pause', caller_id: req.caller.id, reason,
@@ -262,9 +271,10 @@ router.post('/self-pause', async (req, res) => {
    uses is_active to show a blocking "paused by admin" overlay; the JWT alone
    can't be trusted for that because admin can flip it mid-session. */
 router.get('/me', async (req, res) => {
+  const cfg = workspaceConfig(req.caller.workspace);
   try {
     const { rows } = await pool.query(
-      'SELECT is_active, auto_paused_at, auto_pause_reason FROM crm_users WHERE id = $1',
+      `SELECT is_active, auto_paused_at, auto_pause_reason FROM ${cfg.users} WHERE id = $1`,
       [req.caller.id]
     );
     const row = rows[0] || {};
@@ -286,165 +296,16 @@ router.get('/me', async (req, res) => {
 
 /* ── GET /api/caller/leads ──
    Active assigned = no note yet, or marked follow_up whose time has arrived.
-   Follow-ups whose time hasn't arrived live in the Completed Leads page. */
-const LEAD_SELECT = `
-  SELECT l.id, l.full_name, l.whatsapp_number, l.email, l.sugar_level, l.diabetes_duration,
-         l.language_pref, l.lead_score, l.wa_clicked, l.webinar_id, l.source,
-         l.assigned_user_id, l.assigned_at, l.created_at,
-         l.last_note_outcome, l.last_note_at, l.follow_up_at, l.completed_at,
-         l.last_note_interested, l.last_note_outcome_subtag, l.lead_tag,
-         l.next_batch_parked, l.next_batch_parked_at,
-         w.name AS webinar_name,
-         latest_call.id                   AS last_call_id,
-         latest_call.status               AS last_call_status,
-         latest_call.duration_sec         AS last_call_duration,
-         latest_call.recording_url        AS last_call_recording_url,
-         latest_call.started_at           AS last_call_started_at,
-         latest_call.agent_answered_at    AS last_call_agent_answered_at,
-         latest_call.customer_answered_at AS last_call_customer_answered_at,
-         latest_call.customer_missed_at   AS last_call_customer_missed_at,
-         latest_call.ended_at             AS last_call_ended_at,
-         latest_call.hangup_by            AS last_call_hangup_by,
-         latest_note.id                       AS last_note_id,
-         latest_note.sugar_confirmation       AS last_note_sugar_confirmation,
-         latest_note.confirmed_range          AS last_note_confirmed_range,
-         latest_note.range_for                AS last_note_range_for,
-         latest_note.patient_age              AS last_note_patient_age,
-         latest_note.diet_status              AS last_note_diet_status,
-         latest_note.takes_medicine           AS last_note_takes_medicine,
-         latest_note.note                     AS last_note_text,
-         latest_note.hba1c                    AS last_note_hba1c,
-         latest_note.other_languages          AS last_note_other_languages,
-         latest_note.working_professional     AS last_note_working_professional,
-         latest_note.location                 AS last_note_location,
-         latest_note.already_paid             AS last_note_already_paid,
-         latest_note.webinar_attended         AS last_note_webinar_attended,
-         latest_note.available_for_webinar    AS last_note_available_for_webinar,
-         latest_note.next_batch_joining       AS last_note_next_batch_joining,
-         latest_note.interested               AS last_note_interested_in_note,
-         latest_note.follow_up_at             AS last_note_follow_up_at
-    FROM leads l
-    LEFT JOIN webinars w ON w.id = l.webinar_id
-    -- Latest-call aggregation. Tata fragments a single click-to-call into
-    -- multiple "calls" rows (one per leg, each with its own provider_call_id).
-    -- The recording webhook lands on whichever fragment Tata happens to attach
-    -- it to — often NOT the row with the latest started_at, which may carry
-    -- status='failed' / null duration / null recording. Picking that fragment
-    -- alone makes the completed-lead card show "failed / — / No recording"
-    -- even when the call was answered and recorded.
-    --
-    -- Solution: gather the most-recent 6 rows for this lead, scope to a
-    -- ~30-min "session" window around the latest one (so a previous day's
-    -- call doesn't leak into today's row), and pick the best value for each
-    -- field across those rows — same approach the in-call modal uses
-    -- client-side (LeadCallNoteModal.jsx polling merge).
-    LEFT JOIN LATERAL (
-      WITH recent AS (
-        SELECT id, status, duration_sec, recording_url, started_at,
-               agent_answered_at, customer_answered_at, customer_missed_at,
-               ended_at, hangup_by
-          FROM calls c
-         WHERE c.lead_id = l.id
-         ORDER BY c.started_at DESC
-         LIMIT 6
-      ),
-      session AS (
-        SELECT * FROM recent
-         WHERE started_at >= (SELECT MAX(started_at) FROM recent) - INTERVAL '30 minutes'
-      )
-      SELECT
-        -- id: prefer the fragment that actually holds the recording (so the
-        -- /api/caller/recordings/:id lookup hits a row with recording_url).
-        COALESCE(
-          (SELECT id FROM session WHERE recording_url IS NOT NULL
-             ORDER BY started_at DESC LIMIT 1),
-          (SELECT id FROM session ORDER BY started_at DESC LIMIT 1)
-        ) AS id,
-        -- status: if any fragment has an "answered" signal (customer picked,
-        -- duration > 0, or a recording landed), the call effectively ended
-        -- normally — surface 'ended' instead of whatever the latest fragment
-        -- happens to carry. Otherwise fall back to the latest row's status.
-        COALESCE(
-          (SELECT 'ended' WHERE EXISTS (
-             SELECT 1 FROM session
-              WHERE recording_url IS NOT NULL
-                 OR customer_answered_at IS NOT NULL
-                 OR (duration_sec IS NOT NULL AND duration_sec > 0)
-          )),
-          (SELECT status FROM session ORDER BY started_at DESC LIMIT 1)
-        ) AS status,
-        (SELECT duration_sec FROM session
-           WHERE duration_sec IS NOT NULL AND duration_sec > 0
-           ORDER BY started_at DESC LIMIT 1) AS duration_sec,
-        (SELECT recording_url FROM session
-           WHERE recording_url IS NOT NULL
-           ORDER BY started_at DESC LIMIT 1) AS recording_url,
-        -- started_at: earliest fragment in the session — that's when the
-        -- call actually began, not when the last leg-row was created.
-        (SELECT MIN(started_at) FROM session) AS started_at,
-        (SELECT agent_answered_at FROM session
-           WHERE agent_answered_at IS NOT NULL
-           ORDER BY started_at DESC LIMIT 1) AS agent_answered_at,
-        (SELECT customer_answered_at FROM session
-           WHERE customer_answered_at IS NOT NULL
-           ORDER BY started_at DESC LIMIT 1) AS customer_answered_at,
-        (SELECT customer_missed_at FROM session
-           WHERE customer_missed_at IS NOT NULL
-           ORDER BY started_at DESC LIMIT 1) AS customer_missed_at,
-        (SELECT ended_at FROM session
-           WHERE ended_at IS NOT NULL
-           ORDER BY started_at DESC LIMIT 1) AS ended_at,
-        (SELECT hangup_by FROM session
-           WHERE hangup_by IS NOT NULL
-           ORDER BY started_at DESC LIMIT 1) AS hangup_by
-    ) latest_call ON TRUE
-    LEFT JOIN LATERAL (
-      SELECT id, sugar_confirmation, confirmed_range, range_for,
-             patient_age, diet_status, takes_medicine, note,
-             hba1c, other_languages, working_professional, location,
-             already_paid, webinar_attended, available_for_webinar,
-             next_batch_joining, interested, follow_up_at
-        FROM lead_call_notes n
-       WHERE n.lead_id = l.id
-       ORDER BY n.created_at DESC
-       LIMIT 1
-    ) latest_note ON TRUE
-`;
+   Follow-ups whose time hasn't arrived live in the Completed Leads page.
 
-/* "Current + previous" webinars, computed PER SOURCE (meta / yt).
-   For each source:
-     - "current"  = the active webinar (is_active = TRUE).
-     - "previous" = the webinar immediately before it by date.
-     - the window is capped at that source's active webinar date so a
-       future scheduled "next" webinar can't displace the genuine previous
-       one. Fallback (no active webinar for the source): the source's
-       latest webinar.
-   Result = up to 4 webinars (2 per source). Leads on these stay in the
-   caller's Assigned queue; leads on any OLDER webinar move to the Untouched
-   page. Leads with NULL webinar_id always stay in Assigned (can't age them). */
-const RECENT_WEBINARS = `(
-  SELECT ranked.id FROM (
-    SELECT w.id,
-           ROW_NUMBER() OVER (
-             PARTITION BY w.source
-             ORDER BY w.date_time DESC NULLS LAST, w.id DESC
-           ) AS rn
-      FROM webinars w
-      JOIN (
-        SELECT source,
-               COALESCE(MAX(date_time) FILTER (WHERE is_active), MAX(date_time)) AS cap
-          FROM webinars
-         GROUP BY source
-      ) caps ON caps.source = w.source
-     WHERE w.date_time <= caps.cap
-  ) ranked
-  WHERE ranked.rn <= 2
-)`;
-
+   The LEAD_SELECT projection and the RECENT_WEBINARS subquery are resolved
+   per-workspace from utils/callerWorkspace.js (cfg.leadSelect /
+   cfg.recentWebinars) so the same handlers serve Meta and NSM leads. */
 router.get('/leads', async (req, res) => {
+  const cfg = workspaceConfig(req.caller.workspace);
   try {
     const { rows } = await pool.query(
-      `${LEAD_SELECT}
+      `${cfg.leadSelect}
         WHERE l.assigned_user_id = $1
           AND l.next_batch_parked = FALSE
           AND (
@@ -453,7 +314,7 @@ router.get('/leads', async (req, res) => {
           )
           AND (
             l.webinar_id IS NULL
-            OR l.webinar_id IN ${RECENT_WEBINARS}
+            OR l.webinar_id IN ${cfg.recentWebinars}
           )
         ORDER BY
           (l.last_note_outcome = 'follow_up' AND l.follow_up_at <= NOW()) DESC NULLS LAST,
@@ -473,9 +334,10 @@ router.get('/leads', async (req, res) => {
    the call-note modal OR auto-paused after the 5-attempt SmartFlow cap.
    Both buckets share the same "couldn't reach the customer" UX state. */
 router.get('/leads/not-picked', async (req, res) => {
+  const cfg = workspaceConfig(req.caller.workspace);
   try {
     const { rows } = await pool.query(
-      `${LEAD_SELECT}
+      `${cfg.leadSelect}
         WHERE l.assigned_user_id = $1
           AND l.last_note_outcome IN ('not_picked', 'auto_paused')
         ORDER BY l.last_note_at DESC NULLS LAST, l.created_at DESC`,
@@ -495,9 +357,10 @@ router.get('/leads/not-picked', async (req, res) => {
    here. Same uncompleted/non-parked filter as /leads, just the inverse
    webinar window. NULL-webinar leads never land here (they stay in Assigned). */
 router.get('/leads/untouched', async (req, res) => {
+  const cfg = workspaceConfig(req.caller.workspace);
   try {
     const { rows } = await pool.query(
-      `${LEAD_SELECT}
+      `${cfg.leadSelect}
         WHERE l.assigned_user_id = $1
           AND l.next_batch_parked = FALSE
           AND (
@@ -505,7 +368,7 @@ router.get('/leads/untouched', async (req, res) => {
             OR (l.last_note_outcome = 'follow_up' AND l.follow_up_at <= NOW())
           )
           AND l.webinar_id IS NOT NULL
-          AND l.webinar_id NOT IN ${RECENT_WEBINARS}
+          AND l.webinar_id NOT IN ${cfg.recentWebinars}
         ORDER BY l.assigned_at ASC NULLS LAST, l.created_at ASC`,
       [req.caller.id]
     );
@@ -542,13 +405,14 @@ router.post('/leads/reopen', async (req, res) => {
     return res.json({ moved: 0, source, pending_definition: true });
   }
 
+  const cfg = workspaceConfig(req.caller.workspace);
   try {
     let result;
     if (source === 'dnp') {
       // Reopen both 'not_picked' and 'auto_paused' — both mean
       // "we couldn't reach the customer" and the UX bucket is the same.
       result = await pool.query(
-        `UPDATE leads
+        `UPDATE ${cfg.leads}
             SET last_note_outcome        = NULL,
                 last_note_interested     = NULL,
                 last_note_outcome_subtag = NULL,
@@ -571,13 +435,13 @@ router.post('/leads/reopen', async (req, res) => {
         `SELECT
            RIGHT(REGEXP_REPLACE(COALESCE(tata_caller_id, ''),    '\\D', '', 'g'), 10) AS caller_did,
            RIGHT(REGEXP_REPLACE(COALESCE(tata_agent_number, ''), '\\D', '', 'g'), 10) AS agent_did
-           FROM crm_users WHERE id = $1`,
+           FROM ${cfg.users} WHERE id = $1`,
         [req.caller.id]
       );
       const myDids = [meRows[0]?.caller_did, meRows[0]?.agent_did].filter(d => d && d.length === 10);
 
       result = await pool.query(
-        `UPDATE leads
+        `UPDATE ${cfg.leads}
             SET last_note_outcome        = NULL,
                 last_note_interested     = NULL,
                 last_note_outcome_subtag = NULL,
@@ -590,7 +454,7 @@ router.post('/leads/reopen', async (req, res) => {
                 -- Fresh assignment ⇒ no tag (see admin.js reopen note).
                 lead_tag                 = NULL
           WHERE id IN (
-            SELECT DISTINCT lead_id FROM calls
+            SELECT DISTINCT lead_id FROM ${cfg.calls}
              WHERE direction = 'inbound'
                AND lead_id IS NOT NULL
                AND status IN ('missed','failed')
@@ -611,9 +475,10 @@ router.post('/leads/reopen', async (req, res) => {
    Completed leads + scheduled-but-not-yet-due follow-ups for this caller.
    Excludes leads parked in the Next-Batch bucket — those have their own page. */
 router.get('/leads/completed', async (req, res) => {
+  const cfg = workspaceConfig(req.caller.workspace);
   try {
     const { rows } = await pool.query(
-      `${LEAD_SELECT}
+      `${cfg.leadSelect}
         WHERE l.assigned_user_id = $1
           AND l.next_batch_parked = FALSE
           AND (
@@ -635,9 +500,10 @@ router.get('/leads/completed', async (req, res) => {
    They sit here until the admin starts a new batch (updates next_webinar_at),
    at which point routes/admin.js promotes them back to /leads as follow-ups. */
 router.get('/leads/next-batch', async (req, res) => {
+  const cfg = workspaceConfig(req.caller.workspace);
   try {
     const { rows } = await pool.query(
-      `${LEAD_SELECT}
+      `${cfg.leadSelect}
         WHERE l.assigned_user_id = $1
           AND l.next_batch_parked = TRUE
         ORDER BY l.next_batch_parked_at DESC NULLS LAST, l.last_note_at DESC NULLS LAST`,
@@ -689,6 +555,7 @@ const ALLOWED_LEAD_TAGS = new Set(['HOT', 'WARM', 'COLD', 'JUNK']);
 
 router.post('/leads/:id/note', async (req, res) => {
   const lead_id = req.params.id;
+  const cfg = workspaceConfig(req.caller.workspace);
   const {
     full_name,
     sugar_confirmation, confirmed_range, range_for,
@@ -733,7 +600,7 @@ router.post('/leads/:id/note', async (req, res) => {
 
     // Confirm the lead is assigned to this caller
     const { rows: leadRows } = await client.query(
-      'SELECT id, assigned_user_id FROM leads WHERE id = $1',
+      `SELECT id, assigned_user_id FROM ${cfg.leads} WHERE id = $1`,
       [lead_id]
     );
     if (leadRows.length === 0) {
@@ -747,7 +614,7 @@ router.post('/leads/:id/note', async (req, res) => {
 
     // Insert the note row
     const { rows: noteRows } = await client.query(
-      `INSERT INTO lead_call_notes
+      `INSERT INTO ${cfg.notes}
          (lead_id, caller_id, call_id, sugar_confirmation, confirmed_range,
           range_for, patient_age, diet_status, takes_medicine, note,
           hba1c, other_languages, working_professional, location,
@@ -782,7 +649,7 @@ router.post('/leads/:id/note', async (req, res) => {
     const cleanName = typeof full_name === 'string' ? full_name.trim() : '';
     const parkForNextBatch = next_batch_joining === 'yes';
     await client.query(
-      `UPDATE leads
+      `UPDATE ${cfg.leads}
           SET last_note_outcome         = $2,
               last_note_at              = NOW(),
               follow_up_at              = $3,
@@ -823,7 +690,7 @@ router.post('/leads/:id/note', async (req, res) => {
     let autoPausedThisRequest = false;
     if (outcome === 'auto_paused') {
       const { rows: pauseRows } = await client.query(
-        `UPDATE crm_users
+        `UPDATE ${cfg.users}
             SET is_active         = FALSE,
                 auto_paused_at    = NOW(),
                 auto_pause_reason = 'smartflow_cap_exceeded'
@@ -882,7 +749,8 @@ router.post('/leads/:id/note', async (req, res) => {
       activityLogger.logPointEvent(
         req.caller.id,
         'PAUSED_BY_SMARTFLOW',
-        { lead_id }
+        { lead_id },
+        cfg.activity
       );
     }
 
@@ -935,6 +803,7 @@ router.get('/leads/events', (req, res) => {
 
    Sorted newest-first so fresh missed calls always appear at the top. */
 router.get('/calls/missed-inbound', async (req, res) => {
+  const cfg = workspaceConfig(req.caller.workspace);
   try {
     // Look up this caller's own Tata numbers (last-10) — we filter the
     // unassigned-missed bucket to only those that hit one of these DIDs.
@@ -943,7 +812,7 @@ router.get('/calls/missed-inbound', async (req, res) => {
       `SELECT
          RIGHT(REGEXP_REPLACE(COALESCE(tata_caller_id, ''),    '\\D', '', 'g'), 10) AS caller_did,
          RIGHT(REGEXP_REPLACE(COALESCE(tata_agent_number, ''), '\\D', '', 'g'), 10) AS agent_did
-         FROM crm_users WHERE id = $1`,
+         FROM ${cfg.users} WHERE id = $1`,
       [req.caller.id]
     );
     const myDids = [meRows[0]?.caller_did, meRows[0]?.agent_did].filter(d => d && d.length === 10);
@@ -953,11 +822,11 @@ router.get('/calls/missed-inbound', async (req, res) => {
               c.direction, c.started_at, c.ended_at, c.duration_sec, c.recording_url,
               c.hangup_by, c.raw_payload, c.caller_phone, c.did_number,
               l.full_name AS lead_full_name,
-              l.whatsapp_number AS lead_phone,
+              ${cfg.leadPhoneExpr} AS lead_phone,
               l.email AS lead_email,
-              l.sugar_level AS lead_sugar_level
-         FROM calls c
-         LEFT JOIN leads l ON l.id = c.lead_id
+              ${cfg.leadSugarExpr} AS lead_sugar_level
+         FROM ${cfg.calls} c
+         LEFT JOIN ${cfg.leads} l ON l.id = c.lead_id
         WHERE c.direction = 'inbound'
           AND (
             c.caller_id = $1
@@ -1015,7 +884,12 @@ router.get('/calls/missed-inbound', async (req, res) => {
    Manually triggers a Tata CDR poll. Useful from the Missed Calls page to
    force-refresh when the customer reports they just called. Returns the
    poll result so the frontend can show "synced 3 new" or the error. */
-router.post('/calls/sync-inbound', async (_req, res) => {
+router.post('/calls/sync-inbound', async (req, res) => {
+  // tataInboundSync polls Meta's CDR → calls table. NSM inbound CDR sync lands
+  // with the rest of NSM telephony; until then it's a no-op for NSM callers.
+  if (workspaceConfig(req.caller.workspace).workspace !== 'meta') {
+    return res.json({ upserted: 0, skipped: true });
+  }
   try {
     const result = await tataInboundSync.syncOnce({ lookbackMinutes: 60 });
     res.json(result);

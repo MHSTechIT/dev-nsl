@@ -8,6 +8,8 @@ const ROLES = [
   { value: 'trainer',       label: 'Trainer' },
   { value: 'admin',         label: 'Admin' },
   { value: 'team_leader',   label: 'Team Leader' },
+  { value: 'webinar',       label: 'Webinar' },
+  { value: 'l1_sales',      label: 'L1 Sales' },
 ];
 
 const ROLE_LABEL = ROLES.reduce((acc, r) => { acc[r.value] = r.label; return acc; }, {});
@@ -29,6 +31,8 @@ const ROLE_BADGE = {
   trainer:       { bg: '#DBEAFE', fg: '#1E40AF' },
   admin:         { bg: '#FCE7F3', fg: '#9D174D' },
   team_leader:   { bg: '#EDE9FE', fg: '#5B21B6' },
+  webinar:       { bg: '#CFFAFE', fg: '#0E7490' },
+  l1_sales:      { bg: '#E0E7FF', fg: '#3730A3' },
 };
 
 function fmtDate(iso) {
@@ -40,6 +44,11 @@ function fmtDate(iso) {
 
 export default function UsersModule({
   token,
+  // API base for the staff-directory CRUD. Defaults to the Meta/global
+  // crm_users endpoints; the NSM-Caller workspace passes its own
+  // '/api/admin/nsm/users' base so it reads/writes the independent nsm_users
+  // table instead. The endpoints are response-compatible.
+  apiBase            = '/api/admin/crm-users',
   lockedDepartment   = null,
   lockedManagerId    = null,
   // TL mode: pin team_leader_id on every create/edit to the logged-in TL,
@@ -59,7 +68,7 @@ export default function UsersModule({
     setLoading(true);
     setError('');
     try {
-      const res = await fetch('/api/admin/crm-users', { headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch(apiBase, { headers: { Authorization: `Bearer ${token}` } });
       if (!res.ok) throw new Error('Failed to load users.');
       const data = await res.json();
       setUsers(data.users || []);
@@ -68,7 +77,7 @@ export default function UsersModule({
     } finally {
       setLoading(false);
     }
-  }, [token]);
+  }, [token, apiBase]);
 
   useEffect(() => { fetchUsers(); }, [fetchUsers]);
 
@@ -146,7 +155,7 @@ export default function UsersModule({
     setDeleting(true);
     setDeleteError('');
     try {
-      const res = await fetch(`/api/admin/crm-users/${pendingDelete.id}`, {
+      const res = await fetch(`${apiBase}/${pendingDelete.id}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -463,6 +472,7 @@ export default function UsersModule({
       {(showForm || editingUser) && (
         <UserFormModal
           token={token}
+          apiBase={apiBase}
           existing={editingUser}
           allUsers={users}
           lockedDepartment={lockedDepartment}
@@ -702,6 +712,7 @@ function SmartfloCell({ user }) {
 /* ── User Form Modal (create + edit) ── */
 function UserFormModal({
   token,
+  apiBase            = '/api/admin/crm-users',
   existing,
   allUsers           = [],
   lockedDepartment   = null,
@@ -823,7 +834,7 @@ function UserFormModal({
       }
       if (password.length > 0) body.password = password;
 
-      const url    = isEdit ? `/api/admin/crm-users/${existing.id}` : '/api/admin/crm-users';
+      const url    = isEdit ? `${apiBase}/${existing.id}` : apiBase;
       const method = isEdit ? 'PATCH' : 'POST';
 
       const res = await fetch(url, {

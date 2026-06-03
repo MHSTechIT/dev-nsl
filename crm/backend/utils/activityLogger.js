@@ -14,6 +14,15 @@
    =================================================================== */
 const pool = require('../db');
 
+/* Which activity table to write to, resolved per workspace. The shared caller
+   routes pass the caller's workspace table; everything defaults to the Meta
+   table so existing callers are unaffected. Allowlisted to prevent injection
+   (the value is interpolated into SQL). */
+const ACTIVITY_TABLES = new Set(['caller_activity_events', 'nsm_caller_activity_events']);
+function activityTable(table) {
+  return ACTIVITY_TABLES.has(table) ? table : 'caller_activity_events';
+}
+
 /* Span tags — exactly one open per caller (DB-enforced). */
 const SPAN_TAGS = new Set([
   // Page tags — which workspace tab the caller is idling on.
@@ -41,13 +50,14 @@ const VALID_TAGS = new Set([...SPAN_TAGS, ...POINT_TAGS]);
      and a fresh open span is inserted — all in one transaction.
    The SELECT ... FOR UPDATE row-lock serialises concurrent callers; the
    unique index is the final backstop. */
-async function switchTag(callerId, newTag, context = null) {
+async function switchTag(callerId, newTag, context = null, table = 'caller_activity_events') {
   if (!callerId || !SPAN_TAGS.has(newTag)) return null;
+  const T = activityTable(table);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const { rows } = await client.query(
-      `SELECT id, tag, started_at FROM caller_activity_events
+      `SELECT id, tag, started_at FROM ${T}
         WHERE caller_id = $1 AND ended_at IS NULL
         ORDER BY started_at DESC
         FOR UPDATE`,
@@ -57,7 +67,7 @@ async function switchTag(callerId, newTag, context = null) {
     if (open && open.tag === newTag) {
       if (context) {
         await client.query(
-          `UPDATE caller_activity_events
+          `UPDATE ${T}
               SET context = COALESCE(context, '{}'::jsonb) || $2::jsonb
             WHERE id = $1`,
           [open.id, JSON.stringify(context)]
@@ -72,10 +82,10 @@ async function switchTag(callerId, newTag, context = null) {
       // clutters the timeline. Anything 1s or longer is closed normally.
       const openMs = Date.now() - new Date(open.started_at).getTime();
       if (rows.length === 1 && openMs < 1000) {
-        await client.query('DELETE FROM caller_activity_events WHERE id = $1', [open.id]);
+        await client.query(`DELETE FROM ${T} WHERE id = $1`, [open.id]);
       } else {
         await client.query(
-          `UPDATE caller_activity_events
+          `UPDATE ${T}
               SET ended_at     = NOW(),
                   duration_sec = GREATEST(0, EXTRACT(EPOCH FROM (NOW() - started_at))::int)
             WHERE caller_id = $1 AND ended_at IS NULL`,
@@ -84,7 +94,7 @@ async function switchTag(callerId, newTag, context = null) {
       }
     }
     const { rows: ins } = await client.query(
-      `INSERT INTO caller_activity_events (caller_id, tag, started_at, context)
+      `INSERT INTO ${T} (caller_id, tag, started_at, context)
        VALUES ($1, $2, NOW(), $3::jsonb)
        RETURNING id`,
       [callerId, newTag, context ? JSON.stringify(context) : null]
@@ -102,11 +112,12 @@ async function switchTag(callerId, newTag, context = null) {
 
 /* Close the caller's open span, if any (used by logout + the reaper).
    `at` lets the reaper backdate the close to the last heartbeat. */
-async function closeOpenSpan(callerId, at = null) {
+async function closeOpenSpan(callerId, at = null, table = 'caller_activity_events') {
   if (!callerId) return;
+  const T = activityTable(table);
   try {
     await pool.query(
-      `UPDATE caller_activity_events
+      `UPDATE ${T}
           SET ended_at     = COALESCE($2::timestamptz, NOW()),
               duration_sec = GREATEST(0, EXTRACT(EPOCH FROM (COALESCE($2::timestamptz, NOW()) - started_at))::int)
         WHERE caller_id = $1 AND ended_at IS NULL`,
@@ -119,11 +130,12 @@ async function closeOpenSpan(callerId, at = null) {
 
 /* Insert a point-in-time event (no duration): LOGGED_IN, LOGGED_OUT,
    LATE_RETURN. Never counts as an open span. */
-async function logPointEvent(callerId, tag, context = null) {
+async function logPointEvent(callerId, tag, context = null, table = 'caller_activity_events') {
   if (!callerId || !POINT_TAGS.has(tag)) return null;
+  const T = activityTable(table);
   try {
     const { rows } = await pool.query(
-      `INSERT INTO caller_activity_events (caller_id, tag, started_at, ended_at, duration_sec, context)
+      `INSERT INTO ${T} (caller_id, tag, started_at, ended_at, duration_sec, context)
        VALUES ($1, $2, NOW(), NOW(), 0, $3::jsonb)
        RETURNING id`,
       [callerId, tag, context ? JSON.stringify(context) : null]

@@ -22,6 +22,7 @@ const pool    = require('../db');
 const tata    = require('../utils/tataClient');
 const { verify } = require('../utils/jwt');
 const { getPassword } = require('../utils/adminConfig');
+const { workspaceConfig } = require('../utils/callerWorkspace');
 
 const UPLOADS_ROOT = path.join(__dirname, '..', 'uploads');
 
@@ -47,7 +48,10 @@ function authViaQuery(req, res, next) {
       const b = Buffer.from(adminPwd);
       const crypto = require('crypto');
       if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
-        req.caller = { id: null, admin: true };
+        // Admin token carries no workspace — default to 'meta' (Sales →
+        // Completed Calls is the Meta admin view). An optional ?workspace=nsm
+        // lets the same admin secret unlock NSM recordings (nsm_calls).
+        req.caller = { id: null, admin: true, workspace: req.query.workspace === 'nsm' ? 'nsm' : 'meta' };
         return next();
       }
     } catch { /* fall through to JWT path */ }
@@ -55,7 +59,9 @@ function authViaQuery(req, res, next) {
   try {
     const payload = verify(token);
     if (!payload?.user_id) return res.status(401).json({ error: 'unauthorized' });
-    req.caller = { id: payload.user_id, role: payload.role };
+    // workspace scopes the call/user lookup to the right tables (Meta vs nsm_*).
+    // Absent on legacy Meta tokens → defaults to 'meta' (behavior unchanged).
+    req.caller = { id: payload.user_id, role: payload.role, workspace: payload.workspace || 'meta' };
     next();
   } catch {
     return res.status(401).json({ error: 'unauthorized' });
@@ -72,14 +78,18 @@ router.get('/:call_id', async (req, res) => {
   const { call_id } = req.params;
   if (!call_id) return res.status(400).json({ error: 'call_id required' });
 
+  // Resolve workspace tables (Meta `calls`/`crm_users` vs NSM `nsm_calls`/
+  // `nsm_users`) from the token's workspace, set by authViaQuery.
+  const cfg = workspaceConfig(req.caller.workspace);
+
   // Look up the call + verify the caller may access it
   let row;
   try {
     const { rows } = await pool.query(
       `SELECT c.id, c.recording_url, c.caller_id,
               u.tata_account_type, u.tata_smartflo_api_key
-         FROM calls c
-         LEFT JOIN crm_users u ON u.id = c.caller_id
+         FROM ${cfg.calls} c
+         LEFT JOIN ${cfg.users} u ON u.id = c.caller_id
         WHERE c.id = $1`,
       [call_id]
     );

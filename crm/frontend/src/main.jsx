@@ -5,6 +5,7 @@ import './index.css';
 
 const CrmShell           = lazy(() => import('./CrmShell'));
 const CallerShell        = lazy(() => import('./CallerShell'));
+const NsmCallerShell     = lazy(() => import('./NsmCallerShell'));
 const ManagerShell       = lazy(() => import('./ManagerShell'));
 const TLShell            = lazy(() => import('./TLShell'));
 const AdminResetPassword = lazy(() => import('./admin/AdminResetPassword'));
@@ -19,6 +20,7 @@ createRoot(document.getElementById('root')).render(
           <Route path="/caller" element={<CallerShell />} />
           <Route path="/caller/junior" element={<CallerShell callerRole="junior_caller" callerName="Junior Caller" />} />
           <Route path="/caller/senior" element={<CallerShell callerRole="senior_caller" callerName="Senior Caller" />} />
+          <Route path="/nsm-caller" element={<NsmCallerShell />} />
           <Route path="/manager" element={<ManagerShell />} />
           <Route path="/tl" element={<TLShell />} />
           <Route path="/admin/reset-password" element={<AdminResetPassword />} />

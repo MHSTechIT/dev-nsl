@@ -46,12 +46,27 @@ router.post('/crm-login',
     if (!errs.isEmpty()) return res.status(401).json({ error: 'Invalid credentials.' });
 
     const { username, password } = req.body;
+    const uname = String(username).trim().toLowerCase();
     try {
-      const { rows } = await pool.query(
+      // Shared caller login. A caller account lives in exactly ONE pool:
+      // crm_users (Meta/YT/Meta2 workspace) or nsm_users (NSM workspace).
+      // Check Meta first, then fall back to NSM. The pool the account is found
+      // in decides the `workspace` stamped into the JWT — which scopes every
+      // /api/caller/* query to the right tables. One login, one caller page.
+      let workspace = 'meta';
+      let { rows } = await pool.query(
         `SELECT id, full_name, email, phone, role, password_hash, is_active, department
          FROM crm_users WHERE LOWER(email) = $1`,
-        [String(username).trim().toLowerCase()]
+        [uname]
       );
+      if (rows.length === 0) {
+        const nsm = await pool.query(
+          `SELECT id, full_name, email, phone, role, password_hash, is_active, NULL::text AS department
+           FROM nsm_users WHERE LOWER(email) = $1 AND deleted_at IS NULL`,
+          [uname]
+        );
+        if (nsm.rows.length > 0) { rows = nsm.rows; workspace = 'nsm'; }
+      }
       if (rows.length === 0) return res.status(401).json({ error: 'Invalid credentials.' });
       const u = rows[0];
       if (!u.is_active)      return res.status(401).json({ error: 'Account is inactive.' });
@@ -65,6 +80,7 @@ router.post('/crm-login',
         role:       u.role,
         full_name:  u.full_name,
         department: u.department || null,
+        workspace,
       });
       res.json({
         user: {
@@ -74,6 +90,7 @@ router.post('/crm-login',
           phone:      u.phone,
           role:       u.role,
           department: u.department || null,
+          workspace,
         },
         token,
       });

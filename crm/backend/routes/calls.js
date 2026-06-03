@@ -9,6 +9,7 @@ const router  = express.Router();
 const pool    = require('../db');
 const tata    = require('../utils/tataClient');
 const { callerAuth } = require('../middleware/callerAuth');
+const { workspaceConfig } = require('../utils/callerWorkspace');
 
 router.use(callerAuth);
 
@@ -24,12 +25,13 @@ function toE164India(raw) {
 router.post('/calls/start', async (req, res) => {
   const { lead_id } = req.body || {};
   if (!lead_id) return res.status(400).json({ error: 'lead_id required' });
+  const cfg = workspaceConfig(req.caller.workspace);
 
   try {
     // Confirm the lead is assigned to this caller
     const { rows: leadRows } = await pool.query(
-      `SELECT id, full_name, whatsapp_number, assigned_user_id
-         FROM leads
+      `SELECT id, full_name, ${cfg.leadPhoneCol} AS whatsapp_number, assigned_user_id
+         FROM ${cfg.leads}
         WHERE id = $1`,
       [lead_id]
     );
@@ -47,7 +49,7 @@ router.post('/calls/start', async (req, res) => {
     const { rows: agentRows } = await pool.query(
       `SELECT tata_extension, tata_account_type, tata_agent_number, tata_caller_id,
               tata_smartflo_api_key, phone, is_active
-         FROM crm_users WHERE id = $1`,
+         FROM ${cfg.users} WHERE id = $1`,
       [req.caller.id]
     );
     const agent = agentRows[0] || {};
@@ -65,7 +67,7 @@ router.post('/calls/start', async (req, res) => {
 
     // Insert the call row up front so we always have a record even if the API call fails
     const { rows: callRows } = await pool.query(
-      `INSERT INTO calls (lead_id, caller_id, status)
+      `INSERT INTO ${cfg.calls} (lead_id, caller_id, status)
        VALUES ($1, $2, 'initiated')
        RETURNING id`,
       [lead_id, req.caller.id]
@@ -94,7 +96,7 @@ router.post('/calls/start', async (req, res) => {
       stubbed = !!result.stubbed;
     } catch (err) {
       await pool.query(
-        `UPDATE calls
+        `UPDATE ${cfg.calls}
             SET status = 'failed',
                 error_message = $2,
                 raw_payload   = $3,
@@ -108,7 +110,7 @@ router.post('/calls/start', async (req, res) => {
     }
 
     await pool.query(
-      `UPDATE calls
+      `UPDATE ${cfg.calls}
           SET provider_call_id = $2,
               raw_payload      = $3,
               updated_at       = NOW()
@@ -149,13 +151,14 @@ router.post('/calls/start', async (req, res) => {
 router.post('/leads/:lead_id/hangup', async (req, res) => {
   const leadId = req.params.lead_id;
   if (!leadId) return res.status(400).json({ error: 'lead_id required' });
+  const cfg = workspaceConfig(req.caller.workspace);
 
   try {
     const { rows } = await pool.query(
       `SELECT c.id, c.provider_call_id, c.status,
               u.tata_account_type, u.tata_smartflo_api_key
-         FROM calls c
-         LEFT JOIN crm_users u ON u.id = c.caller_id
+         FROM ${cfg.calls} c
+         LEFT JOIN ${cfg.users} u ON u.id = c.caller_id
         WHERE c.lead_id = $1
           AND c.caller_id = $2
           AND c.status NOT IN ('ended','missed','failed')
@@ -173,7 +176,7 @@ router.post('/leads/:lead_id/hangup', async (req, res) => {
     // Stub calls (test leads) never went to Tata — just mark the row ended.
     if (String(call.provider_call_id).startsWith('stub-')) {
       await pool.query(
-        `UPDATE calls SET status = 'ended', ended_at = COALESCE(ended_at, NOW()), updated_at = NOW() WHERE id = $1`,
+        `UPDATE ${cfg.calls} SET status = 'ended', ended_at = COALESCE(ended_at, NOW()), updated_at = NOW() WHERE id = $1`,
         [call.id]
       );
       return res.json({ success: true, call_id: call.id, stubbed: true });
@@ -185,7 +188,7 @@ router.post('/leads/:lead_id/hangup', async (req, res) => {
     });
     if (result.ok) {
       await pool.query(
-        `UPDATE calls
+        `UPDATE ${cfg.calls}
             SET status = 'ended', ended_at = COALESCE(ended_at, NOW()), updated_at = NOW()
           WHERE id = $1`,
         [call.id]
@@ -210,14 +213,15 @@ router.post('/leads/:lead_id/hangup', async (req, res) => {
 router.post('/calls/:call_id/hangup', async (req, res) => {
   const callId = req.params.call_id;
   if (!callId) return res.status(400).json({ error: 'call_id required' });
+  const cfg = workspaceConfig(req.caller.workspace);
 
   try {
     // Verify the call belongs to this caller and grab the provider id
     const { rows } = await pool.query(
       `SELECT c.id, c.provider_call_id, c.status,
               u.tata_account_type, u.tata_smartflo_api_key
-         FROM calls c
-         LEFT JOIN crm_users u ON u.id = c.caller_id
+         FROM ${cfg.calls} c
+         LEFT JOIN ${cfg.users} u ON u.id = c.caller_id
         WHERE c.id = $1 AND c.caller_id = $2`,
       [callId, req.caller.id]
     );
@@ -234,7 +238,7 @@ router.post('/calls/:call_id/hangup', async (req, res) => {
     // Stub calls (test leads) never went to Tata — just mark ended.
     if (String(call.provider_call_id).startsWith('stub-')) {
       await pool.query(
-        `UPDATE calls SET status = 'ended', ended_at = COALESCE(ended_at, NOW()), updated_at = NOW() WHERE id = $1`,
+        `UPDATE ${cfg.calls} SET status = 'ended', ended_at = COALESCE(ended_at, NOW()), updated_at = NOW() WHERE id = $1`,
         [callId]
       );
       return res.json({ success: true, stubbed: true });
@@ -250,7 +254,7 @@ router.post('/calls/:call_id/hangup', async (req, res) => {
     // exact end time/duration when Tata posts the hangup event back.
     if (result.ok) {
       await pool.query(
-        `UPDATE calls
+        `UPDATE ${cfg.calls}
             SET status = 'ended', ended_at = COALESCE(ended_at, NOW()), updated_at = NOW()
           WHERE id = $1`,
         [callId]
@@ -272,6 +276,7 @@ router.post('/calls/:call_id/hangup', async (req, res) => {
 router.get('/calls', async (req, res) => {
   const { lead_id } = req.query;
   if (!lead_id) return res.status(400).json({ error: 'lead_id required' });
+  const cfg = workspaceConfig(req.caller.workspace);
 
   try {
     const { rows } = await pool.query(
@@ -279,8 +284,8 @@ router.get('/calls', async (req, res) => {
               c.started_at, c.answered_at, c.ended_at, c.updated_at, c.error_message,
               c.agent_answered_at, c.customer_answered_at, c.customer_missed_at,
               c.hangup_by
-         FROM calls c
-         JOIN leads l ON l.id = c.lead_id
+         FROM ${cfg.calls} c
+         JOIN ${cfg.leads} l ON l.id = c.lead_id
         WHERE c.lead_id = $1
           AND l.assigned_user_id = $2
         ORDER BY c.started_at DESC

@@ -14,7 +14,14 @@ function callerAuth(req, res, next) {
   try {
     const payload = verify(token);
     if (!payload?.user_id) return res.status(401).json({ error: 'unauthorized' });
-    req.caller = { id: payload.user_id, role: payload.role, full_name: payload.full_name };
+    // workspace scopes every caller query to the right tables (Meta vs nsm_*).
+    // Absent on legacy Meta tokens → defaults to 'meta' (behavior unchanged).
+    req.caller = {
+      id: payload.user_id,
+      role: payload.role,
+      full_name: payload.full_name,
+      workspace: payload.workspace || 'meta',
+    };
     next();
   } catch (_) {
     return res.status(401).json({ error: 'unauthorized' });

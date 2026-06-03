@@ -7,13 +7,16 @@ const pool      = require('./db');
 const webinarConfigRouter = require('./routes/webinarConfig');
 const leadsRouter         = require('./routes/leads');
 const adminRouter         = require('./routes/admin');
+const nsmDashboardRouter  = require('./routes/nsmDashboard');
 const authRouter          = require('./routes/auth');
 const eventsRouter        = require('./routes/events');
 const callerRouter        = require('./routes/caller');
 const callsRouter         = require('./routes/calls');
-const webhooksRouter      = require('./routes/webhooks');
+const createWebhooksRouter = require('./routes/webhooks');
 const recordingsRouter    = require('./routes/recordings');
 const telegramAlertsRouter = require('./routes/telegramAlerts');
+const nsmCallerRouter      = require('./routes/nsmCaller');
+const nsmIvrRouter         = require('./routes/nsmIvr');
 
 const app = express();
 
@@ -122,13 +125,17 @@ const _crmUsersMigration = pool.query(`
     full_name     TEXT NOT NULL,
     email         TEXT NOT NULL UNIQUE,
     phone         TEXT,
-    role          TEXT NOT NULL CHECK (role IN ('junior_caller','senior_caller','manager','trainer','admin','team_leader')),
+    role          TEXT NOT NULL CHECK (role IN ('junior_caller','senior_caller','manager','trainer','admin','team_leader','webinar','l1_sales')),
     password_hash TEXT,
     is_active     BOOLEAN NOT NULL DEFAULT TRUE,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );
   ALTER TABLE crm_users ADD COLUMN IF NOT EXISTS password_hash TEXT;
   CREATE INDEX IF NOT EXISTS idx_crm_users_role ON crm_users (role);
+  -- Keep the role CHECK in sync with ALLOWED_ROLES (routes/admin.js). Drop +
+  -- recreate so newly-added roles (webinar, l1_sales) are accepted on existing DBs.
+  ALTER TABLE crm_users DROP CONSTRAINT IF EXISTS crm_users_role_check;
+  ALTER TABLE crm_users ADD CONSTRAINT crm_users_role_check CHECK (role IN ('junior_caller','senior_caller','manager','trainer','admin','team_leader','webinar','l1_sales'));
 `);
 if (_crmUsersMigration && typeof _crmUsersMigration.catch === 'function') {
   _crmUsersMigration.catch(err => console.error('[Migration] crm_users error:', err.message));
@@ -731,6 +738,497 @@ if (_alertMigration && typeof _alertMigration.catch === 'function') {
   _alertMigration.catch(err => console.error('[Migration] alert log error:', err.message));
 }
 
+// Auto-migrate: nsm_batches — NSM-Caller "Webinar" batches. Each batch is a
+// named window (start_at → end_at) bound to a set of selected Meta Lead Gen
+// FORMS (stored as JSONB [{id,name}]). Stand-alone table owned by the
+// NSM-Caller workspace; no `source` column — it's its own pipeline.
+const _nsmBatchesMigration = pool.query(`
+  CREATE TABLE IF NOT EXISTS nsm_batches (
+    id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    batch_name  TEXT        NOT NULL,
+    start_at    TIMESTAMPTZ,
+    end_at      TIMESTAMPTZ,
+    meta_forms  JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  -- Selection switched from Meta pages → Meta lead forms. Rename the original
+  -- meta_pages column to meta_forms if an earlier build created it. Idempotent.
+  DO $$
+  BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'nsm_batches' AND column_name = 'meta_pages')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'nsm_batches' AND column_name = 'meta_forms') THEN
+      ALTER TABLE nsm_batches RENAME COLUMN meta_pages TO meta_forms;
+    END IF;
+  END $$;
+  ALTER TABLE nsm_batches ADD COLUMN IF NOT EXISTS meta_forms JSONB NOT NULL DEFAULT '[]'::jsonb;
+  -- webinar_at: when the webinar itself happens (distinct from the start_at →
+  -- end_at lead-collection window).
+  ALTER TABLE nsm_batches ADD COLUMN IF NOT EXISTS webinar_at TIMESTAMPTZ;
+  ALTER TABLE nsm_batches ADD COLUMN IF NOT EXISTS webinar_link TEXT;
+  ALTER TABLE nsm_batches ADD COLUMN IF NOT EXISTS webinar_meeting_id TEXT;
+  -- WhatsApp (whapi.cloud) community bookkeeping for the batch. whatsapp_group_id
+  -- holds the community's ANNOUNCE group (used to add members + send messages);
+  -- whatsapp_community_id is the community itself (used for cleanup).
+  ALTER TABLE nsm_batches ADD COLUMN IF NOT EXISTS whatsapp_community_id TEXT;
+  ALTER TABLE nsm_batches ADD COLUMN IF NOT EXISTS whatsapp_group_id TEXT;
+  -- The community's member sub-group (leads are added here; announce group is messaging only).
+  ALTER TABLE nsm_batches ADD COLUMN IF NOT EXISTS whatsapp_member_group_id TEXT;
+  ALTER TABLE nsm_batches ADD COLUMN IF NOT EXISTS whatsapp_group_invite TEXT;
+  ALTER TABLE nsm_batches ADD COLUMN IF NOT EXISTS whatsapp_group_count INT NOT NULL DEFAULT 0;
+  ALTER TABLE nsm_batches ADD COLUMN IF NOT EXISTS whatsapp_group_error TEXT;
+  CREATE INDEX IF NOT EXISTS idx_nsm_batches_created ON nsm_batches (created_at DESC);
+`);
+if (_nsmBatchesMigration && typeof _nsmBatchesMigration.catch === 'function') {
+  _nsmBatchesMigration.catch(err => console.error('[Migration] nsm_batches error:', err.message));
+}
+
+// Auto-migrate: nsm_leads — leads pulled from the Meta Lead Gen forms attached
+// to each NSM-Caller batch (synced by utils/nsmLeadsSync.js). meta_lead_id is
+// the Graph leadgen id — UNIQUE so re-syncs upsert instead of duplicating.
+// Common fields (name/phone/email/city) are denormalised for fast columns +
+// search; the full per-form answer set lives in field_data JSONB.
+const _nsmLeadsMigration = _nsmBatchesMigration.then(() => pool.query(`
+  CREATE TABLE IF NOT EXISTS nsm_leads (
+    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    meta_lead_id  TEXT        NOT NULL UNIQUE,
+    batch_id      UUID        REFERENCES nsm_batches(id) ON DELETE CASCADE,
+    form_id       TEXT,
+    form_name     TEXT,
+    created_time  TIMESTAMPTZ,
+    full_name     TEXT,
+    phone         TEXT,
+    email         TEXT,
+    city          TEXT,
+    field_data    JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    synced_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  -- Soft-delete tombstone. The sync's upsert is guarded so a deleted lead is
+  -- never resurrected, and every list/assignment query filters deleted_at.
+  ALTER TABLE nsm_leads ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+  -- WhatsApp: set once when the lead's phone has been added to the batch group
+  -- (atomic claim so dev+prod never double-add the same lead).
+  ALTER TABLE nsm_leads ADD COLUMN IF NOT EXISTS whatsapp_added_at TIMESTAMPTZ;
+  -- Set when a force-add was rejected by WhatsApp and we DM'd the invite link
+  -- instead (so we don't re-DM every tick).
+  ALTER TABLE nsm_leads ADD COLUMN IF NOT EXISTS whatsapp_invited_at TIMESTAMPTZ;
+  CREATE INDEX IF NOT EXISTS idx_nsm_leads_batch ON nsm_leads (batch_id, created_time DESC);
+  CREATE INDEX IF NOT EXISTS idx_nsm_leads_form  ON nsm_leads (form_id);
+`));
+if (_nsmLeadsMigration && typeof _nsmLeadsMigration.catch === 'function') {
+  _nsmLeadsMigration.catch(err => console.error('[Migration] nsm_leads error:', err.message));
+}
+
+// Auto-migrate: nsm_users — NSM-Caller's OWN independent staff directory.
+// Mirrors crm_users (same roles, telephony fields, scrypt password_hash +
+// viewable password_plain, soft-delete) but is a separate table so it shares
+// nothing with Meta's crm_users. Self-referencing FKs for the team hierarchy.
+const _nsmUsersMigration = pool.query(`
+  CREATE TABLE IF NOT EXISTS nsm_users (
+    id                    UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    full_name             TEXT        NOT NULL,
+    email                 TEXT        NOT NULL UNIQUE,
+    phone                 TEXT,
+    role                  TEXT        NOT NULL CHECK (role IN ('junior_caller','senior_caller','manager','trainer','admin','team_leader','webinar','l1_sales')),
+    password_hash         TEXT,
+    password_plain        TEXT,
+    is_active             BOOLEAN     NOT NULL DEFAULT TRUE,
+    department            TEXT,
+    team_leader_id        UUID        REFERENCES nsm_users(id) ON DELETE SET NULL,
+    manager_id            UUID        REFERENCES nsm_users(id) ON DELETE SET NULL,
+    tata_extension        TEXT,
+    tata_account_type     TEXT,
+    tata_agent_number     TEXT,
+    tata_caller_id        TEXT,
+    tata_smartflo_api_key TEXT,
+    tata_outbound_route   TEXT        NOT NULL DEFAULT 'extension',
+    auto_paused_at        TIMESTAMPTZ,
+    auto_pause_reason     TEXT,
+    deleted_at            TIMESTAMPTZ,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  CREATE INDEX IF NOT EXISTS idx_nsm_users_role ON nsm_users (role);
+`);
+if (_nsmUsersMigration && typeof _nsmUsersMigration.catch === 'function') {
+  _nsmUsersMigration.catch(err => console.error('[Migration] nsm_users error:', err.message));
+}
+
+// Auto-migrate: NSM-Caller lead → caller assignment (independent of Meta's
+// crm_users / lead_share_config). nsm_leads gets assigned_user_id; a per-batch
+// share-config picks which NSM callers receive that batch's leads, round-robin.
+const _nsmAssignMigration = Promise.all([_nsmLeadsMigration, _nsmUsersMigration]).then(() => pool.query(`
+  ALTER TABLE nsm_leads ADD COLUMN IF NOT EXISTS assigned_user_id UUID REFERENCES nsm_users(id) ON DELETE SET NULL;
+  ALTER TABLE nsm_leads ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ;
+  CREATE INDEX IF NOT EXISTS idx_nsm_leads_assigned ON nsm_leads (assigned_user_id, created_time DESC);
+
+  CREATE TABLE IF NOT EXISTS nsm_lead_share_config (
+    id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    batch_id   UUID        NOT NULL REFERENCES nsm_batches(id) ON DELETE CASCADE,
+    caller_id  UUID        NOT NULL REFERENCES nsm_users(id)   ON DELETE CASCADE,
+    enabled    BOOLEAN     NOT NULL DEFAULT TRUE,
+    position   INTEGER     NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (batch_id, caller_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_nsm_share_batch ON nsm_lead_share_config (batch_id, position);
+
+  CREATE TABLE IF NOT EXISTS nsm_round_robin_state (
+    batch_id      UUID        PRIMARY KEY REFERENCES nsm_batches(id) ON DELETE CASCADE,
+    last_position INTEGER     NOT NULL DEFAULT -1,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+`));
+if (_nsmAssignMigration && typeof _nsmAssignMigration.catch === 'function') {
+  _nsmAssignMigration.catch(err => console.error('[Migration] nsm assignment error:', err.message));
+}
+
+// Auto-migrate: NSM caller call-workflow tables — the independent equivalents
+// of Meta's calls / lead_call_notes / caller_activity_events, scoped to the NSM
+// caller pool (nsm_users) + NSM leads (nsm_leads). The SHARED caller routes
+// resolve these table names from the JWT's workspace ('nsm'); there is no
+// cloned route code. Schema mirrors Meta column-for-column so the
+// workspace-aware queries stay uniform (only the table names differ).
+const _nsmCallerWorkflowMigration = Promise.all([_nsmLeadsMigration, _nsmUsersMigration]).then(() => pool.query(`
+  -- nsm_calls — Tata click-to-call records (mirror of calls)
+  CREATE TABLE IF NOT EXISTS nsm_calls (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    lead_id          UUID REFERENCES nsm_leads(id) ON DELETE SET NULL,
+    caller_id        UUID REFERENCES nsm_users(id) ON DELETE SET NULL,
+    provider         TEXT NOT NULL DEFAULT 'tata',
+    provider_call_id TEXT,
+    status           TEXT NOT NULL DEFAULT 'initiated',
+      -- initiated | ringing | answered | ended | missed | failed
+    direction        TEXT NOT NULL DEFAULT 'outbound',
+    duration_sec     INTEGER,
+    recording_url    TEXT,
+    error_message    TEXT,
+    started_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    answered_at      TIMESTAMPTZ,
+    ended_at         TIMESTAMPTZ,
+    raw_payload      JSONB,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    agent_answered_at    TIMESTAMPTZ,
+    customer_answered_at TIMESTAMPTZ,
+    customer_missed_at   TIMESTAMPTZ,
+    hangup_by            TEXT,
+    caller_phone         TEXT,
+    did_number           TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_nsm_calls_lead         ON nsm_calls (lead_id, started_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_nsm_calls_caller       ON nsm_calls (caller_id, started_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_nsm_calls_provider_id  ON nsm_calls (provider, provider_call_id);
+  CREATE INDEX IF NOT EXISTS idx_nsm_calls_caller_phone ON nsm_calls (caller_phone);
+  CREATE INDEX IF NOT EXISTS idx_nsm_calls_did_number   ON nsm_calls (did_number);
+
+  -- nsm_users — heartbeat / activity columns (mirror of crm_users).
+  -- auto_paused_at / auto_pause_reason already exist on nsm_users.
+  ALTER TABLE nsm_users ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ;
+  ALTER TABLE nsm_users ADD COLUMN IF NOT EXISTS activity_status   TEXT;
+  ALTER TABLE nsm_users ADD COLUMN IF NOT EXISTS activity_break    JSONB;
+  ALTER TABLE nsm_users ADD COLUMN IF NOT EXISTS rest_started_at   TIMESTAMPTZ;
+
+  -- nsm_caller_activity_events — append-only activity audit (mirror of
+  -- caller_activity_events). One open span per caller, DB-enforced.
+  CREATE TABLE IF NOT EXISTS nsm_caller_activity_events (
+    id            BIGSERIAL PRIMARY KEY,
+    caller_id     UUID NOT NULL REFERENCES nsm_users(id) ON DELETE CASCADE,
+    tag           TEXT NOT NULL,
+    started_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ended_at      TIMESTAMPTZ,
+    duration_sec  INT,
+    context       JSONB,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  CREATE INDEX IF NOT EXISTS nsm_caller_activity_events_caller_idx
+    ON nsm_caller_activity_events(caller_id, started_at DESC);
+  CREATE UNIQUE INDEX IF NOT EXISTS nsm_caller_activity_events_one_open
+    ON nsm_caller_activity_events(caller_id) WHERE ended_at IS NULL;
+
+  -- nsm_lead_call_notes — post-call form rows (mirror of lead_call_notes)
+  CREATE TABLE IF NOT EXISTS nsm_lead_call_notes (
+    id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    lead_id               UUID NOT NULL REFERENCES nsm_leads(id) ON DELETE CASCADE,
+    caller_id             UUID NOT NULL REFERENCES nsm_users(id),
+    call_id               UUID REFERENCES nsm_calls(id) ON DELETE SET NULL,
+    sugar_confirmation    TEXT,
+    confirmed_range       TEXT,
+    range_for             TEXT,
+    patient_age           TEXT,
+    diet_status           TEXT,
+    takes_medicine        TEXT,
+    note                  TEXT,
+    outcome               TEXT NOT NULL
+      CHECK (outcome IN ('completed','follow_up','not_interested','not_picked','auto_paused','incomplete')),
+    follow_up_at          TIMESTAMPTZ,
+    interested            TEXT,
+    hba1c                 TEXT,
+    other_languages       TEXT,
+    working_professional  TEXT,
+    location              TEXT,
+    already_paid          TEXT,
+    webinar_attended      TEXT,
+    available_for_webinar TEXT,
+    next_batch_joining    TEXT,
+    outcome_subtag        TEXT,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  CREATE INDEX IF NOT EXISTS idx_nsm_notes_lead   ON nsm_lead_call_notes (lead_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_nsm_notes_caller ON nsm_lead_call_notes (caller_id, created_at DESC);
+
+  -- nsm_leads — denormalized latest-note + workflow columns (mirror of leads).
+  -- The per-field "last_note_*" values the form prefills from come from the
+  -- LATERAL note join in the shared LEAD_SELECT, not physical columns; only the
+  -- filter/sort denorms below are stored on the lead row.
+  ALTER TABLE nsm_leads ADD COLUMN IF NOT EXISTS last_note_interested     TEXT;
+  ALTER TABLE nsm_leads ADD COLUMN IF NOT EXISTS last_note_outcome        TEXT;
+  ALTER TABLE nsm_leads ADD COLUMN IF NOT EXISTS last_note_at             TIMESTAMPTZ;
+  ALTER TABLE nsm_leads ADD COLUMN IF NOT EXISTS last_note_outcome_subtag TEXT;
+  ALTER TABLE nsm_leads ADD COLUMN IF NOT EXISTS follow_up_at             TIMESTAMPTZ;
+  ALTER TABLE nsm_leads ADD COLUMN IF NOT EXISTS completed_at             TIMESTAMPTZ;
+  ALTER TABLE nsm_leads ADD COLUMN IF NOT EXISTS lead_tag                 TEXT;
+  ALTER TABLE nsm_leads ADD COLUMN IF NOT EXISTS next_batch_parked        BOOLEAN NOT NULL DEFAULT FALSE;
+  ALTER TABLE nsm_leads ADD COLUMN IF NOT EXISTS next_batch_parked_at     TIMESTAMPTZ;
+  ALTER TABLE nsm_leads ADD COLUMN IF NOT EXISTS pinned_at                TIMESTAMPTZ;
+  CREATE INDEX IF NOT EXISTS idx_nsm_leads_followup ON nsm_leads (follow_up_at) WHERE last_note_outcome = 'follow_up';
+
+  -- NSM-Caller IVR reminders (Cloudshope), scheduled from the caller workspace's
+  -- own IVR page against nsm_leads. Mirrors the NSM-IVR engine; per-(lead,campaign)
+  -- once-only claim lives in nsm_lead_ivr_calls. ivr_attempts is a global cap.
+  ALTER TABLE nsm_leads ADD COLUMN IF NOT EXISTS ivr_attempts INT NOT NULL DEFAULT 0;
+  ALTER TABLE nsm_leads ADD COLUMN IF NOT EXISTS ivr_status   TEXT;
+  ALTER TABLE nsm_leads ADD COLUMN IF NOT EXISTS last_ivr_at  TIMESTAMPTZ;
+  ALTER TABLE nsm_leads ADD COLUMN IF NOT EXISTS opted_out    BOOLEAN NOT NULL DEFAULT FALSE;
+  CREATE TABLE IF NOT EXISTS nsm_lead_ivr_calls (
+    id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    lead_id     UUID        NOT NULL REFERENCES nsm_leads(id) ON DELETE CASCADE,
+    campaign_id TEXT        NOT NULL,
+    status      TEXT,
+    response    JSONB,
+    fired_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (lead_id, campaign_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_nsm_lead_ivr_calls_lead ON nsm_lead_ivr_calls (lead_id);
+`));
+if (_nsmCallerWorkflowMigration && typeof _nsmCallerWorkflowMigration.catch === 'function') {
+  _nsmCallerWorkflowMigration.catch(err => console.error('[Migration] nsm caller workflow error:', err.message));
+}
+
+// Auto-migrate: NSM Web-Reminder admin config tables — independent equivalents
+// of Meta's timer_settings (caller-page timings) and the telegram alert
+// recipients, scoped to the NSM caller workspace.
+const _nsmDashboardMigration = pool.query(`
+  CREATE TABLE IF NOT EXISTS nsm_timer_settings (
+    id          SMALLINT    PRIMARY KEY DEFAULT 1,
+    settings    JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (id = 1)
+  );
+  INSERT INTO nsm_timer_settings (id, settings) VALUES (1, '{}'::jsonb) ON CONFLICT (id) DO NOTHING;
+
+  CREATE TABLE IF NOT EXISTS nsm_telegram_alerts (
+    id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    telegram_chat_id TEXT        NOT NULL,
+    target_type      TEXT        NOT NULL DEFAULT 'team_leader',  -- team_leader | manager
+    team_leader_id   UUID,
+    department       TEXT,
+    label            TEXT,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+
+  -- nsm_media — uploaded WhatsApp template media (image/video). Stored in
+  -- Postgres (not disk) because Render's filesystem is ephemeral; served
+  -- publicly at /api/nsm-media/:id so whapi can fetch it as a media URL.
+  CREATE TABLE IF NOT EXISTS nsm_media (
+    id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    mime       TEXT        NOT NULL,
+    size       INTEGER     NOT NULL,
+    data       BYTEA       NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+
+  -- nsm_call_config — NSM-Caller IVR campaigns (mirrors nsm_ivr_call_config but
+  -- for the caller workspace; same dynamic-campaigns JSONB shape).
+  CREATE TABLE IF NOT EXISTS nsm_call_config (
+    id          SMALLINT    PRIMARY KEY DEFAULT 1,
+    config      JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (id = 1)
+  );
+  INSERT INTO nsm_call_config (id, config) VALUES (1, '{}'::jsonb) ON CONFLICT (id) DO NOTHING;
+
+  -- Telegram alert config (bot token + chat id) — one row per NSM workspace.
+  CREATE TABLE IF NOT EXISTS nsm_tele_config (
+    id SMALLINT PRIMARY KEY DEFAULT 1, config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), CHECK (id = 1)
+  );
+  INSERT INTO nsm_tele_config (id, config) VALUES (1, '{}'::jsonb) ON CONFLICT (id) DO NOTHING;
+  CREATE TABLE IF NOT EXISTS nsm_ivr_tele_config (
+    id SMALLINT PRIMARY KEY DEFAULT 1, config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), CHECK (id = 1)
+  );
+  INSERT INTO nsm_ivr_tele_config (id, config) VALUES (1, '{}'::jsonb) ON CONFLICT (id) DO NOTHING;
+`);
+if (_nsmDashboardMigration && typeof _nsmDashboardMigration.catch === 'function') {
+  _nsmDashboardMigration.catch(err => console.error('[Migration] nsm dashboard config error:', err.message));
+}
+
+// Auto-migrate: nsm_settings — single-row JSONB config for the NSM-Caller
+// workspace (WhatsApp message templates, etc.). Mirrors timer_settings.
+const _nsmSettingsMigration = pool.query(`
+  CREATE TABLE IF NOT EXISTS nsm_settings (
+    id          SMALLINT    PRIMARY KEY DEFAULT 1,
+    settings    JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (id = 1)
+  );
+  INSERT INTO nsm_settings (id, settings) VALUES (1, '{}'::jsonb) ON CONFLICT (id) DO NOTHING;
+`);
+if (_nsmSettingsMigration && typeof _nsmSettingsMigration.catch === 'function') {
+  _nsmSettingsMigration.catch(err => console.error('[Migration] nsm_settings error:', err.message));
+}
+
+// Auto-migrate: nsm_batch_messages — send-once log for the WhatsApp reminder
+// cadence. The UNIQUE(batch_id, template_key) doubles as a cross-process lock:
+// the scheduler INSERTs ON CONFLICT DO NOTHING and only the winner sends.
+const _nsmBatchMsgMigration = _nsmBatchesMigration.then(() => pool.query(`
+  CREATE TABLE IF NOT EXISTS nsm_batch_messages (
+    id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    batch_id     UUID        NOT NULL REFERENCES nsm_batches(id) ON DELETE CASCADE,
+    template_key TEXT        NOT NULL,
+    status       TEXT,
+    response     JSONB,
+    sent_at      TIMESTAMPTZ,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (batch_id, template_key)
+  );
+  CREATE INDEX IF NOT EXISTS idx_nsm_batch_messages_batch ON nsm_batch_messages (batch_id);
+`));
+if (_nsmBatchMsgMigration && typeof _nsmBatchMsgMigration.catch === 'function') {
+  _nsmBatchMsgMigration.catch(err => console.error('[Migration] nsm_batch_messages error:', err.message));
+}
+
+// Auto-migrate: NSM-IVR — a fully independent clone of the NSM-Caller marketing
+// data (own nsm_ivr_* tables, no callers/assignment). Webinar batches + Meta
+// leads + WhatsApp community + reminder templates. Shares nothing with nsm_*.
+const _nsmIvrMigration = pool.query(`
+  CREATE TABLE IF NOT EXISTS nsm_ivr_batches (
+    id                       UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    batch_name               TEXT        NOT NULL,
+    start_at                 TIMESTAMPTZ,
+    end_at                   TIMESTAMPTZ,
+    webinar_at               TIMESTAMPTZ,
+    webinar_link             TEXT,
+    webinar_meeting_id       TEXT,
+    meta_forms               JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    whatsapp_community_id    TEXT,
+    whatsapp_group_id        TEXT,
+    whatsapp_member_group_id TEXT,
+    whatsapp_group_invite    TEXT,
+    whatsapp_group_count     INT         NOT NULL DEFAULT 0,
+    whatsapp_group_error     TEXT,
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  CREATE INDEX IF NOT EXISTS idx_nsm_ivr_batches_created ON nsm_ivr_batches (created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS nsm_ivr_settings (
+    id          SMALLINT    PRIMARY KEY DEFAULT 1,
+    settings    JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (id = 1)
+  );
+  INSERT INTO nsm_ivr_settings (id, settings) VALUES (1, '{}'::jsonb) ON CONFLICT (id) DO NOTHING;
+`);
+if (_nsmIvrMigration && typeof _nsmIvrMigration.catch === 'function') {
+  _nsmIvrMigration.catch(err => console.error('[Migration] nsm_ivr error:', err.message));
+}
+
+const _nsmIvrChildMigration = _nsmIvrMigration.then(() => pool.query(`
+  CREATE TABLE IF NOT EXISTS nsm_ivr_leads (
+    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    meta_lead_id  TEXT        NOT NULL UNIQUE,
+    batch_id      UUID        REFERENCES nsm_ivr_batches(id) ON DELETE CASCADE,
+    form_id       TEXT,
+    form_name     TEXT,
+    created_time  TIMESTAMPTZ,
+    full_name     TEXT,
+    phone         TEXT,
+    email         TEXT,
+    city          TEXT,
+    field_data    JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    whatsapp_added_at TIMESTAMPTZ,
+    deleted_at    TIMESTAMPTZ,
+    synced_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  CREATE INDEX IF NOT EXISTS idx_nsm_ivr_leads_batch ON nsm_ivr_leads (batch_id, created_time DESC);
+
+  CREATE TABLE IF NOT EXISTS nsm_ivr_batch_messages (
+    id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    batch_id     UUID        NOT NULL REFERENCES nsm_ivr_batches(id) ON DELETE CASCADE,
+    template_key TEXT        NOT NULL,
+    status       TEXT,
+    response     JSONB,
+    sent_at      TIMESTAMPTZ,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (batch_id, template_key)
+  );
+
+  -- CloudShope IVR call-fire tracking (one timestamp per trigger per lead so
+  -- each call fires at most once).
+  ALTER TABLE nsm_ivr_leads ADD COLUMN IF NOT EXISTS ivr_immediate_at TIMESTAMPTZ;
+  ALTER TABLE nsm_ivr_leads ADD COLUMN IF NOT EXISTS ivr_before_at    TIMESTAMPTZ;
+  ALTER TABLE nsm_ivr_leads ADD COLUMN IF NOT EXISTS ivr_after_at     TIMESTAMPTZ;
+  -- Numbers WhatsApp won't let us force-add get an invite link DM instead;
+  -- this records that so we don't re-DM every tick.
+  ALTER TABLE nsm_ivr_leads ADD COLUMN IF NOT EXISTS whatsapp_invited_at TIMESTAMPTZ;
+
+  -- Cloudshope reminder model (WF-06): three campaigns — immediate (on lead
+  -- arrival), before_day (7PM the day before webinar), live_day (1:30PM on the
+  -- webinar day). Each lead is dialled at most once per campaign (claim cols).
+  -- ivr_attempts is a hard safety cap (< 10); opted_out respects do-not-call;
+  -- Cloudshope auto-retries unconnected calls on its side via retry_did.
+  ALTER TABLE nsm_ivr_leads ADD COLUMN IF NOT EXISTS ivr_before_day_at TIMESTAMPTZ;
+  ALTER TABLE nsm_ivr_leads ADD COLUMN IF NOT EXISTS ivr_live_day_at   TIMESTAMPTZ;
+  ALTER TABLE nsm_ivr_leads ADD COLUMN IF NOT EXISTS ivr_attempts      INT NOT NULL DEFAULT 0;
+  ALTER TABLE nsm_ivr_leads ADD COLUMN IF NOT EXISTS ivr_status        TEXT;
+  ALTER TABLE nsm_ivr_leads ADD COLUMN IF NOT EXISTS last_ivr_at       TIMESTAMPTZ;
+  ALTER TABLE nsm_ivr_leads ADD COLUMN IF NOT EXISTS opted_out         BOOLEAN NOT NULL DEFAULT FALSE;
+
+  -- Dynamic IVR campaigns: admins add/remove their own reminder campaigns in
+  -- the IVR page (stored in nsm_ivr_call_config.config.campaigns). Because
+  -- campaign count is no longer fixed, "already called" tracking lives here
+  -- instead of fixed claim columns. UNIQUE(lead_id, campaign_id) + INSERT ...
+  -- ON CONFLICT DO NOTHING = atomic once-per-(lead, campaign) claim.
+  CREATE TABLE IF NOT EXISTS nsm_ivr_lead_calls (
+    id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    lead_id     UUID        NOT NULL REFERENCES nsm_ivr_leads(id) ON DELETE CASCADE,
+    campaign_id TEXT        NOT NULL,
+    status      TEXT,                     -- 'called' | 'failed'
+    response    JSONB,
+    fired_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (lead_id, campaign_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_nsm_ivr_lead_calls_lead ON nsm_ivr_lead_calls (lead_id);
+`));
+if (_nsmIvrChildMigration && typeof _nsmIvrChildMigration.catch === 'function') {
+  _nsmIvrChildMigration.catch(err => console.error('[Migration] nsm_ivr child error:', err.message));
+}
+
+// Auto-migrate: nsm_ivr_call_config — single-row JSONB config for the NSM-IVR
+// "IVR" page (CloudShope voice-call triggers: immediate / before webinar /
+// after webinar — each with a voice id + offset + enabled flag).
+const _nsmIvrCallCfgMigration = pool.query(`
+  CREATE TABLE IF NOT EXISTS nsm_ivr_call_config (
+    id          SMALLINT    PRIMARY KEY DEFAULT 1,
+    config      JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (id = 1)
+  );
+  INSERT INTO nsm_ivr_call_config (id, config) VALUES (1, '{}'::jsonb) ON CONFLICT (id) DO NOTHING;
+`);
+if (_nsmIvrCallCfgMigration && typeof _nsmIvrCallCfgMigration.catch === 'function') {
+  _nsmIvrCallCfgMigration.catch(err => console.error('[Migration] nsm_ivr_call_config error:', err.message));
+}
+
 // ── Security middleware ──
 app.use(helmet());
 app.use(cors({ origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173' }));
@@ -770,6 +1268,22 @@ app.use('/api',        leadsRouter);
 app.use('/api',        eventsRouter);
 app.use('/api/auth',   authLimiter, authRouter);
 app.use('/api/admin/telegram-alerts', telegramAlertsRouter);
+// Public: serve uploaded NSM WhatsApp template media (image/video) by id so
+// whapi can fetch it. No auth — ids are unguessable UUIDs.
+app.get('/api/nsm-media/:id', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT mime, data FROM nsm_media WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).end();
+    res.set('Content-Type', rows[0].mime || 'application/octet-stream');
+    res.set('Cache-Control', 'public, max-age=86400');
+    return res.send(rows[0].data);
+  } catch (e) {
+    return res.status(500).end();
+  }
+});
+
+app.use('/api/admin/nsm-ivr', nsmIvrRouter);   // NSM-IVR marketing (independent of nsm)
+app.use('/api/admin/nsm', nsmDashboardRouter); // NSM Web-Reminder dashboard (perf/report/timer/alerts) — specific paths; rest fall through to adminRouter's /nsm/*
 app.use('/api/admin',  adminRouter);
 // Recordings MUST be mounted before /api/caller — callerRouter uses
 // the bearer-JWT callerAuth middleware which rejects any request that
@@ -782,6 +1296,14 @@ app.use('/api/admin',  adminRouter);
 app.use('/api/caller/recordings', recordingsRouter);
 app.use('/api/caller', callerRouter);
 app.use('/api/caller', callsRouter);
-app.use('/api/webhooks', webhooksRouter);
+// Tata posts call-status/recording callbacks with NO auth and NO workspace
+// marker, so each workspace gets its OWN public mount running the same handler
+// against its own tables. Meta's /api/webhooks/* is byte-identical to before
+// (default factory args reproduce the Meta literals); NSM gets a parallel
+// /api/nsm-webhooks/* mount bound to nsm_calls / nsm_leads / nsm_users.
+app.use('/api/webhooks',     createWebhooksRouter({ calls: 'calls',     leads: 'leads',     users: 'crm_users' }));
+app.use('/api/nsm-webhooks', createWebhooksRouter({ calls: 'nsm_calls', leads: 'nsm_leads', users: 'nsm_users' }));
+// NSM-Caller's independent caller-facing API (own scoped JWT, own nsm_* data).
+app.use('/api/nsm-caller', nsmCallerRouter);
 
 module.exports = app;
