@@ -112,7 +112,7 @@ function fmtDuration(sec) {
   return m > 0 ? `${m}m ${r}s` : `${r}s`;
 }
 
-export default function CompletedLeadsModule({ jwt, onCount }) {
+export default function CompletedLeadsModule({ jwt, onCount, previewMode = false }) {
   // Bubble the count up to CallerShell for the header chip. Hook is
   // declared below right after the leads state — defined here just to
   // keep the prop visible at the top.
@@ -169,7 +169,7 @@ export default function CompletedLeadsModule({ jwt, onCount }) {
 
   /* SSE — refresh when this caller's notes change */
   useEffect(() => {
-    if (!jwt) return;
+    if (!jwt || previewMode) return;   // preview: no live stream (read-only)
     const url = `/api/caller/leads/events?token=${encodeURIComponent(jwt)}`;
     const es  = new EventSource(url);
     sseRef.current = es;

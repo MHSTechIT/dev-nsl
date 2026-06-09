@@ -1,28 +1,21 @@
 import { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import BrandSelect from '../components/BrandSelect';
+import ManagerProfileMenu from '../components/ManagerProfileMenu';
 import SalesLeadsTable        from './SalesLeadsTable';
 import SalesLeadsLogicView    from './SalesLeadsLogicView';
-import SalesPerformanceView   from './SalesPerformanceView';
 import SalesNotificationsView from './SalesNotificationsView';
 import SalesTimerView         from './SalesTimerView';
 import SalesAlertsView        from './SalesAlertsView';
+import AccessView             from '../admin/AccessView';
 import SalesCompletedCallsView from './SalesCompletedCallsView';
 import SalesNewPageView       from './SalesNewPageView';
 import UsersModule            from './UsersModule';
 
 const TABS = [
   {
-    id: 'performance',
-    label: 'Performance',
-    icon: (
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <polyline points="3 17 9 11 13 15 21 7"/><polyline points="14 7 21 7 21 14"/>
-      </svg>
-    ),
-  },
-  {
-    // New page slotted right next to Performance. Functionality TBD — renders
-    // SalesNewPageView (a placeholder) for now. Rename id/label when defined.
+    // Lead-ops landing tab (Performance tab was removed). Renders
+    // SalesNewPageView. Rename id/label when its scope is finalized.
     id: 'newpage',
     label: 'New Page',
     icon: (
@@ -98,7 +91,43 @@ const TABS = [
       </svg>
     ),
   },
+  {
+    id: 'access',
+    label: 'Access',
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>
+      </svg>
+    ),
+  },
 ];
+
+/* Sales (Web Reminder) pages a manager/TL/admin sales user can be granted/denied. */
+const SALES_ACCESS_PAGES = [
+  { id: 'newpage',        label: 'New Page' },
+  { id: 'leads',          label: 'Leads' },
+  { id: 'logic',          label: 'Leads Logic' },
+  { id: 'notifications',  label: 'Notifications' },
+  { id: 'completed_calls',label: 'Completed Calls' },
+  { id: 'timer',          label: 'Timer' },
+  { id: 'alerts',         label: 'Alerts' },
+  { id: 'users',          label: 'Users' },
+];
+
+/* The actual pages a caller sees in the CallerShell login — used for
+   junior_caller / senior_caller users in the Access panel. */
+const CALLER_ACCESS_PAGES = [
+  { id: 'call',         label: 'Call' },
+  { id: 'assigned',     label: 'Assigned Leads' },
+  { id: 'completed',    label: 'Completed Leads' },
+  { id: 'not_picked',   label: 'Not Picked' },
+  { id: 'missed_calls', label: 'Missed Calls' },
+  { id: 'untouched',    label: 'Untouched' },
+  { id: 'next_batch',   label: 'Next Batch' },
+];
+
+const CALLER_ROLES = new Set(['junior_caller', 'senior_caller']);
+const accessPagesForUser = (u) => (CALLER_ROLES.has(u.role) ? CALLER_ACCESS_PAGES : SALES_ACCESS_PAGES);
 
 /* Manager-mode only — a "User" tab slotted next to Notifications. */
 const USER_TAB = {
@@ -111,144 +140,6 @@ const USER_TAB = {
     </svg>
   ),
 };
-
-/* Logo button + profile popover for the manager dashboard — clicking the
-   logo reveals the manager's name, position, phone and email, plus Sign Out. */
-function ManagerProfileMenu({ profile, onSignOut, onOpenSettings }) {
-  const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState({ top: 0, right: 16 });
-  const wrapRef = useRef(null);
-  const btnRef = useRef(null);
-
-  function toggle() {
-    setOpen(o => {
-      const next = !o;
-      if (next && btnRef.current) {
-        const r = btnRef.current.getBoundingClientRect();
-        setPos({ top: r.bottom + 8, right: Math.max(8, window.innerWidth - r.right) });
-      }
-      return next;
-    });
-  }
-
-  useEffect(() => {
-    if (!open) return undefined;
-    function onDoc(e) { if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false); }
-    function onScroll() { setOpen(false); }
-    document.addEventListener('mousedown', onDoc);
-    window.addEventListener('scroll', onScroll, true);
-    window.addEventListener('resize', onScroll);
-    return () => {
-      document.removeEventListener('mousedown', onDoc);
-      window.removeEventListener('scroll', onScroll, true);
-      window.removeEventListener('resize', onScroll);
-    };
-  }, [open]);
-
-  const roleLabel = String(profile?.role || '')
-    .split('_').filter(Boolean)
-    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
-
-  const iconStroke = { stroke: '#5B21B6', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', fill: 'none' };
-
-  return (
-    <div ref={wrapRef} style={{ position: 'relative', flexShrink: 0 }}>
-      <button
-        ref={btnRef}
-        type="button"
-        onClick={toggle}
-        title="Profile"
-        aria-label="Profile"
-        style={{
-          border: 'none', background: 'transparent', cursor: 'pointer', padding: 0,
-          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-          lineHeight: 0, transition: 'transform 150ms',
-        }}
-        onMouseEnter={e => { e.currentTarget.style.transform = 'scale(1.06)'; }}
-        onMouseLeave={e => { e.currentTarget.style.transform = 'scale(1)'; }}
-      >
-        <img src="/favicon.png" alt="" style={{ width: 40, height: 40, objectFit: 'contain' }} />
-      </button>
-
-      {open && createPortal(
-        <div onMouseDown={e => e.stopPropagation()} style={{
-          position: 'fixed', top: pos.top, right: pos.right,
-          width: 264, background: '#fff', borderRadius: 14,
-          border: '1px solid rgba(209,196,240,0.60)',
-          boxShadow: '0 16px 48px rgba(91,33,182,0.22)',
-          zIndex: 10000, overflow: 'hidden', fontFamily: 'Outfit, sans-serif',
-        }}>
-          <div style={{ padding: '16px 16px 14px' }}>
-            <div style={{ fontWeight: 800, fontSize: '1rem', color: '#3B0764', wordBreak: 'break-word' }}>
-              {profile?.full_name || '—'}
-            </div>
-            {roleLabel && (
-              <span style={{
-                display: 'inline-block', marginTop: 6, padding: '2px 10px', borderRadius: 50,
-                background: 'rgba(91,33,182,0.10)', color: '#5B21B6',
-                fontSize: '0.68rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em',
-              }}>
-                {roleLabel}
-              </span>
-            )}
-            <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 9 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: '0.82rem', color: 'rgba(59,7,100,0.85)' }}>
-                <svg width="14" height="14" viewBox="0 0 24 24" {...iconStroke} style={{ flexShrink: 0 }}>
-                  <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
-                </svg>
-                <span style={{ wordBreak: 'break-word' }}>{profile?.phone || 'No phone'}</span>
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: '0.82rem', color: 'rgba(59,7,100,0.85)' }}>
-                <svg width="14" height="14" viewBox="0 0 24 24" {...iconStroke} style={{ flexShrink: 0 }}>
-                  <rect x="2" y="4" width="20" height="16" rx="2"/>
-                  <path d="M22 7l-10 6L2 7"/>
-                </svg>
-                <span style={{ wordBreak: 'break-word' }}>{profile?.email || '—'}</span>
-              </div>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => { setOpen(false); if (onOpenSettings) onOpenSettings(); }}
-            style={{
-              width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
-              padding: '11px 16px', border: 'none', borderTop: '1px solid rgba(209,196,240,0.55)',
-              background: '#fff', color: '#5B21B6',
-              fontFamily: 'Outfit, sans-serif', fontWeight: 700, fontSize: '0.84rem', cursor: 'pointer',
-            }}
-            onMouseEnter={e => { e.currentTarget.style.background = 'rgba(91,33,182,0.05)'; }}
-            onMouseLeave={e => { e.currentTarget.style.background = '#fff'; }}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="3"/>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-            </svg>
-            Settings
-          </button>
-          <button
-            type="button"
-            onClick={onSignOut}
-            style={{
-              width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
-              padding: '11px 16px', border: 'none', borderTop: '1px solid rgba(209,196,240,0.55)',
-              background: 'rgba(254,242,242,0.70)', color: '#DC2626',
-              fontFamily: 'Outfit, sans-serif', fontWeight: 700, fontSize: '0.84rem', cursor: 'pointer',
-            }}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/>
-              <polyline points="16 17 21 12 16 7"/>
-              <line x1="21" y1="12" x2="9" y2="12"/>
-            </svg>
-            Sign Out
-          </button>
-        </div>,
-        document.body,
-      )}
-    </div>
-  );
-}
 
 export default function SalesDashboardModule({
   token,
@@ -268,12 +159,24 @@ export default function SalesDashboardModule({
   lockedTeamLeaderId = null,
   tlProfile          = null,
 }) {
-  const [tab, setTab] = useState('performance');
+  const [tab, setTab] = useState('newpage');
+  /* Workspace filter — governs every Web Reminder tab at once. 'all' aggregates
+     meta+yt+meta2 (data tabs); concrete sources scope to one workspace.
+     Persisted so it survives tab switches / refreshes. */
+  const [source, setSource] = useState(() => sessionStorage.getItem('mhs_wr_source') || 'all');
+  useEffect(() => { sessionStorage.setItem('mhs_wr_source', source); }, [source]);
+  const WORKSPACE_OPTS = [
+    { id: 'all',   label: 'All workspaces' },
+    { id: 'meta',  label: 'Meta' },
+    { id: 'yt',    label: 'YT' },
+    { id: 'meta2', label: 'Meta 2.0' },
+    { id: 'metatemp', label: 'Meta Temp' },
+  ];
   /* Manager mode slots the "User" tab in just before Notifications and drops
      "Timer" — Timer lives in the Settings page (reached via the profile menu).
-     Order: Performance · Leads · Leads Logic · User · Notifications.
+     Order: New Page · Leads · Leads Logic · User · Notifications.
 
-     TL mode: Performance · Leads · Leads Logic · User · Notifications ·
+     TL mode: New Page · Leads · Leads Logic · User · Notifications ·
      Completed Calls. Timer and Alerts are intentionally hidden — TLs
      don't tune global timer config and don't manage Telegram recipients
      (those are manager+ responsibilities). */
@@ -289,13 +192,37 @@ export default function SalesDashboardModule({
     const tlVisible = TABS.filter(t => t.id !== 'timer' && t.id !== 'alerts');
     tabs = withUserBeforeNotifications(tlVisible);
   } else if (managerMode) {
-    // Manager subset: Performance (+ adjacent new page), Leads, Leads Logic,
-    // User, Notifications. Timer/Alerts/Completed Calls are intentionally out.
-    const mgrIds = ['performance', 'newpage', 'leads', 'logic', 'notifications'];
+    // Manager subset: New Page, Leads, Leads Logic, User, Notifications.
+    // Timer/Alerts/Completed Calls are intentionally out.
+    const mgrIds = ['newpage', 'leads', 'logic', 'notifications'];
     tabs = withUserBeforeNotifications(TABS.filter(t => mgrIds.includes(t.id)));
   } else {
     tabs = TABS;
   }
+
+  /* Per-user page access — mirrors CallerShell. A manager/TL only sees the
+     pages left ON in the Access panel (crm_users.page_access). Default ON:
+     a missing key (or super-admin, who gets {}) means "shown". The 'user'
+     tab maps to the 'users' Access key; every other tab uses its own id. */
+  const [pageAccess, setPageAccess] = useState({});
+  useEffect(() => {
+    if (!(tlMode || managerMode) || !token) return;
+    fetch('/api/admin/my-page-access', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(d => setPageAccess(d.page_access || {}))
+      .catch(() => {});
+  }, [tlMode, managerMode, token]);
+
+  if (tlMode || managerMode) {
+    const accessIdOf = (id) => (id === 'user' ? 'users' : id);
+    tabs = tabs.filter(t => pageAccess[accessIdOf(t.id)] !== false);
+  }
+
+  /* If the active tab got hidden by an access change, fall back to the first
+     still-visible tab so the user is never left on a blank panel. */
+  useEffect(() => {
+    if (tabs.length && !tabs.some(t => t.id === tab)) setTab(tabs[0].id);
+  }, [pageAccess]); // eslint-disable-line react-hooks/exhaustive-deps
   /* Convenience: which scoped-profile mode is active? Used for the profile
      menu + downstream prop forwarding. tlProfile takes precedence when
      both are accidentally true (defensive). */
@@ -322,7 +249,7 @@ export default function SalesDashboardModule({
       try {
         // The backend infers the team-leader scope from the JWT itself
         // (no extra query param needed) — same way managerMode works.
-        const res = await fetch('/api/admin/auto-paused-callers', {
+        const res = await fetch(`/api/admin/auto-paused-callers?source=${encodeURIComponent(source)}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!res.ok) return;
@@ -333,7 +260,7 @@ export default function SalesDashboardModule({
     loadCount();
     const id = setInterval(loadCount, 30000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [token]);
+  }, [token, source]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -350,7 +277,7 @@ export default function SalesDashboardModule({
       {/* Tab bar (left) + action slot (right) — one row.
           Sticky-top so it stays visible as the user scrolls the data below. */}
       <div style={{
-        display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
+        display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'nowrap',
         position: 'sticky', top: 0, zIndex: 30,
         background: '#EDEAF8', padding: '6px 0',
       }}>
@@ -398,7 +325,14 @@ export default function SalesDashboardModule({
             );
           })}
         </div>
-        <div style={{ flex: 1 }} />
+        {/* Workspace dropdown — top-right of the tabs line (like Marketing), no label. */}
+        <div style={{ marginLeft: 'auto', flexShrink: 0, width: 160 }}>
+          <BrandSelect
+            value={source}
+            onChange={(v) => setSource(v)}
+            options={WORKSPACE_OPTS.map(o => ({ value: o.id, label: o.label }))}
+          />
+        </div>
         <div
           ref={actionsSlotRef}
           style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', justifyContent: 'flex-end' }}
@@ -408,11 +342,10 @@ export default function SalesDashboardModule({
         )}
       </div>
 
-      {tab === 'performance'   && <SalesPerformanceView   token={token} actionsSlotEl={slotEl} />}
-      {tab === 'newpage'       && <SalesNewPageView       token={token} />}
-      {tab === 'leads'         && <SalesLeadsTable        token={token} />}
-      {tab === 'logic'         && <SalesLeadsLogicView    token={token} />}
-      {tab === 'notifications' && <SalesNotificationsView token={token} />}
+      {tab === 'newpage'       && <SalesNewPageView       token={token} source={source} />}
+      {tab === 'leads'         && <SalesLeadsTable        token={token} source={source} />}
+      {tab === 'logic'         && <SalesLeadsLogicView    token={token} source={source} />}
+      {tab === 'notifications' && <SalesNotificationsView token={token} source={source} />}
       {tab === 'user'          && (
         <UsersModule
           token={token}
@@ -423,9 +356,10 @@ export default function SalesDashboardModule({
           actionsSlotEl={slotEl}
         />
       )}
-      {tab === 'completed_calls' && <SalesCompletedCallsView token={token} />}
-      {tab === 'timer'         && <SalesTimerView         token={token} readOnly={tlMode} />}
-      {tab === 'alerts'        && <SalesAlertsView        token={token} />}
+      {tab === 'completed_calls' && <SalesCompletedCallsView token={token} source={source} />}
+      {tab === 'timer'         && <SalesTimerView         token={token} source={source} readOnly={tlMode} />}
+      {tab === 'alerts'        && <SalesAlertsView        token={token} source={source} />}
+      {tab === 'access'        && <AccessView token={token} department="sales" pages={SALES_ACCESS_PAGES} pagesForUser={accessPagesForUser} />}
     </div>
   );
 }

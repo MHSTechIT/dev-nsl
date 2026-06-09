@@ -41,7 +41,7 @@ function timeAgo(iso) {
   return `${Math.floor(h / 24)}d ago`;
 }
 
-export default function SalesNotificationsView({ token }) {
+export default function SalesNotificationsView({ token, source = 'all' }) {
   const [callers, setCallers]       = useState([]);
   const [loading, setLoading]       = useState(true);
   const [error, setError]           = useState('');
@@ -51,7 +51,7 @@ export default function SalesNotificationsView({ token }) {
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch('/api/admin/auto-paused-callers', {
+      const res = await fetch(`/api/admin/auto-paused-callers?source=${encodeURIComponent(source)}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error('Failed to load notifications.');
@@ -64,7 +64,7 @@ export default function SalesNotificationsView({ token }) {
     } finally {
       setLoading(false);
     }
-  }, [token]);
+  }, [token, source]);
 
   /* Initial fetch + 30 s poll so a fresh auto-pause surfaces on its own. */
   useEffect(() => {

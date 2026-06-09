@@ -88,7 +88,7 @@ function fmtPhone(p) {
   return digits.startsWith('91') ? '+' + digits : '+91 ' + digits;
 }
 
-export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId, setMood, pendingAutoStart, clearPendingAutoStart, onCount }) {
+export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId, setMood, pendingAutoStart, clearPendingAutoStart, onCount, onRobotMessage, onBreakInfo, previewMode = false, callPageMode = false }) {
   const t = useTimerSettings();
   const [leads, setLeads]         = useState([]);
   // Mirror of `leads` for callbacks that need the FRESHEST value (e.g.
@@ -143,6 +143,13 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
   const [autoTotal, setAutoTotal]       = useState(0);
   const [cooldownLeft, setCooldownLeft] = useState(0);
   const [autoError, setAutoError]       = useState('');
+  /* Bumped on every fresh "Start Auto Call". Folded into the call-note
+     modal's key so a deliberate fresh start ALWAYS remounts the modal at
+     ext_check (the SmartFlow extension card) — even when the same lead was
+     just reopened by a stale refresh-restore snapshot at agent_ringing_1.
+     Without this, React reuses the old modal instance (same lead id) and the
+     fresh ext_check phase never appears. */
+  const [autoSession, setAutoSession]   = useState(0);
   const cooldownTimerRef = useRef(null);
 
   /* ── Modal-state persistence across browser refreshes ────────────────
@@ -341,6 +348,11 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
   const [otherMinutes, setOtherMinutes]   = useState(30);
   const breakTimerRef = useRef(null);
 
+  /* Bubble the current break state up to the shell (Call-page status card). */
+  useEffect(() => {
+    if (typeof onBreakInfo === 'function') onBreakInfo(breakInfo || null);
+  }, [breakInfo]); // eslint-disable-line react-hooks/exhaustive-deps
+
   /* Daily break budget — fetched from GET /api/caller/break-budget each time
      the break picker opens. Drives per-option greying (Tea ×2/day, Lunch ×1,
      2-hr ×1) and the Custom-break minute cap (shared 30-min/day pool).
@@ -374,7 +386,7 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
      modal owns (ON_CALL / IN_FORM / REASON_CARD). */
   const prevBreakSubRef = useRef(null);
   useEffect(() => {
-    if (!jwt) return;
+    if (!jwt || previewMode) return;   // read-only preview: no activity writes
     let sub = null;
     if (breakStep === 'choose' || breakStep === 'other') sub = 'BREAK_PICKER';
     else if (breakInfo) sub = 'ON_BREAK';
@@ -392,7 +404,7 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
 
   /* Leaving the Assigned page clears any sub-tag this module set so the next
      page's tag isn't shadowed by a stale ON_BREAK / picker tag. */
-  useEffect(() => () => { if (jwt) setActivitySub(jwt, null, null); }, [jwt]);
+  useEffect(() => () => { if (jwt && !previewMode) setActivitySub(jwt, null, null); }, [jwt]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ── Daily break budget ──────────────────────────────────────────────────
      Fetched fresh each time the picker opens (breakStep → 'choose'). Greys
@@ -499,6 +511,17 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
     return () => clearTimeout(id);
   }, [resumeRobotPulse, t.resumeRobotPulseMs]);
 
+  /* On the Call page, route the post-break resume line to the center robot
+     (CallModule) instead of flashing a separate corner robot. */
+  useEffect(() => {
+    if (!callPageMode || resumeRobotPulse === 0 || typeof onRobotMessage !== 'function') return;
+    onRobotMessage({
+      text: 'enna nanba break ah enjoy panningala vaanga call start pannalam',
+      clip: 42,
+      key: `resume-${resumeRobotPulse}`,
+    });
+  }, [callPageMode, resumeRobotPulse]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Queue-end refill modal — pops in two cases:
   //   1. 'auto_finished' — the auto-call queue just drained
   //   2. 'initial_empty' — the Assigned page loaded with zero leads
@@ -521,7 +544,8 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
     && lateReasonStep === null
     && !queueEndOpen
     && leads.length > 0
-    && isActive === true;   // never nudge while paused — the paused overlay owns the screen
+    && isActive === true    // never nudge while paused — the paused overlay owns the screen
+    && !callPageMode;       // on the Call page, CallModule's center robot owns idle nudges
   const { count: idleNudgeCount } = useRobotNudge({
     active: idleActive,
     intervalMs: t.robotNudgeIntervalMs,
@@ -537,6 +561,9 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
   });
 
   async function triggerCall(lead) {
+    // Admin preview is read-only — never place a real call. (Backend also
+    // blocks calls/start for preview tokens; this avoids the error toast.)
+    if (previewMode) throw new Error('Preview mode — calling is disabled.');
     const res = await fetch('/api/caller/calls/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${jwt}` },
@@ -680,6 +707,7 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
      existing stopAutoMode() guarantees no further calls will trigger
      until the caller manually presses Start Auto-Call again. */
   function startBreak(reason, minutes, message = '') {
+    if (previewMode) return;   // read-only admin preview
     stopAutoMode();
     const totalSec = Math.max(1, Math.round(minutes * 60));
     const now = Date.now();
@@ -842,6 +870,7 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
   }, [editLead, autoMode, breakInfo, jwt]);
 
   function startAutoMode() {
+    if (previewMode) return;   // read-only admin preview
     if (!leads.length) return;
     startAutoModeWith(leads);
   }
@@ -892,6 +921,9 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
     setAutoError('');
     setAutoMode('calling');
     const first = queue[0];
+    // Force a brand-new modal instance for this fresh start so it can't
+    // inherit a stale phase from a snapshot-restored modal of the same lead.
+    setAutoSession(s => s + 1);
     // FRESH START: open the modal at idle so the user sees the SmartFlow
     // extension confirmation overlay (ext_check) BEFORE the first Tata call
     // gets dialed. Auto-advance flows (advanceAutoCall, onSaved auto-advance)
@@ -1157,6 +1189,10 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+      {/* On the Call page (callPageMode) the leads table + Start/Stop button are
+          hidden — only the engine + the call-note form and alert/break cards
+          (overlays below) run, layered over the Call page. */}
+      {!callPageMode && (<>
       {/* Auto-dial button — standalone, no card chrome */}
       <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 10, fontFamily: 'Outfit, sans-serif', flexWrap: 'wrap' }}>
         {autoError && (
@@ -1279,13 +1315,14 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
           </div>
         )}
       </div>
+      </>)}
 
       {editLead && (
         <LeadCallNoteModal
           // Force a fresh modal instance per lead — without this React reuses
           // the same component when editLead changes, leaking phase / refs /
           // dedup history from the previous lead's call into the new one.
-          key={editLead.id}
+          key={`${editLead.id}:${autoSession}`}
           jwt={jwt}
           lead={editLead}
           /* Refresh-restore plumbing. restoreState seeds the modal's
@@ -2190,8 +2227,11 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
         </div>
       )}
 
-      {/* ── Resume-message robot flash (auto-clears after 7 s) ── */}
-      {resumeRobotPulse > 0 && (
+      {/* ── Resume-message robot flash (auto-clears after 7 s) ──
+         On the Call page (callPageMode) the corner robot is suppressed and the
+         line is routed to CallModule's center robot instead (see the effect
+         that calls onRobotMessage above). */}
+      {!callPageMode && resumeRobotPulse > 0 && (
         <RobotGuide
           variant="corner"
           mood="happy"
@@ -2204,8 +2244,9 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
 
       {/* ── Idle nudge robot — appears only after the first 30 s window
          (idleNudgeCount >= 1), so it does NOT speak the moment the caller
-         opens the page; then re-asks every 30 s, 5 misses auto-pause. ── */}
-      {idleActive && idleNudgeCount >= 1 && (
+         opens the page; then re-asks every 30 s, 5 misses auto-pause.
+         Suppressed on the Call page — CallModule's center robot owns idle. ── */}
+      {!callPageMode && idleActive && idleNudgeCount >= 1 && (
         <RobotGuide
           variant="corner"
           text="enna nanba call start pannalaya"

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import AdminLogin           from './admin/AdminLogin';
+import SaveSuccess          from './components/SaveSuccess';
 import MarketingModule      from './modules/MarketingModule';
 import UsersModule          from './modules/UsersModule';
 import SalesDashboardModule from './modules/SalesDashboardModule';
@@ -83,15 +84,38 @@ const WORKSPACES = [
   { id: 'meta',       label: 'Meta'       },
   { id: 'yt',         label: 'YT'         },
   { id: 'meta2',      label: 'Meta 2.0'   },
+  { id: 'metatemp',   label: 'Meta Temp'  },
 ];
 
 export default function CrmShell() {
+  /* Global "save success" animation — wrap window.fetch while the admin shell
+     is mounted and fire `mhs:saved` on any successful admin mutation
+     (POST/PUT/PATCH to /api/admin/*). SaveSuccess (rendered below) plays the
+     tick animation. Restored on unmount, so the caller login is never affected. */
+  useEffect(() => {
+    const orig = window.fetch;
+    window.fetch = async (...args) => {
+      const res = await orig(...args);
+      try {
+        const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
+        const method = String(
+          (args[1] && args[1].method) || (typeof args[0] === 'object' && args[0] && args[0].method) || 'GET'
+        ).toUpperCase();
+        if (res && res.ok && /^(POST|PUT|PATCH)$/.test(method) && url.includes('/api/admin/')) {
+          window.dispatchEvent(new Event('mhs:saved'));
+        }
+      } catch { /* observation only — never break the request */ }
+      return res;
+    };
+    return () => { window.fetch = orig; };
+  }, []);
+
   const [token, setToken]           = useState(() => sessionStorage.getItem('mhs_admin_token') || '');
   const [activeModule, setActive]   = useState('marketing');
   const [sidebarOpen, setSidebarOpen] = useState(false); // mobile drawer
   const [workspace, setWorkspace]   = useState(() => sessionStorage.getItem('mhs_crm_workspace') || 'meta');
   const [wsOpen, setWsOpen]         = useState(false);
-  /* Collapsed sidebar — clicking the brand row toggles between full (240px)
+  /* Collapsed sidebar — clicking the brand row toggles between full (200px)
      and rail (72px). Persisted across sessions. */
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () => sessionStorage.getItem('mhs_crm_sidebar_collapsed') === '1'
@@ -132,6 +156,8 @@ export default function CrmShell() {
 
   return (
     <div style={{ display: 'flex', minHeight: '100vh', background: '#EDEAF8', fontFamily: 'Outfit, sans-serif', padding: 16, gap: 16 }}>
+      {/* Global save-success tick animation (plays on any admin save). */}
+      <SaveSuccess />
       <style>{`
         @media (max-width: 900px) {
           .crm-shell-row { padding: 0 !important; gap: 0 !important; }
@@ -160,7 +186,7 @@ export default function CrmShell() {
       <aside
         className={`crm-sidebar ${sidebarOpen ? 'open' : ''}`}
         style={{
-          width: sidebarCollapsed ? 72 : 240,
+          width: sidebarCollapsed ? 72 : 200,
           transition: 'width 220ms ease',
           background: '#fff',
           borderRadius: 20,
@@ -210,69 +236,14 @@ export default function CrmShell() {
 
         {/* Module list */}
         <nav style={{ padding: sidebarCollapsed ? '14px 6px' : '14px 12px', flex: 1, display: 'flex', flexDirection: 'column', gap: 4, overflowY: 'auto', minHeight: 0 }}>
-          {/* Workspace dropdown (hidden in collapsed mode — no room for the
-              label; users can expand if they need to switch workspaces). */}
-          {!sidebarCollapsed && (
-          <div style={{ position: 'relative', margin: '4px 4px 8px' }} onMouseDown={e => e.stopPropagation()}>
-            <button
-              onClick={() => setWsOpen(o => !o)}
-              style={{
-                width: '100%',
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                padding: '6px 8px', borderRadius: 8, border: 'none',
-                background: wsOpen ? 'rgba(91,33,182,0.08)' : 'transparent',
-                color: 'rgba(91,33,182,0.60)',
-                fontFamily: 'Outfit, sans-serif',
-                fontSize: '0.66rem', fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase',
-                cursor: 'pointer',
-              }}
-              onMouseEnter={e => { if (!wsOpen) e.currentTarget.style.background = 'rgba(91,33,182,0.05)'; }}
-              onMouseLeave={e => { if (!wsOpen) e.currentTarget.style.background = 'transparent'; }}
-            >
-              <span>Modules · {WORKSPACES.find(w => w.id === workspace)?.label}</span>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ transform: wsOpen ? 'rotate(180deg)' : 'none', transition: 'transform 150ms' }}>
-                <polyline points="6 9 12 15 18 9"/>
-              </svg>
-            </button>
-            {wsOpen && (
-              <div
-                style={{
-                  position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0,
-                  background: '#fff', borderRadius: 10,
-                  border: '1px solid rgba(209,196,240,0.50)',
-                  boxShadow: '0 8px 24px rgba(91,33,182,0.14)',
-                  padding: 4,
-                  zIndex: 10,
-                }}
-              >
-                {WORKSPACES.map(w => {
-                  const sel = w.id === workspace;
-                  return (
-                    <button
-                      key={w.id}
-                      onClick={() => { setWorkspace(w.id); setWsOpen(false); if (w.id === 'meta') setActive('marketing'); }}
-                      style={{
-                        width: '100%', display: 'flex', alignItems: 'center', gap: 8,
-                        padding: '8px 10px', borderRadius: 8, border: 'none',
-                        background: sel ? 'rgba(91,33,182,0.10)' : 'transparent',
-                        color: sel ? '#5B21B6' : 'rgba(59,7,100,0.85)',
-                        fontFamily: 'Outfit, sans-serif',
-                        fontWeight: sel ? 700 : 600, fontSize: '0.86rem',
-                        cursor: 'pointer', textAlign: 'left',
-                      }}
-                      onMouseEnter={e => { if (!sel) e.currentTarget.style.background = 'rgba(91,33,182,0.05)'; }}
-                      onMouseLeave={e => { if (!sel) e.currentTarget.style.background = 'transparent'; }}
-                    >
-                      <span style={{ width: 6, height: 6, borderRadius: '50%', background: sel ? '#5B21B6' : 'rgba(91,33,182,0.25)' }} />
-                      <span>{w.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-          )}
+          {/* Workspace switcher removed from the sidebar per request. The active
+              workspace stays in `workspace` state (default Meta) and is switched
+              from the module-level dropdowns (Marketing / Sales). */}
 
+          {/* The sidebar always shows every module regardless of the selected
+              workspace — switching workspace inside Marketing must not change
+              the sidebar. (Non-Meta data panels still fall back to their own
+              placeholders where applicable.) */}
           {MODULES.map(m => {
             const isActive = activeModule === m.id;
             return (
@@ -349,7 +320,7 @@ export default function CrmShell() {
       {/* Main content */}
       <main className="crm-main" style={{ flex: 1, padding: 28, minWidth: 0 }}>
         {/* Top bar with hamburger (mobile only) */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: (activeModule === 'marketing' || (workspace === 'meta' && activeModule === 'sales')) ? 0 : 20 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: (activeModule === 'marketing' || activeModule === 'sales') ? 0 : 20 }}>
           <button
             className="crm-hamburger"
             onClick={() => setSidebarOpen(true)}
@@ -367,7 +338,7 @@ export default function CrmShell() {
               <line x1="3" y1="18" x2="21" y2="18"/>
             </svg>
           </button>
-          {workspace === 'yt' && activeModule !== 'marketing' && activeModule !== 'users' ? (
+          {workspace === 'yt' && activeModule !== 'marketing' && activeModule !== 'users' && activeModule !== 'sales' ? (
             <div style={{ flex: 1, minWidth: 0 }}>
               <h1 style={{ margin: 0, fontWeight: 700, fontSize: '1.25rem', color: '#3B0764' }}>YT · {MODULE_TITLES[activeModule]?.title || 'Dashboard'}</h1>
               <p style={{ margin: 0, fontSize: '0.78rem', color: 'rgba(91,33,182,0.55)' }}>YouTube workspace</p>
@@ -387,13 +358,13 @@ export default function CrmShell() {
         {/* Active module — Marketing is wired for both Meta and YT (filtered by source).
             Users + Sales are Meta-only for now; YT shows a coming-soon placeholder. */}
         <>
-          {activeModule === 'marketing' && <MarketingModule token={token} source={workspace} />}
-          {activeModule === 'users' && (workspace === 'meta'
-            ? <UsersModule token={token} />
-            : <ComingSoonPanel label="YT · Users" />)}
-          {activeModule === 'sales' && (workspace === 'meta'
-            ? <SalesDashboardModule token={token} />
-            : <ComingSoonPanel label="YT · Sales" />)}
+          {activeModule === 'marketing' && <MarketingModule token={token} source={workspace} onSourceChange={setWorkspace} />}
+          {/* Users (user management) and Web Reminder (sales dashboard) both
+              already aggregate every workspace's data, so they render in ALL
+              workspaces — not just Meta. Users lists every workspace's users
+              (workspace={null}); the sales dashboard has its own workspace filter. */}
+          {activeModule === 'users' && <UsersModule token={token} workspace={null} />}
+          {activeModule === 'sales' && <SalesDashboardModule token={token} />}
           {activeModule === 'zoom' && <ZoomModule token={token} source={workspace} />}
         </>
       </main>

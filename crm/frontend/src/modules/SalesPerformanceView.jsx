@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
+import Loading from '../components/Loading';
 import SalesPerformanceDrillPanel from './SalesPerformanceDrillPanel';
 import ReassignDistributionModal   from '../admin/ReassignDistributionModal';
 import CallerActivityDrawer        from '../admin/CallerActivityDrawer';
@@ -1777,7 +1778,6 @@ export default function SalesPerformanceView({ token, actionsSlotEl }) {
             Active / Paused / Junior / Senior / Team Lead / Manager / Trainer
             / Admin. Filters apply AND across groups, OR within a group. */}
         <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginLeft: 0 }}>
-        <span style={{ fontSize: '0.78rem', fontWeight: 600, color: 'rgba(91,33,182,0.65)' }}>Categories</span>
         <div ref={categoriesRef} style={{ position: 'relative' }}>
           <button
             type="button"
@@ -2015,7 +2015,6 @@ export default function SalesPerformanceView({ token, actionsSlotEl }) {
             Wrapped in an inline-flex so the label sticks to its trigger
             when the toolbar wraps to a second row. */}
         <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginLeft: 8 }}>
-          <span style={{ fontSize: '0.78rem', fontWeight: 600, color: 'rgba(91,33,182,0.65)' }}>TL</span>
           <div ref={tlRef} style={{ position: 'relative' }}>
             <button
               type="button"
@@ -2111,7 +2110,6 @@ export default function SalesPerformanceView({ token, actionsSlotEl }) {
             panel has Select-all + per-caller checkboxes. Wrapped in an
             inline-flex with its label so they stay together on wrap. */}
         <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginLeft: 8 }}>
-        <span style={{ fontSize: '0.78rem', fontWeight: 600, color: 'rgba(91,33,182,0.65)' }}>Salesperson</span>
         <div ref={salespeopleRef} style={{ position: 'relative' }}>
           <button
             type="button"
@@ -2299,7 +2297,7 @@ export default function SalesPerformanceView({ token, actionsSlotEl }) {
           with a colored header band, metrics stacked as rows, Team Total on
           the right. Replaces the original horizontal table. */}
       {loading ? (
-        <div className="bg-white" style={{ padding: 40, textAlign: 'center', color: 'rgba(91,33,182,0.55)', fontSize: '0.9rem', borderRadius: 14 }}>Loading performance data…</div>
+        <div className="bg-white" style={{ borderRadius: 14, padding: 20 }}><Loading label="Loading performance data…" /></div>
       ) : visibleRows.length === 0 ? (
         <div className="bg-white" style={{ padding: 60, textAlign: 'center', color: 'rgba(91,33,182,0.55)', fontSize: '0.9rem', borderRadius: 14 }}>
           {data.rows.length === 0
@@ -2329,7 +2327,7 @@ export default function SalesPerformanceView({ token, actionsSlotEl }) {
       <div style={{ background: '#fff', borderRadius: 14, boxShadow: '0 2px 12px rgba(91,33,182,0.07)', overflow: 'hidden' }}>
         <div className="sp-table-scroll" style={{ overflowX: 'auto', maxHeight: '70vh' }}>
           {loading ? (
-            <div style={{ padding: 40, textAlign: 'center', color: 'rgba(91,33,182,0.55)', fontSize: '0.9rem' }}>Loading performance data…</div>
+            <Loading label="Loading performance data…" />
           ) : data.rows.length === 0 ? (
             <div style={{ padding: 60, textAlign: 'center', color: 'rgba(91,33,182,0.55)', fontSize: '0.9rem' }}>
               No salespeople found for this period.

@@ -21,6 +21,11 @@ function callerAuth(req, res, next) {
       role: payload.role,
       full_name: payload.full_name,
       workspace: payload.workspace || 'meta',
+      // Admin "preview as caller" tokens carry preview:true. The caller router
+      // uses this to allow read-only GETs while blocking every write/telephony
+      // call, so an admin previewing a caller's pages can never mutate that
+      // caller's session or place a real call. See routes/caller.js gate.
+      preview: payload.preview === true,
     };
     next();
   } catch (_) {

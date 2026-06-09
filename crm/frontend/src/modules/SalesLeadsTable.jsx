@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import DateTimePicker from '../admin/DateTimePicker';
+import Loading from '../components/Loading';
 import ManualAssignModal from './ManualAssignModal';
 import SourceBadge from '../components/SourceBadge';
 
@@ -68,7 +69,7 @@ function toCsvCell(v) {
 
 const PAGE_SIZE = 10;
 
-export default function SalesLeadsTable({ token }) {
+export default function SalesLeadsTable({ token, source = 'all' }) {
   const [leads, setLeads]       = useState([]);
   const [webinars, setWebinars] = useState([]);
   const [loading, setLoading]   = useState(true);
@@ -91,8 +92,8 @@ export default function SalesLeadsTable({ token }) {
     setError('');
     try {
       const [leadsRes, webinarsRes] = await Promise.all([
-        fetch('/api/admin/leads',    { headers: { Authorization: `Bearer ${token}` } }),
-        fetch('/api/admin/webinars', { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(`/api/admin/leads?source=${encodeURIComponent(source)}`,    { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(`/api/admin/webinars?source=${encodeURIComponent(source)}`, { headers: { Authorization: `Bearer ${token}` } }),
       ]);
       if (!leadsRes.ok) throw new Error('Failed to load leads.');
       const leadsData = await leadsRes.json();
@@ -106,7 +107,7 @@ export default function SalesLeadsTable({ token }) {
     } finally {
       setLoading(false);
     }
-  }, [token]);
+  }, [token, source]);
 
   useEffect(() => { fetchLeads(); }, [fetchLeads]);
 
@@ -315,7 +316,7 @@ export default function SalesLeadsTable({ token }) {
       {/* Pipeline table */}
       <div className="bg-white rounded-card shadow-card" style={{ padding: 0, overflow: 'hidden' }}>
         {loading ? (
-          <div style={{ padding: 40, textAlign: 'center', color: 'rgba(91,33,182,0.55)', fontFamily: 'Outfit,sans-serif', fontSize: '0.9rem' }}>Loading pipeline…</div>
+          <Loading label="Loading pipeline…" />
         ) : filtered.length === 0 ? (
           <div style={{ padding: 60, textAlign: 'center', fontFamily: 'Outfit,sans-serif' }}>
             <div style={{ fontWeight: 700, color: '#3B0764', fontSize: '1rem', marginBottom: 6 }}>

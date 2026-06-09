@@ -1,6 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import DateTimePicker from './DateTimePicker';
 import SourceBadge from '../components/SourceBadge';
+import AddLeadsModal from './AddLeadsModal';
+import Loading from '../components/Loading';
 
 const DURATION_LABELS = { new: '< 1 yr', mid: '1–5 yrs', long: '5+ yrs', pre: 'Pre-diabetic' };
 const SUGAR_LABELS    = { '150-250': '150–250', '250+': '250+' };
@@ -117,6 +119,9 @@ export default function LeadsTable({ token, source = 'meta' }) {
   // Pagination
   const [page, setPage] = useState(1);
   const perPage = 10;
+
+  // Add Leads (bulk upload) modal
+  const [addOpen, setAddOpen] = useState(false);
 
   // Delete mode state
   const [deleteMode, setDeleteMode]     = useState(false);
@@ -346,13 +351,7 @@ export default function LeadsTable({ token, source = 'meta' }) {
   if (loading) {
     return (
       <div className="py-16 text-center">
-        <div className="inline-flex items-center gap-2 text-purple-400 font-sans text-sm">
-          <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
-          </svg>
-          Loading leads...
-        </div>
+        <Loading label="Loading leads…" />
       </div>
     );
   }
@@ -379,6 +378,27 @@ export default function LeadsTable({ token, source = 'meta' }) {
           </p>
         </div>
         <div className="leads-actions" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+
+          {/* Add Leads (bulk CSV/Excel upload) — Meta Temp only */}
+          {source === 'metatemp' && (
+            <button
+              onClick={() => setAddOpen(true)}
+              className="leads-action-btn"
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                height: '2.4rem', padding: '0 16px', borderRadius: 50,
+                border: '1.5px solid rgba(5,150,105,0.40)',
+                background: 'rgba(236,253,245,0.85)',
+                fontFamily: 'Outfit, sans-serif', fontWeight: 700, fontSize: '0.82rem',
+                color: '#059669', cursor: 'pointer', transition: 'all 180ms',
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+              Add Leads
+            </button>
+          )}
 
           {/* Duplicates filter */}
           <button
@@ -868,6 +888,21 @@ export default function LeadsTable({ token, source = 'meta' }) {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Add Leads (bulk upload) modal */}
+      {addOpen && (
+        <AddLeadsModal
+          token={token}
+          source={source}
+          existingPhones={new Set(leads.map(l => String(l.whatsapp_number || '').trim()))}
+          onClose={() => setAddOpen(false)}
+          onImported={(data) => {
+            const n = data?.inserted ?? 0;
+            setSyncToast({ ok: true, msg: `${n} lead${n === 1 ? '' : 's'} added${data?.skipped_duplicates ? ` · ${data.skipped_duplicates} duplicate(s) skipped` : ''}.` });
+            loadLeads();
+          }}
+        />
       )}
     </div>
   );

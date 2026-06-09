@@ -19,7 +19,7 @@ const LEAD_TYPE_BADGE = {
   'all':     { bg: '#EDE9FE', fg: '#5B21B6' },
 };
 
-export default function SalesLeadsLogicView({ token }) {
+export default function SalesLeadsLogicView({ token, source = 'all' }) {
   const [webinars, setWebinars]   = useState([]);
   const [activeTab, setActiveTab] = useState(null);
   const [config, setConfig]       = useState({});       // { webinarId: callers[] }
@@ -32,7 +32,7 @@ export default function SalesLeadsLogicView({ token }) {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch('/api/admin/webinars', { headers: { Authorization: `Bearer ${token}` } });
+        const res = await fetch(`/api/admin/webinars?source=${encodeURIComponent(source)}`, { headers: { Authorization: `Bearer ${token}` } });
         if (!res.ok) throw new Error('Failed to load webinars.');
         const data = await res.json();
         const all  = data.webinars || [];
@@ -49,7 +49,7 @@ export default function SalesLeadsLogicView({ token }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [token]);
+  }, [token, source]);
 
   useEffect(() => {
     if (!activeTab || config[activeTab]) return;

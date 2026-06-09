@@ -24,7 +24,7 @@ const PURPLE     = '#5B21B6';
 const PURPLE_BG  = 'rgba(237,234,248,0.55)';
 const PURPLE_BR  = 'rgba(139,92,246,0.20)';
 
-export default function SalesAlertsView({ token }) {
+export default function SalesAlertsView({ token, source = 'all' }) {
   const [recipients,  setRecipients]  = useState([]);
   const [teamLeaders, setTeamLeaders] = useState([]);
   const [loading,     setLoading]     = useState(true);
@@ -38,8 +38,8 @@ export default function SalesAlertsView({ token }) {
     setLoading(true);
     try {
       const [alertsRes, usersRes] = await Promise.all([
-        fetch('/api/admin/telegram-alerts', { headers: { Authorization: `Bearer ${token}` } }),
-        fetch('/api/admin/crm-users',       { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(`/api/admin/telegram-alerts?source=${encodeURIComponent(source)}`, { headers: { Authorization: `Bearer ${token}` } }),
+        fetch(`/api/admin/crm-users?workspace=${encodeURIComponent(source)}`,    { headers: { Authorization: `Bearer ${token}` } }),
       ]);
       if (!alertsRes.ok) throw new Error('Failed to load alert recipients.');
       const alertsData = await alertsRes.json();
@@ -56,7 +56,7 @@ export default function SalesAlertsView({ token }) {
     } finally {
       setLoading(false);
     }
-  }, [token]);
+  }, [token, source]);
 
   useEffect(() => { load(); }, [load]);
 

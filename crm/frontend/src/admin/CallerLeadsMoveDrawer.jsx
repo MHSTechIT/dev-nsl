@@ -1,4 +1,22 @@
 import { useEffect, useMemo, useState, useCallback } from 'react';
+import AssignedLeadsModule  from '../modules/AssignedLeadsModule';
+import UntouchedLeadsModule from '../modules/UntouchedLeadsModule';
+import CompletedLeadsModule from '../modules/CompletedLeadsModule';
+import NotPickedLeadsModule from '../modules/NotPickedLeadsModule';
+import MissedCallsModule    from '../modules/MissedCallsModule';
+import NextBatchModule      from '../modules/NextBatchModule';
+
+/* The caller's real login pages, in the same order as CallerShell — minus the
+   Call page (telephony, excluded from the admin preview). Rendered with a
+   read-only "preview" caller token so the admin sees the EXACT caller UI. */
+const CALLER_PAGES = [
+  { id: 'assigned',     label: 'Assigned Leads',  Comp: AssignedLeadsModule  },
+  { id: 'untouched',    label: 'Untouched',       Comp: UntouchedLeadsModule },
+  { id: 'completed',    label: 'Completed Leads', Comp: CompletedLeadsModule },
+  { id: 'not_picked',   label: 'Not Picked',      Comp: NotPickedLeadsModule },
+  { id: 'missed_calls', label: 'Missed Calls',    Comp: MissedCallsModule    },
+  { id: 'next_batch',   label: 'Next Batch',      Comp: NextBatchModule      },
+];
 
 /* CallerLeadsMoveDrawer — admin lead-mover for the New Page → "Caller page".
    Shows every lead of one caller, bucketed into the same pages the caller has
@@ -64,6 +82,14 @@ const sugarStyle = (s) => s === '250+'
 export default function CallerLeadsMoveDrawer({ token, caller, callers = [], onClose, onAfterMove }) {
   const callerId   = caller?.caller_id;
   const callerName = caller?.name || '';
+
+  /* View toggle: 'caller' renders the caller's EXACT login pages (read-only
+     preview), 'move' is the original checkbox table for moving leads. */
+  const [view, setView] = useState('caller');
+  const [pageTab, setPageTab]       = useState('assigned');
+  const [previewJwt, setPreviewJwt] = useState('');
+  const [previewErr, setPreviewErr] = useState('');
+
   const [leads, setLeads]       = useState([]);
   const [missed, setMissed]     = useState([]);
   const [loading, setLoading]   = useState(true);
@@ -78,6 +104,20 @@ export default function CallerLeadsMoveDrawer({ token, caller, callers = [], onC
   const [tagSet, setTagSet]     = useState(() => new Set());
 
   const auth = { Authorization: `Bearer ${token}` };
+
+  /* Mint a read-only preview caller token so the embedded caller modules can
+     authenticate as this caller for GET reads (all writes are blocked server
+     side — see routes/caller.js). Re-fetched whenever the caller changes. */
+  useEffect(() => {
+    if (!token || !callerId) return;
+    let alive = true;
+    setPreviewJwt(''); setPreviewErr('');
+    fetch(`/api/admin/callers/${callerId}/preview-token`, { method: 'POST', headers: auth })
+      .then(r => r.json())
+      .then(d => { if (!alive) return; if (d.token) setPreviewJwt(d.token); else setPreviewErr(d.error || 'Could not open caller view.'); })
+      .catch(() => { if (alive) setPreviewErr('Could not open caller view.'); });
+    return () => { alive = false; };
+  }, [token, callerId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const load = useCallback(async () => {
     if (!token || !callerId) return;
@@ -171,14 +211,67 @@ export default function CallerLeadsMoveDrawer({ token, caller, callers = [], onC
       <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(30,8,60,0.45)', zIndex: 80 }} />
       <div style={{ position: 'fixed', top: 0, right: 0, bottom: 0, width: 'min(940px, 96vw)', background: '#fff', zIndex: 81, display: 'flex', flexDirection: 'column', boxShadow: '-12px 0 40px rgba(30,8,60,0.3)' }}>
         {/* header */}
-        <div style={{ background: `linear-gradient(120deg, ${VIOLET}, #7C3AED)`, color: '#fff', padding: '16px 22px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ background: `linear-gradient(120deg, ${VIOLET}, #7C3AED)`, color: '#fff', padding: '16px 22px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
           <div>
-            <div style={{ fontFamily: 'Outfit, sans-serif', fontWeight: 700, fontSize: '0.7rem', letterSpacing: '0.12em', opacity: 0.85 }}>CALLER PAGE · MOVE LEADS</div>
+            <div style={{ fontFamily: 'Outfit, sans-serif', fontWeight: 700, fontSize: '0.7rem', letterSpacing: '0.12em', opacity: 0.85 }}>
+              {view === 'caller' ? 'CALLER PAGE · PREVIEW (READ-ONLY)' : 'CALLER PAGE · MOVE LEADS'}
+            </div>
             <div style={{ fontFamily: 'Outfit, sans-serif', fontWeight: 800, fontSize: '1.5rem', marginTop: 2 }}>{callerName}</div>
           </div>
-          <button onClick={onClose} style={{ border: 'none', background: 'rgba(255,255,255,0.18)', color: '#fff', width: 40, height: 40, borderRadius: 12, cursor: 'pointer', fontSize: '1.1rem', fontWeight: 800 }}>✕</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {/* View toggle: exact caller UI (preview) vs the move-leads table */}
+            <div style={{ display: 'inline-flex', background: 'rgba(255,255,255,0.16)', borderRadius: 10, padding: 3 }}>
+              {[{ v: 'caller', l: 'Caller view' }, { v: 'move', l: 'Move leads' }].map((o) => (
+                <button key={o.v} onClick={() => setView(o.v)}
+                  style={{ border: 'none', cursor: 'pointer', borderRadius: 8, padding: '7px 14px', fontFamily: 'Outfit, sans-serif', fontWeight: 700, fontSize: '0.8rem',
+                    background: view === o.v ? '#fff' : 'transparent', color: view === o.v ? VIOLET : '#fff' }}>
+                  {o.l}
+                </button>
+              ))}
+            </div>
+            <button onClick={onClose} style={{ border: 'none', background: 'rgba(255,255,255,0.18)', color: '#fff', width: 40, height: 40, borderRadius: 12, cursor: 'pointer', fontSize: '1.1rem', fontWeight: 800 }}>✕</button>
+          </div>
         </div>
 
+        {/* ── CALLER VIEW — the caller's exact login pages (Call excluded), ──
+            rendered read-only via a preview token. */}
+        {view === 'caller' && (
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+            {/* page tabs — same set & order as CallerShell, minus Call */}
+            <div style={{ display: 'flex', gap: 6, padding: '12px 18px 0', flexWrap: 'wrap' }}>
+              {CALLER_PAGES.map((p) => (
+                <button key={p.id} onClick={() => setPageTab(p.id)} style={tabBtn(pageTab === p.id)}>{p.label}</button>
+              ))}
+            </div>
+            <div style={{ flex: 1, overflow: 'auto', padding: '14px 18px 18px', minHeight: 0, background: '#F6F3FC' }}>
+              {previewErr ? (
+                <div style={{ color: '#B91C1C', fontFamily: 'Outfit, sans-serif', padding: 16 }}>{previewErr}</div>
+              ) : !previewJwt ? (
+                <div style={{ color: 'rgba(91,33,182,0.5)', fontFamily: 'Outfit, sans-serif', padding: 16 }}>Opening caller view…</div>
+              ) : (
+                (() => {
+                  const Active = CALLER_PAGES.find((p) => p.id === pageTab)?.Comp;
+                  return Active ? (
+                    <Active
+                      key={`${callerId}:${pageTab}`}
+                      jwt={previewJwt}
+                      previewMode
+                      isActive={false}
+                      onCount={() => {}}
+                      setMood={() => {}}
+                      pendingAutoStart={false}
+                      clearPendingAutoStart={() => {}}
+                      externalHighlightId={null}
+                    />
+                  ) : null;
+                })()
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── MOVE VIEW — original checkbox table for moving leads ── */}
+        {view === 'move' && (<>
         {/* tabs */}
         <div style={{ display: 'flex', gap: 6, padding: '12px 18px 0', flexWrap: 'wrap' }}>
           {LEAD_BUCKETS.map((b) => (
@@ -321,6 +414,7 @@ export default function CallerLeadsMoveDrawer({ token, caller, callers = [], onC
             <button onClick={() => setSelected(new Set())} style={{ ...pageBtn, border: 'none', color: 'rgba(91,33,182,0.6)' }}>Clear</button>
           </div>
         )}
+        </>)}
       </div>
     </>
   );

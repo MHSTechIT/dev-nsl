@@ -23,7 +23,7 @@ function fmtPhone(num) {
   return `+91 ${num}`;
 }
 
-export default function NotPickedLeadsModule({ jwt, onCount }) {
+export default function NotPickedLeadsModule({ jwt, onCount, previewMode = false }) {
   const [leads, setLeads]     = useState([]);
   // Bubble the count up to CallerShell for the header chip.
   useEffect(() => { if (typeof onCount === 'function') onCount(leads.length); }, [leads.length, onCount]);
@@ -58,7 +58,7 @@ export default function NotPickedLeadsModule({ jwt, onCount }) {
 
   /* SSE — refresh when this caller saves a new note */
   useEffect(() => {
-    if (!jwt) return;
+    if (!jwt || previewMode) return;   // preview: no live stream (read-only)
     const url = `/api/caller/leads/events?token=${encodeURIComponent(jwt)}`;
     const es  = new EventSource(url);
     sseRef.current = es;

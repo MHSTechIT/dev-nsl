@@ -1,6 +1,5 @@
 import { lazy, Suspense } from 'react';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
-import { AnimatePresence } from 'framer-motion';
 import { FunnelProvider, useFunnel } from './context/FunnelContext';
 import GearBackground from './components/GearBackground';
 import Screen1A from './screens/Screen1A';
@@ -31,13 +30,15 @@ function FunnelFlow() {
   return (
     <>
       <GearBackground />
-      <AnimatePresence mode="sync" initial={false}>
-        {/* Keyed by stage so framer-motion runs the enter animation on each
-            in-place screen swap — all while the URL stays at "/". */}
-        <div key={stage} style={{ display: 'contents' }}>
-          {STAGE_SCREENS[stage] || STAGE_SCREENS.funnel}
-        </div>
-      </AnimatePresence>
+      {/* Render ONLY the active stage. AnimatePresence was removed: its keyed
+          child was a plain <div> (not a motion element), so under mode="sync"
+          the outgoing screen never unmounted — leaving the registration form
+          mounted behind the WhatsApp sheet (two screens + two timers at once).
+          Each screen still runs its own initial→animate on mount, so entrance
+          animations are unaffected; the old stage now properly unmounts. */}
+      <div key={stage} style={{ display: 'contents' }}>
+        {STAGE_SCREENS[stage] || STAGE_SCREENS.funnel}
+      </div>
     </>
   );
 }

@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Lottie from 'lottie-react';
 import useRobotNudge from '../hooks/useRobotNudge';
 import { useTimerSettings } from '../context/TimerSettingsContext';
+import CallStatsPanel from './CallStatsPanel';
 
 // Use the SAME robot the corner MascotBot uses (robot-idle.json) — the
 // happy variant + heart-eye overlay didn't land the eyes inside the
@@ -9,7 +10,7 @@ import { useTimerSettings } from '../context/TimerSettingsContext';
 // appearance across the whole CRM.
 import idleBotRaw from '../assets/bot/robot-idle.json';
 import { lockArmsDown, normalizeLoop } from '../utils/patchRobotArm';
-import { playRobotClip, bindAudioToRobotVolume } from '../utils/robotAudio';
+import { playRobotClip, bindAudioToRobotVolume, ROBOT_CLIP } from '../utils/robotAudio';
 
 // Voice clips — each v1..v10 mp3 is a Tanglish read-aloud of the matching
 // greeting text. Vite resolves these imports to hashed URLs at build time
@@ -51,6 +52,10 @@ const GREETINGS = [
   { text: 'vanakam nanba! smile oda arambicha shift um super ah pogum vaanga call panlam',                            audio: v9Audio  },
   { text: 'vanakam nanba ovvoru callum oru oppurtunities ippove start pannunga',                                      audio: v10Audio },
 ];
+
+/* Spoken when the account is paused — same line the old fullscreen overlay
+   robot used, now delivered through the Call-page center robot instead. */
+const PAUSED_TEXT = 'account pause aaiduchu nanba admin ah contact pannunga';
 
 /* Today's date as an IST YYYY-MM-DD string — gates the once-a-day greeting. */
 function todayIstYmd() {
@@ -109,8 +114,12 @@ function SpeechBubble({ children, fading = false, fadeMs, inMs, floatMs }) {
    button delegates to CallerShell's `onStartAutoCall` handler which
    navigates to Assigned Leads and kicks off the auto-call sequence. */
 
-export default function CallModule({ jwt, onStartAutoCall, isActive }) {
+export default function CallModule({ jwt, onStartAutoCall, isActive, robotMessage, assignedCount, tagCounts, callStatus }) {
   const t = useTimerSettings();
+  // When the account is paused, the Call page suppresses the fullscreen
+  // overlay robot (CallerShell) and shows the paused line through THIS
+  // center robot instead — one robot owns every message on the Call page.
+  const paused = isActive === false;
   useEffect(() => {
     const prevHtml = document.documentElement.style.overflow;
     const prevBody = document.body.style.overflow;
@@ -258,6 +267,41 @@ export default function CallModule({ jwt, onStartAutoCall, isActive }) {
     if (idleNudgeCount >= 1) playRobotClip(40);
   }, [idleNudgeCount]);
 
+  /* Paused → speak the "contact admin" line through the center robot.
+     We play the clip via a raw Audio element (not playRobotClip) because
+     CallerShell flips the global pause-mute that turns playRobotClip into a
+     no-op; the overlay used to bypass that, and on the Call page this does
+     the same. Plays once when paused begins; stops on resume/unmount. */
+  useEffect(() => {
+    if (!paused) return undefined;
+    let audio = null;
+    let teardownVol = null;
+    try {
+      audio = new Audio(ROBOT_CLIP[53]);
+      teardownVol = bindAudioToRobotVolume(audio);
+      audio.play().catch(() => { /* autoplay blocked — bubble still shows */ });
+    } catch { /* ignore */ }
+    return () => {
+      try { audio && audio.pause(); } catch { /* ignore */ }
+      try { teardownVol && teardownVol(); } catch { /* ignore */ }
+    };
+  }, [paused]);
+
+  /* External robot message — routed up from AssignedLeadsModule (callPageMode)
+     so its corner-robot lines (e.g. the post-break "welcome back") show on the
+     center robot instead of a separate bottom robot. Shown transiently then
+     cleared; each new `key` re-triggers. Suppressed while paused. */
+  const [extMsg, setExtMsg] = useState(null);
+  const extKeyRef = useRef(null);
+  useEffect(() => {
+    if (!robotMessage || robotMessage.key == null || robotMessage.key === extKeyRef.current) return undefined;
+    extKeyRef.current = robotMessage.key;
+    setExtMsg(robotMessage);
+    if (robotMessage.clip) { try { playRobotClip(robotMessage.clip); } catch { /* ignore */ } }
+    const id = setTimeout(() => setExtMsg(null), t.robotBubbleHideMs || 8000);
+    return () => clearTimeout(id);
+  }, [robotMessage, t.robotBubbleHideMs]);
+
   return (
     <div
       style={{
@@ -274,6 +318,7 @@ export default function CallModule({ jwt, onStartAutoCall, isActive }) {
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
+        gap: 'min(7vw, 110px)',
       }}
     >
       <style>{`
@@ -336,7 +381,11 @@ export default function CallModule({ jwt, onStartAutoCall, isActive }) {
         .cm-btn:active { transform: scale(0.97); }
       `}</style>
 
-      {/* Vertical stack: bubble, robot, button. Centered as a column. */}
+      {/* Left: caller status / stats card — live assigned count, call tag
+          counts, and the caller's current status (break countdown / blocked). */}
+      <CallStatsPanel assignedLeads={assignedCount} counts={tagCounts} status={callStatus} />
+
+      {/* Right: vertical stack — bubble, robot, button. */}
       <div
         style={{
           display: 'flex',
@@ -345,25 +394,37 @@ export default function CallModule({ jwt, onStartAutoCall, isActive }) {
           gap: 18,
         }}
       >
-        {/* Speech bubble above the robot — shows the daily greeting on the
-            first visit of the day; once the caller has sat idle for 30 s the
-            idle nudge takes over the same slot. */}
-        {greeting && idleNudgeCount < 1 && (
+        {/* Speech bubble above the robot. Priority: paused message (persistent)
+            → routed external message → idle nudge → daily greeting. The Call
+            page funnels every robot line through this one bubble. */}
+        {paused ? (
           <SpeechBubble
-            fading={bubbleFading}
             fadeMs={t.greetingBubbleFadeMs}
             inMs={t.greetingBubbleInMs}
             floatMs={t.greetingBubbleFloatMs}
-          >{greeting.text}</SpeechBubble>
-        )}
-        {idleNudgeCount >= 1 && (
+          >{PAUSED_TEXT}</SpeechBubble>
+        ) : extMsg ? (
+          <SpeechBubble
+            key={`ext-${extMsg.key}`}
+            fadeMs={t.greetingBubbleFadeMs}
+            inMs={t.greetingBubbleInMs}
+            floatMs={t.greetingBubbleFloatMs}
+          >{extMsg.text}</SpeechBubble>
+        ) : idleNudgeCount >= 1 ? (
           <SpeechBubble
             key={idleNudgeCount}
             fadeMs={t.greetingBubbleFadeMs}
             inMs={t.greetingBubbleInMs}
             floatMs={t.greetingBubbleFloatMs}
           >nanba irukkingala start call amukunga</SpeechBubble>
-        )}
+        ) : greeting ? (
+          <SpeechBubble
+            fading={bubbleFading}
+            fadeMs={t.greetingBubbleFadeMs}
+            inMs={t.greetingBubbleInMs}
+            floatMs={t.greetingBubbleFloatMs}
+          >{greeting.text}</SpeechBubble>
+        ) : null}
 
         {/* Robot — happy mascot, larger than the corner one. Wrapped in a
             positioned container so the two soft glow layers sit BEHIND it
@@ -393,8 +454,9 @@ export default function CallModule({ jwt, onStartAutoCall, isActive }) {
         {/* Start Call button — pill, violet, pulses softly */}
         <button
           type="button"
-          className="cm-btn"
-          onClick={() => { if (typeof onStartAutoCall === 'function') onStartAutoCall(); }}
+          className={paused ? '' : 'cm-btn'}
+          disabled={paused}
+          onClick={() => { if (!paused && typeof onStartAutoCall === 'function') onStartAutoCall(); }}
           style={{
             display: 'inline-flex',
             alignItems: 'center',
@@ -402,15 +464,18 @@ export default function CallModule({ jwt, onStartAutoCall, isActive }) {
             padding: '14px 28px',
             borderRadius: 999,
             border: 'none',
-            background: 'linear-gradient(135deg, #7C3AED 0%, #5B21B6 100%)',
+            background: paused
+              ? 'rgba(91,33,182,0.35)'
+              : 'linear-gradient(135deg, #7C3AED 0%, #5B21B6 100%)',
             color: '#fff',
             fontFamily: 'Outfit, sans-serif',
             fontWeight: 800,
             fontSize: '1.02rem',
             letterSpacing: '0.03em',
-            cursor: 'pointer',
+            cursor: paused ? 'not-allowed' : 'pointer',
+            opacity: paused ? 0.7 : 1,
             transition: 'transform 180ms ease',
-            animation: `cm-btn-pulse ${t.btnPulseMs}ms ease-in-out infinite`,
+            animation: paused ? 'none' : `cm-btn-pulse ${t.btnPulseMs}ms ease-in-out infinite`,
           }}
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"

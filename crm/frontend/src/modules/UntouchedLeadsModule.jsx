@@ -28,7 +28,7 @@ function fmtPhone(num) {
   return `+91 ${num}`;
 }
 
-export default function UntouchedLeadsModule({ jwt, onCount }) {
+export default function UntouchedLeadsModule({ jwt, onCount, previewMode = false }) {
   const [leads, setLeads]       = useState([]);
   // Bubble the count up to CallerShell for the header chip.
   useEffect(() => { if (typeof onCount === 'function') onCount(leads.length); }, [leads.length, onCount]);
@@ -60,7 +60,7 @@ export default function UntouchedLeadsModule({ jwt, onCount }) {
   /* SSE — refresh when this caller saves a note (a saved note moves the lead
      out of the untouched bucket) or gets a new assignment. */
   useEffect(() => {
-    if (!jwt) return;
+    if (!jwt || previewMode) return;   // preview: no live stream (read-only)
     const es = new EventSource(`/api/caller/leads/events?token=${encodeURIComponent(jwt)}`);
     sseRef.current = es;
     es.onmessage = (ev) => {
@@ -77,6 +77,7 @@ export default function UntouchedLeadsModule({ jwt, onCount }) {
      last_call_id. A failed call still opens the modal (idle) so the caller can
      retry from inside it. */
   async function handleCall(lead) {
+    if (previewMode) return;   // admin preview is read-only — no real calls
     setError('');
     try {
       const res = await fetch('/api/caller/calls/start', {

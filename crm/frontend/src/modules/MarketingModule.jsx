@@ -1,10 +1,14 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import BrandSelect from '../components/BrandSelect';
+import ManagerProfileMenu from '../components/ManagerProfileMenu';
 import FunnelOverview      from '../admin/FunnelOverview';
 import HomeDashboard       from '../admin/HomeDashboard';
 import LeadsTable          from '../admin/LeadsTable';
 import WhatsAppLinksEditor from '../admin/WhatsAppLinksEditor';
 import TimerConfig         from '../admin/TimerConfig';
 import SettingsConfig      from '../admin/SettingsConfig';
+import AccessView          from '../admin/AccessView';
+import WhapiView           from '../admin/WhapiView';
 
 const TAB_ICONS = {
   funnel: (
@@ -37,8 +41,18 @@ const TAB_ICONS = {
   ),
   settings: (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="12" cy="12" r="3"/>
-      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+      <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+    </svg>
+  ),
+  access: (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>
+    </svg>
+  ),
+  whapi: (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
     </svg>
   ),
 };
@@ -49,11 +63,61 @@ const TABS = [
   { id: 'leads',     label: 'Leads' },
   { id: 'whatsapp',  label: 'WhatsApp Links' },
   { id: 'timer',     label: 'Timer & Controls' },
-  { id: 'settings',  label: 'Settings' },
+  { id: 'settings',  label: 'Alerts' },
+  { id: 'access',    label: 'Access' },
+  { id: 'whapi',     label: 'Whapi' },
 ];
 
-export default function MarketingModule({ token, source = 'meta' }) {
+const WORKSPACE_OPTS = [
+  { id: 'meta',  label: 'Meta' },
+  { id: 'yt',    label: 'YT' },
+  { id: 'meta2', label: 'Meta 2.0' },
+  { id: 'metatemp', label: 'Meta Temp' },
+];
+
+export default function MarketingModule({
+  token,
+  source = 'meta',
+  onSourceChange,
+  /* When a marketing manager (not the super-admin) is logged in, these are
+     provided so the module renders its own profile menu + Sign Out and gates
+     its tabs by the manager's crm_users.page_access — mirroring CallerShell
+     and the Sales dashboard. Omitted for the super-admin CrmShell, where every
+     tab is always shown. */
+  profile        = null,
+  onSignOut      = null,
+  onOpenSettings = null,
+}) {
   const [tab, setTab] = useState('funnel');
+
+  /* Funnel + Page Performance are hidden in the Meta Temp workspace. */
+  const HIDDEN_IN_METATEMP = ['funnel', 'dashboard'];
+  const METATEMP_ONLY = ['whapi']; // Whapi tab only shows in the Meta Temp workspace
+  const workspaceTabs = source === 'metatemp'
+    ? TABS.filter(t => !HIDDEN_IN_METATEMP.includes(t.id))
+    : TABS.filter(t => !METATEMP_ONLY.includes(t.id));
+
+  /* Per-user page access — only when a manager profile is present. Default ON:
+     a missing key (or no profile → super-admin) means the tab is shown. The
+     Access-panel page ids line up 1:1 with the marketing tab ids. */
+  const [pageAccess, setPageAccess] = useState({});
+  useEffect(() => {
+    if (!profile || !token) return;
+    fetch('/api/admin/my-page-access', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(d => setPageAccess(d.page_access || {}))
+      .catch(() => {});
+  }, [profile, token]);
+
+  const visibleTabs = profile
+    ? workspaceTabs.filter(t => pageAccess[t.id] !== false)
+    : workspaceTabs;
+
+  /* If the active tab gets hidden by a workspace switch or an access change,
+     fall back to the first visible tab. */
+  useEffect(() => {
+    if (!visibleTabs.some(t => t.id === tab)) setTab(visibleTabs[0]?.id || 'leads');
+  }, [source, pageAccess]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
@@ -66,16 +130,17 @@ export default function MarketingModule({ token, source = 'meta' }) {
         }
       `}</style>
 
-      {/* Tab bar */}
+      {/* Heading line: tab bar (left) + workspace dropdown (top-right) */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'nowrap' }}>
       <div className="marketing-tabs-bar" style={{
-        display: 'inline-flex', alignSelf: 'flex-start', maxWidth: '100%', gap: 4,
+        display: 'inline-flex', maxWidth: '100%', gap: 4,
         background: '#fff', borderRadius: 16, padding: 6,
         boxShadow: '0 2px 12px rgba(91,33,182,0.08)',
         minWidth: 0, flexShrink: 1,
         overflowX: 'auto', WebkitOverflowScrolling: 'touch',
         scrollbarWidth: 'none', msOverflowStyle: 'none',
       }}>
-        {TABS.map(t => (
+        {visibleTabs.map(t => (
           <button
             key={t.id}
             onClick={() => setTab(t.id)}
@@ -96,6 +161,25 @@ export default function MarketingModule({ token, source = 'meta' }) {
         ))}
       </div>
 
+        {/* Workspace dropdown — top-right of the heading line. Drives the
+            global workspace so it stays in sync with the sidebar switcher. */}
+        <div style={{ marginLeft: 'auto', flexShrink: 0, width: 160 }}>
+          <BrandSelect
+            value={source}
+            onChange={(v) => onSourceChange && onSourceChange(v)}
+            disabled={!onSourceChange}
+            options={WORKSPACE_OPTS.map(o => ({ value: o.id, label: o.label }))}
+          />
+        </div>
+
+        {/* Profile menu (marketing manager login only) — name, role, Settings,
+            Sign Out. Absent for the super-admin CrmShell, which has its own
+            sidebar + logout. */}
+        {profile && onSignOut && (
+          <ManagerProfileMenu profile={profile} onSignOut={onSignOut} onOpenSettings={onOpenSettings} />
+        )}
+      </div>
+
       {/* Content card */}
       <div className="marketing-content-card bg-white rounded-card shadow-card p-6">
         {tab === 'funnel'    && <FunnelOverview token={token} source={source} />}
@@ -104,6 +188,8 @@ export default function MarketingModule({ token, source = 'meta' }) {
         {tab === 'whatsapp'  && <WhatsAppLinksEditor token={token} source={source} />}
         {tab === 'timer'     && <TimerConfig token={token} source={source} />}
         {tab === 'settings'  && <SettingsConfig token={token} source={source} />}
+        {tab === 'access'    && <AccessView token={token} pages={workspaceTabs.map(t => ({ id: t.id, label: t.label }))} />}
+        {tab === 'whapi'     && <WhapiView token={token} source={source} />}
       </div>
     </div>
   );

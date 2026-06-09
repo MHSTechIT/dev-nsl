@@ -60,11 +60,24 @@ export default function WhatsAppPage() {
   }
 
   return (
+    <>
+      {/* Full-screen blur backdrop — covers the page behind the sheet so the
+          registration screen can't show through (mirrors the Meta 1.0 funnel). */}
+      <m.div
+        initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+        transition={{ duration: 0.25 }}
+        style={{
+          position: 'fixed', inset: 0, zIndex: 40,
+          backdropFilter: 'blur(24px)', WebkitBackdropFilter: 'blur(24px)',
+          background: 'rgba(167,139,250,0.35)',
+        }}
+      />
     <div style={{
       position: 'fixed',
       bottom: 0, left: 0, right: 0,
       maxWidth: 480,
       margin: '0 auto',
+      zIndex: 50,
     }}>
       <m.div
         initial={{ y: '100%' }}
@@ -169,5 +182,6 @@ export default function WhatsAppPage() {
         </m.a>
       </m.div>
     </div>
+    </>
   );
 }

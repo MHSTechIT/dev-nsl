@@ -29,6 +29,14 @@ if (_migrationResult && typeof _migrationResult.catch === 'function') {
   _migrationResult.catch(err => console.error('[Migration] slot-2 columns error:', err.message));
 }
 
+// Auto-migrate: add assistant_manager_id to crm_users (user hierarchy).
+const _asstMgrMigration = pool.query(
+  `ALTER TABLE crm_users ADD COLUMN IF NOT EXISTS assistant_manager_id UUID`
+);
+if (_asstMgrMigration && typeof _asstMgrMigration.catch === 'function') {
+  _asstMgrMigration.catch(err => console.error('[Migration] assistant_manager_id error:', err.message));
+}
+
 // Auto-migrate: create webinars table
 const _webinarTableMigration = pool.query(`
   CREATE TABLE IF NOT EXISTS webinars (
@@ -128,6 +136,9 @@ const _crmUsersMigration = pool.query(`
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );
   ALTER TABLE crm_users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+  -- Workspace tag for callers: 'meta' | 'yt' | 'meta2'. NULL = all workspaces
+  -- (unrestricted). Non-caller roles are always NULL (forced in routes/admin.js).
+  ALTER TABLE crm_users ADD COLUMN IF NOT EXISTS workspace TEXT;
   CREATE INDEX IF NOT EXISTS idx_crm_users_role ON crm_users (role);
   -- Keep the role CHECK in sync with ALLOWED_ROLES (routes/admin.js). Drop +
   -- recreate so newly-added roles (webinar, l1_sales) are accepted on existing DBs.
@@ -777,6 +788,11 @@ const leadsLimiter = rateLimit({
 });
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
+
+// Serve uploaded template media (images/videos) saved by the wa-templates
+// upload endpoint. Public read — these are meant to be fetchable (e.g. by
+// WhatsApp media senders).
+app.use('/uploads/templates', express.static(require('path').join(__dirname, 'uploads', 'templates')));
 
 app.use('/api',        webinarConfigRouter);
 app.use('/api/leads',  leadsLimiter);

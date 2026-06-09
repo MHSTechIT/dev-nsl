@@ -30,7 +30,7 @@ const STATUS_BADGE = {
   ended:   { bg: 'rgba(91,33,182,0.10)',  fg: '#5B21B6', label: 'Ended (not answered)' },
 };
 
-export default function MissedCallsModule({ jwt, onCount }) {
+export default function MissedCallsModule({ jwt, onCount, previewMode = false }) {
   const [calls, setCalls]         = useState([]);
   // Bubble the count up to CallerShell for the header chip.
   useEffect(() => { if (typeof onCount === 'function') onCount(calls.length); }, [calls.length, onCount]);
@@ -105,7 +105,7 @@ export default function MissedCallsModule({ jwt, onCount }) {
 
   // SSE refresh on incoming/updated call events
   useEffect(() => {
-    if (!jwt) return;
+    if (!jwt || previewMode) return;   // preview: no live stream (read-only)
     const url = `/api/caller/leads/events?token=${encodeURIComponent(jwt)}`;
     const es  = new EventSource(url);
     sseRef.current = es;

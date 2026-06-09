@@ -134,15 +134,42 @@ export default function CallerShell({ callerName: nameProp, callerRole: roleProp
      page's stale number doesn't flash. */
   const [leadCount, setLeadCount] = useState(null);
   useEffect(() => { setLeadCount(null); }, [activePage]);
+
+  /* Live numbers + break state for the Call-page status card. */
+  const [callerStats, setCallerStats] = useState({ assigned: 0, tags: {} });
+  const [callerBreak, setCallerBreak] = useState(null);  // bubbled up from AssignedLeadsModule
+
+  /* Per-caller page access (admin Access panel). Pages turned off there are
+     hidden from this caller's tab bar. Missing key = visible (default ON). */
+  const [pageAccess, setPageAccess] = useState({});
+  useEffect(() => {
+    const t = sessionStorage.getItem('mhs_crm_token') || '';
+    if (!t) return;
+    fetch('/api/caller/page-access', { headers: { Authorization: `Bearer ${t}` } })
+      .then(r => r.json())
+      .then(d => setPageAccess(d.page_access || {}))
+      .catch(() => {});
+  }, []);
+  const visiblePages = PAGES.filter(p => pageAccess[p.id] !== false);
+  // If the saved/active page got turned off, fall back to the first visible one.
+  useEffect(() => {
+    if (visiblePages.length && !visiblePages.some(p => p.id === activePage)) {
+      setActive(visiblePages[0].id);
+    }
+  }, [pageAccess]); // eslint-disable-line react-hooks/exhaustive-deps
   /* When the Call page's big start button is pressed, we navigate to the
      Assigned tab and flag a one-shot "auto-start me when leads are ready".
      AssignedLeadsModule consumes the flag and clears it on first trigger. */
   const [pendingAutoStart, setPendingAutoStart] = useState(false);
   const requestAutoStart   = useCallback(() => {
-    setActive('assigned');
+    // Auto-call now runs ON the Call page (callPageMode) — no navigation away.
     setPendingAutoStart(true);
   }, []);
   const clearPendingAutoStart = useCallback(() => setPendingAutoStart(false), []);
+  /* On the Call page every robot line is funneled through CallModule's single
+     center robot. AssignedLeadsModule (callPageMode) pushes its corner-robot
+     messages up here via onRobotMessage; CallModule renders them in its bubble. */
+  const [callRobotMsg, setCallRobotMsg] = useState(null);
   const [showDropdown, setShowDropdown] = useState(false);
   /* Hamburger toggle — when true, the tab bar collapses into a single
      three-line button. Defaults to COLLAPSED on every login / refresh so
@@ -279,6 +306,26 @@ export default function CallerShell({ callerName: nameProp, callerRole: roleProp
     return () => { cancelled = true; es.close(); };
   }, [user, jwtForEffect]);
 
+  /* Call-page stats — assigned count + per-tag call counts. Polled, and
+     refreshed immediately on any activity change (e.g. a saved call note). */
+  useEffect(() => {
+    if (!user || !jwtForEffect) return undefined;
+    let cancelled = false;
+    async function loadStats() {
+      try {
+        const res = await fetch('/api/caller/stats', { headers: { Authorization: `Bearer ${jwtForEffect}` } });
+        if (!res.ok) return;
+        const d = await res.json();
+        if (!cancelled) setCallerStats({ assigned: d.assigned || 0, tags: d.tags || {} });
+      } catch { /* network blips ignored */ }
+    }
+    loadStats();
+    const id = setInterval(loadStats, 15000);
+    const onChange = () => loadStats();
+    window.addEventListener('mhs:activity:changed', onChange);
+    return () => { cancelled = true; clearInterval(id); window.removeEventListener('mhs:activity:changed', onChange); };
+  }, [user, jwtForEffect]);
+
   /* Persist the active tab so a refresh restores it (consumed by the
      activePage useState initialiser above). */
   useEffect(() => {
@@ -384,6 +431,12 @@ export default function CallerShell({ callerName: nameProp, callerRole: roleProp
     const id = setTimeout(() => setNetRecoverPulse(0), timerSettings.netRecoverPulseMs);
     return () => clearTimeout(id);
   }, [netRecoverPulse, timerSettings.netRecoverPulseMs]);
+  /* On the Call page, deliver the network-recovered line through the center
+     robot instead of the bottom-right corner robot (single-robot Call page). */
+  useEffect(() => {
+    if (activePage !== 'call' || netRecoverPulse === 0) return;
+    setCallRobotMsg({ text: 'network vandhuduchu nanba, continue pannu', clip: 52, key: `net-${netRecoverPulse}` });
+  }, [netRecoverPulse, activePage]);
 
   /* ── Idle watchdog for the review pages ──
      The Call & Assigned pages nudge an idle caller themselves. The review
@@ -537,7 +590,7 @@ export default function CallerShell({ callerName: nameProp, callerRole: roleProp
             </svg>
           </button>
 
-          {!tabsCollapsed && PAGES.map(p => {
+          {!tabsCollapsed && visiblePages.map(p => {
             const isActive = activePage === p.id;
             return (
               <button
@@ -693,7 +746,28 @@ export default function CallerShell({ callerName: nameProp, callerRole: roleProp
       )}
 
       {/* ── Active page ── */}
-      {activePage === 'call'         && <CallModule           jwt={jwt} isActive={isActive} onStartAutoCall={requestAutoStart} />}
+      {activePage === 'call' && (
+        <>
+          <CallModule
+            jwt={jwt} isActive={isActive} onStartAutoCall={requestAutoStart} robotMessage={callRobotMsg}
+            /* Live status card data */
+            assignedCount={leadCount != null ? leadCount : callerStats.assigned}
+            tagCounts={callerStats.tags}
+            callStatus={
+              isActive === false
+                ? { kind: 'blocked', reason: pauseInfo.reason || 'Account paused — contact admin' }
+                : (callerBreak && callerBreak.endsAt)
+                  ? { kind: 'break', reason: callerBreak.reason || 'On Break', endsAt: callerBreak.endsAt }
+                  : { kind: 'active' }
+            }
+          />
+          {/* Auto-call engine + call-note form + alert/break cards run here in
+              callPageMode (no leads table) — overlaying the Call page so the
+              caller never leaves it. Its corner-robot lines are routed to the
+              center robot via onRobotMessage (no separate bottom robot). */}
+          <AssignedLeadsModule callPageMode jwt={jwt} isActive={isActive} setMood={setMood} pendingAutoStart={pendingAutoStart} clearPendingAutoStart={clearPendingAutoStart} onCount={setLeadCount} onRobotMessage={setCallRobotMsg} onBreakInfo={setCallerBreak} />
+        </>
+      )}
       {activePage === 'assigned'     && <AssignedLeadsModule  jwt={jwt} isActive={isActive} externalHighlightId={externalHighlightId} setMood={setMood} pendingAutoStart={pendingAutoStart} clearPendingAutoStart={clearPendingAutoStart} onCount={setLeadCount} />}
       {activePage === 'untouched'    && <UntouchedLeadsModule jwt={jwt} onCount={setLeadCount} />}
       {activePage === 'completed'    && <CompletedLeadsModule jwt={jwt} onCount={setLeadCount} />}
@@ -704,8 +778,10 @@ export default function CallerShell({ callerName: nameProp, callerRole: roleProp
       {/* ── Floating incoming-call toasts (top-right, persists across tabs) ── */}
       <IncomingCallToast jwt={jwt} onOpenLead={handleOpenLead} />
 
-      {/* ── #20 — network-recovered robot (auto-clears after 7s) ── */}
-      {netRecoverPulse > 0 && (
+      {/* ── #20 — network-recovered robot (auto-clears after 7s) ──
+         On the Call page it's routed to the center robot (effect below);
+         everywhere else it flashes the bottom-right corner robot. */}
+      {netRecoverPulse > 0 && activePage !== 'call' && (
         <RobotGuide
           variant="corner"
           mood="happy"
@@ -740,8 +816,10 @@ export default function CallerShell({ callerName: nameProp, callerRole: roleProp
          pause OR any SmartFlow / nudge-exhaust auto-pause). No dismiss — the
          caller waits for admin to resume them. RobotGuide's overlay variant
          sits at z-index 9600; we lift it above every modal with the wrapper
-         z-index 9900 so even an in-flight call modal can't be touched. */}
-      {isActive === false && (
+         z-index 9900 so even an in-flight call modal can't be touched.
+         On the Call page this overlay is suppressed — the paused line is
+         shown through CallModule's center robot instead (single-robot page). */}
+      {isActive === false && activePage !== 'call' && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 9900 }}>
           <RobotGuide
             variant="overlay"

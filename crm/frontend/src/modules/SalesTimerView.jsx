@@ -95,7 +95,7 @@ function tidy(n) {
   return Number.isFinite(n) ? Number(n.toFixed(3)) : n;
 }
 
-export default function SalesTimerView({ token, readOnly = false }) {
+export default function SalesTimerView({ token, source = 'all', readOnly = false }) {
   // `settings` is always held in DISPLAY units (seconds / counts).
   const [settings, setSettings] = useState(() => toDisplayAll(TIMER_DEFAULTS));
   const [loading, setLoading]   = useState(true);
@@ -107,7 +107,7 @@ export default function SalesTimerView({ token, readOnly = false }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/admin/timer-settings', {
+      const res = await fetch(`/api/admin/timer-settings?source=${encodeURIComponent(source)}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error('Failed to load timer settings.');
@@ -121,7 +121,7 @@ export default function SalesTimerView({ token, readOnly = false }) {
     } finally {
       setLoading(false);
     }
-  }, [token]);
+  }, [token, source]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -168,7 +168,7 @@ export default function SalesTimerView({ token, readOnly = false }) {
       const res = await fetch('/api/admin/timer-settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ settings: payload }),
+        body: JSON.stringify({ settings: payload, source }),
       });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(d.error || 'Save failed — please try again.');

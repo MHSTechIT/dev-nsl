@@ -1,9 +1,13 @@
 const express  = require('express');
 const { body, validationResult } = require('express-validator');
 const crypto   = require('crypto');
+const path     = require('path');
+const fs       = require('fs');
+const multer   = require('multer');
 const router   = express.Router();
 const pool     = require('../db');
 const { adminAuth }                = require('../middleware/adminAuth');
+const jwtUtil                      = require('../utils/jwt');
 const { getPassword, writeConfig } = require('../utils/adminConfig');
 const cache = require('../utils/webinarConfigCache');
 const { broadcast } = require('../utils/sseClients');
@@ -25,10 +29,57 @@ const {
 
 router.use(adminAuth);
 
-const ALLOWED_SOURCES = new Set(['meta', 'yt', 'meta2']);
+/* POST /api/admin/callers/:callerId/preview-token
+   Mints a short-lived, READ-ONLY caller JWT (preview:true) for the given
+   caller so an admin can render that caller's exact pages (Assigned /
+   Untouched / Completed / Not Picked / Missed Calls / Next Batch) inside the
+   New-Page "Move Leads" drawer. The token authenticates as the caller for
+   GET reads only — the caller router rejects every write/telephony call made
+   with a preview token (see routes/caller.js). It carries the same identity
+   claims a real login would (so /api/caller queries scope correctly), plus
+   preview:true. */
+router.post('/callers/:callerId/preview-token', async (req, res) => {
+  const { callerId } = req.params;
+  if (!callerId) return res.status(400).json({ error: 'callerId required' });
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, full_name, role, department, workspace, is_active
+         FROM crm_users WHERE id = $1`,
+      [callerId]
+    );
+    const u = rows[0];
+    if (!u) return res.status(404).json({ error: 'caller_not_found' });
+    const token = jwtUtil.sign({
+      user_id:    u.id,
+      role:       u.role,
+      full_name:  u.full_name,
+      department: u.department || null,
+      // Scope reads to the caller's own workspace tables, mirroring login.
+      workspace:  u.workspace || 'meta',
+      preview:    true,
+    });
+    res.json({ token, caller: { id: u.id, full_name: u.full_name, role: u.role } });
+  } catch (err) {
+    console.error('preview-token error:', err.message);
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+const ALLOWED_SOURCES = new Set(['meta', 'yt', 'meta2', 'metatemp']);
 function getSource(req) {
   const v = req.query.source ?? req.body?.source;
   return ALLOWED_SOURCES.has(v) ? v : 'meta';
+}
+
+/* Like getSource but also accepts 'all' — used ONLY by the read-only
+   data/report endpoints behind the Web Reminder dashboard so the workspace
+   filter can aggregate across meta+yt+meta2. Queries that use this must guard
+   their source/workspace conditions with `($N = 'all' OR <existing>)` so a
+   concrete source behaves exactly as before. Config/write endpoints keep
+   using getSource (where 'all' safely falls back to 'meta'). */
+function getReportSource(req) {
+  const v = req.query.source ?? req.body?.source;
+  return (ALLOWED_SOURCES.has(v) || v === 'all') ? v : 'meta';
 }
 
 /* Top-2 recent webinars per source — the same window the caller-side
@@ -56,7 +107,7 @@ const RECENT_WEBINARS_SQL = `(
 
 /* ── GET /api/admin/leads ── */
 router.get('/leads', async (req, res) => {
-  const source = getSource(req);
+  const source = getReportSource(req);   // allows 'all' (aggregate workspaces)
   // TL scope: only leads currently assigned to a caller on this TL's team.
   const tl = req.adminUser && req.adminUser.kind === 'tl';
   const params = [source];
@@ -72,7 +123,7 @@ router.get('/leads', async (req, res) => {
              u.role      AS assigned_to_role
         FROM leads l
         LEFT JOIN crm_users u ON u.id = l.assigned_user_id
-       WHERE l.source = $1
+       WHERE ($1 = 'all' OR l.source = $1)
          ${scopeSQL}
        ORDER BY l.created_at DESC
     `, params);
@@ -85,7 +136,7 @@ router.get('/leads', async (req, res) => {
         // simplest correct behaviour is to return empty for TLs in that
         // case rather than leaking unscoped rows.
         if (tl) return res.json({ leads: [], total: 0 });
-        const { rows } = await pool.query('SELECT * FROM leads WHERE source = $1 ORDER BY created_at DESC', [source]);
+        const { rows } = await pool.query("SELECT * FROM leads WHERE ($1 = 'all' OR source = $1) ORDER BY created_at DESC", [source]);
         return res.json({ leads: rows, total: rows.length });
       } catch (_) { /* fallthrough */ }
     }
@@ -115,11 +166,12 @@ router.get('/completed-calls', async (req, res) => {
   // super-admin behaviour) — left untouched to avoid changing manager
   // semantics in this pass.
   const tl = req.adminUser && req.adminUser.kind === 'tl';
-  const params = [limit];
-  let scopeSQL = '';
+  const source = getReportSource(req);            // workspace filter ('all' = every source)
+  const params = [limit, source];                 // $1 = limit, $2 = source
+  let scopeSQL = `AND ($2 = 'all' OR l.source = $2)`;
   if (tl) {
     params.push(req.adminUser.id);
-    scopeSQL = `AND l.assigned_user_id IN (SELECT id FROM crm_users WHERE id = $${params.length} OR team_leader_id = $${params.length})`;
+    scopeSQL += ` AND l.assigned_user_id IN (SELECT id FROM crm_users WHERE id = $${params.length} OR team_leader_id = $${params.length})`;
   }
   try {
     const { rows } = await pool.query(`
@@ -204,7 +256,7 @@ router.put('/webinar-config', configValidators, async (req, res) => {
 
   const source = getSource(req);
 
-  const allowed = ['next_webinar_at', 'backup_webinar_at', 'current_webinar_date', 'next_webinar_date', 'tuesday_whatsapp_link', 'friday_whatsapp_link', 'kill_switch', 'pending_whatsapp_link', 'whatsapp_link_swap_at', 'pending_whatsapp_link_2', 'whatsapp_link_swap_at_2'];
+  const allowed = ['next_webinar_at', 'backup_webinar_at', 'current_webinar_date', 'next_webinar_date', 'tuesday_whatsapp_link', 'friday_whatsapp_link', 'kill_switch', 'pending_whatsapp_link', 'whatsapp_link_swap_at', 'pending_whatsapp_link_2', 'whatsapp_link_swap_at_2', 'current_form_id', 'next_form_id', 'permanent_whatsapp_link', 'current_webinar_datetime', 'current_webinar_link', 'next_webinar_datetime', 'next_webinar_link'];
   const updates = {};
   for (const key of allowed) {
     if (req.body[key] !== undefined) updates[key] = req.body[key];
@@ -399,7 +451,7 @@ router.put('/timer-settings', async (req, res) => {
 
 /* ── GET /api/admin/webinars ── */
 router.get('/webinars', async (req, res) => {
-  const source = getSource(req);
+  const source = getReportSource(req);   // allows 'all' (aggregate workspaces)
   try {
     const { rows } = await pool.query(`
       SELECT
@@ -411,7 +463,7 @@ router.get('/webinars', async (req, res) => {
         COUNT(l.id)::int AS lead_count
       FROM webinars w
       LEFT JOIN leads l ON l.webinar_id = w.id
-      WHERE w.source = $1
+      WHERE ($1 = 'all' OR w.source = $1)
       GROUP BY w.id
       ORDER BY w.created_at DESC
     `, [source]);
@@ -422,7 +474,7 @@ router.get('/webinars', async (req, res) => {
       try {
         const { rows } = await pool.query(
           `SELECT id, date_time AS webinar_at, is_active, created_at, name, 0::int AS lead_count
-           FROM webinars WHERE source = $1 ORDER BY created_at DESC`,
+           FROM webinars WHERE ($1 = 'all' OR source = $1) ORDER BY created_at DESC`,
           [source]
         );
         return res.json({ webinars: rows });
@@ -432,6 +484,74 @@ router.get('/webinars', async (req, res) => {
     }
     console.error('Get webinars error:', err.message);
     res.status(500).json({ error: 'Failed to fetch webinars' });
+  }
+});
+
+/* ── POST /api/admin/leads/import ──
+   Bulk-insert leads uploaded from a CSV/Excel sheet (Meta Temp "Add Leads").
+   Body: { source, leads: [{ full_name, whatsapp_number, email, sugar_level,
+   diabetes_duration, utm_source }] }. Server-side guards:
+     • require full_name + a 10-digit whatsapp_number
+     • skip rows whose phone already exists for this source (current batch dup)
+     • skip rows duplicated within the uploaded batch itself
+   Returns { inserted, skipped_duplicates, skipped_invalid }. */
+function importLeadScore(sugarLevel, duration) {
+  if (duration === 'pre') return 2;
+  const sugarScore = sugarLevel === '250+' ? 3 : 2;
+  const durationBonus = { long: 2, mid: 1, new: 0 }[duration] ?? 0;
+  return Math.min(5, sugarScore + durationBonus);
+}
+router.post('/leads/import', async (req, res) => {
+  const source = getSource(req);
+  const rowsIn = Array.isArray(req.body?.leads) ? req.body.leads : [];
+  if (!rowsIn.length) return res.status(400).json({ error: 'No leads provided' });
+
+  try {
+    // Existing phones for this source = the "current batch" to dedup against.
+    const { rows: existing } = await pool.query(
+      'SELECT whatsapp_number FROM leads WHERE source = $1',
+      [source]
+    );
+    const seen = new Set(existing.map(r => String(r.whatsapp_number || '').trim()));
+
+    // Active webinar for this source (so imported leads attach to it like a
+    // real registration would).
+    let webinar_id = null;
+    try {
+      const { rows: wRows } = await pool.query(
+        'SELECT id FROM webinars WHERE is_active = TRUE AND source = $1 LIMIT 1',
+        [source]
+      );
+      webinar_id = wRows[0]?.id ?? null;
+    } catch { /* webinars table optional */ }
+
+    let inserted = 0, skipped_duplicates = 0, skipped_invalid = 0;
+    for (const r of rowsIn) {
+      const full_name = String(r.full_name || '').trim();
+      const phone     = String(r.whatsapp_number || '').replace(/\D/g, '').slice(-10);
+      if (full_name.length < 1 || !/^\d{10}$/.test(phone)) { skipped_invalid++; continue; }
+      if (seen.has(phone)) { skipped_duplicates++; continue; }
+      seen.add(phone); // dedup within the uploaded batch too
+
+      const email             = r.email ? String(r.email).trim() : null;
+      const sugar_level       = ['150-250', '250+'].includes(r.sugar_level) ? r.sugar_level : null;
+      const diabetes_duration = ['new', 'mid', 'long', 'pre'].includes(r.diabetes_duration) ? r.diabetes_duration : null;
+      const utm_source        = r.utm_source ? String(r.utm_source).trim().slice(0, 120) : null;
+      const lead_score        = importLeadScore(sugar_level, diabetes_duration);
+
+      await pool.query(
+        `INSERT INTO leads
+           (full_name, whatsapp_number, email, sugar_level, diabetes_duration,
+            lead_score, utm_source, webinar_id, source)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [full_name, phone, email, sugar_level, diabetes_duration, lead_score, utm_source, webinar_id, source]
+      );
+      inserted++;
+    }
+    res.json({ success: true, inserted, skipped_duplicates, skipped_invalid });
+  } catch (err) {
+    console.error('Leads import error:', err.message);
+    res.status(500).json({ error: 'Failed to import leads' });
   }
 });
 
@@ -999,12 +1119,20 @@ router.get('/crm-users', async (req, res) => {
     } else {
       whereSQL = 'WHERE deleted_at IS NULL';
     }
+    // Optional workspace scope. When a workspace is requested, return every
+    // non-caller (they work all workspaces) PLUS callers tagged to that
+    // workspace or left untagged (workspace IS NULL = all workspaces).
+    const reqWorkspace = req.query.workspace;
+    if (reqWorkspace && ALLOWED_WORKSPACES.includes(String(reqWorkspace))) {
+      params.push(String(reqWorkspace));
+      whereSQL += ` AND (role NOT IN ('junior_caller','senior_caller') OR workspace IS NULL OR workspace = $${params.length})`;
+    }
     const { rows } = await pool.query(
-      `SELECT id, full_name, email, phone, role, is_active,
-              department, team_leader_id, manager_id, password_plain,
+      `SELECT id, full_name, email, phone, role, is_active, workspace,
+              department, team_leader_id, manager_id, assistant_manager_id, password_plain,
               tata_extension, tata_account_type, tata_agent_number, tata_caller_id,
-              tata_smartflo_api_key, tata_outbound_route,
-              created_at
+              tata_smartflo_api_key, tata_outbound_route, custom_fields,
+              page_access, created_at
          FROM crm_users
         ${whereSQL}
         ORDER BY created_at DESC`,
@@ -1034,17 +1162,72 @@ function isMaskedKey(v) {
 }
 
 /* ── POST /api/admin/crm-users ── */
-const ALLOWED_ROLES = ['junior_caller','senior_caller','manager','trainer','admin','team_leader','webinar','l1_sales'];
+const ALLOWED_ROLES = ['junior_caller','senior_caller','manager','assistant_manager','trainer','admin','team_leader','webinar','l1_sales'];
+// Workspace tags a caller can be pinned to (mirrors the top-left switcher).
+const ALLOWED_WORKSPACES = ['meta','yt','meta2','metatemp'];
+const CALLER_ROLES = new Set(['junior_caller','senior_caller']);
+
+/* Resolve the workspace column value for a write.
+   - Caller roles: store the submitted workspace (validated upstream; null = all).
+   - Non-caller roles: always NULL (non-callers work in every workspace). */
+function resolveWorkspace(role, rawWorkspace) {
+  if (!CALLER_ROLES.has(role)) return null;
+  if (rawWorkspace === undefined || rawWorkspace === null || rawWorkspace === '') return null;
+  const v = String(rawWorkspace).trim();
+  return ALLOWED_WORKSPACES.includes(v) ? v : null;
+}
+
+/* GET /api/admin/my-page-access — the page_access map ({ pageId: bool }) of the
+   currently-logged-in CRM user (manager or team_leader). The Web Reminder
+   dashboard reads this on mount to hide any tab turned OFF in the Access panel,
+   mirroring how CallerShell gates a caller's pages. Super-admin sees everything
+   (returns {} → every page defaults ON). */
+router.get('/my-page-access', async (req, res) => {
+  if (!req.adminUser || req.adminUser.kind === 'super') {
+    return res.json({ page_access: {} });
+  }
+  try {
+    const { rows } = await pool.query(
+      'SELECT page_access FROM crm_users WHERE id = $1',
+      [req.adminUser.id]
+    );
+    res.json({ page_access: rows[0]?.page_access || {} });
+  } catch (err) {
+    console.error('my-page-access read error:', err.message);
+    res.json({ page_access: {} }); // safe default — never lock a user out
+  }
+});
+
+/* PATCH /api/admin/crm-users/:id/page-access — store per-user marketing page
+   access as a JSON map { pageId: bool }. Used by the Marketing → Access tab. */
+router.patch('/crm-users/:id/page-access', async (req, res) => {
+  const { id } = req.params;
+  const access = req.body && typeof req.body.page_access === 'object' && req.body.page_access !== null
+    ? req.body.page_access : {};
+  try {
+    const { rows } = await pool.query(
+      'UPDATE crm_users SET page_access = $1::jsonb WHERE id = $2 RETURNING id, page_access',
+      [JSON.stringify(access), id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'user_not_found' });
+    res.json({ id: rows[0].id, page_access: rows[0].page_access });
+  } catch (err) {
+    console.error('page-access update error:', err.message);
+    res.status(500).json({ error: 'Failed to save access.' });
+  }
+});
 
 const crmUserValidators = [
   body('full_name').trim().notEmpty().withMessage('Full name is required.').isLength({ max: 120 }),
   body('email').trim().isEmail().withMessage('Valid email required.').isLength({ max: 200 }),
   body('phone').optional({ checkFalsy: true }).trim().isLength({ max: 30 }),
   body('role').isIn(ALLOWED_ROLES).withMessage('Role must be one of the allowed values.'),
+  body('workspace').optional({ nullable: true, checkFalsy: true }).isIn(ALLOWED_WORKSPACES).withMessage('Workspace must be "meta", "yt" or "meta2".'),
   body('password').isLength({ min: 6, max: 128 }).withMessage('Password must be 6–128 characters.'),
   body('department').optional({ nullable: true, checkFalsy: true }).isIn(['sales','marketing']).withMessage('Department must be "sales" or "marketing".'),
   body('team_leader_id').optional({ nullable: true, checkFalsy: true }).isUUID().withMessage('Team leader must be a valid user.'),
   body('manager_id').optional({ nullable: true, checkFalsy: true }).isUUID().withMessage('Manager must be a valid user.'),
+  body('assistant_manager_id').optional({ nullable: true, checkFalsy: true }).isUUID().withMessage('Assistant manager must be a valid user.'),
   body('tata_extension').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 60 }),
   body('tata_account_type').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 60 }),
   body('tata_agent_number').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 30 }),
@@ -1079,11 +1262,13 @@ router.post('/crm-users', crmUserValidators, async (req, res) => {
   }
 
   const {
-    full_name, email, phone, role, password,
-    department, team_leader_id, manager_id,
+    full_name, email, phone, role, password, workspace,
+    department, team_leader_id, manager_id, assistant_manager_id,
     tata_extension, tata_account_type, tata_agent_number, tata_caller_id,
     tata_smartflo_api_key, tata_outbound_route,
   } = req.body;
+  // Caller → store submitted workspace (null = all). Non-caller → always NULL.
+  const effectiveWorkspace = resolveWorkspace(role, workspace);
   // TL guard: TLs may only create caller-level users — no managers, no
   // peer TLs, no admins. Reject early with a clear message so a leaked
   // /admin/crm-users POST from a TL JWT can't escalate privileges.
@@ -1107,6 +1292,8 @@ router.post('/crm-users', crmUserValidators, async (req, res) => {
   const effectiveTeamLeaderId = isTL
     ? req.adminUser.id
     : (team_leader_id || null);
+  // Assistant manager assignment — super-admin honours the body; TLs never set it.
+  const effectiveAssistantManagerId = isTL ? null : (assistant_manager_id || null);
   try {
     const password_hash = await hashPassword(password);
     const { rows } = await pool.query(
@@ -1114,12 +1301,13 @@ router.post('/crm-users', crmUserValidators, async (req, res) => {
          (full_name, email, phone, role, password_hash,
           department, team_leader_id,
           tata_extension, tata_account_type, tata_agent_number, tata_caller_id,
-          tata_smartflo_api_key, tata_outbound_route, manager_id, password_plain)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-       RETURNING id, full_name, email, phone, role, is_active,
-                 department, team_leader_id, manager_id, password_plain,
+          tata_smartflo_api_key, tata_outbound_route, manager_id, password_plain,
+          workspace, custom_fields, assistant_manager_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18)
+       RETURNING id, full_name, email, phone, role, is_active, workspace,
+                 department, team_leader_id, manager_id, assistant_manager_id, password_plain,
                  tata_extension, tata_account_type, tata_agent_number, tata_caller_id,
-                 tata_smartflo_api_key, tata_outbound_route,
+                 tata_smartflo_api_key, tata_outbound_route, custom_fields,
                  created_at`,
       [
         full_name.trim(),
@@ -1139,6 +1327,9 @@ router.post('/crm-users', crmUserValidators, async (req, res) => {
           : 'extension',
         effectiveManagerId,
         password,
+        effectiveWorkspace,
+        JSON.stringify(req.body.custom_fields || {}),
+        effectiveAssistantManagerId,
       ]
     );
     // Mask the API key in the response so the freshly-created secret
@@ -1166,10 +1357,12 @@ const crmUserPatchValidators = [
   body('email').optional().trim().isEmail().withMessage('Valid email required.').isLength({ max: 200 }),
   body('phone').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 30 }),
   body('role').optional().isIn(ALLOWED_ROLES).withMessage('Role must be one of the allowed values.'),
+  body('workspace').optional({ nullable: true, checkFalsy: true }).isIn(ALLOWED_WORKSPACES).withMessage('Workspace must be "meta", "yt" or "meta2".'),
   body('password').optional({ checkFalsy: true }).isLength({ min: 6, max: 128 }).withMessage('Password must be 6–128 characters.'),
   body('department').optional({ nullable: true, checkFalsy: true }).isIn(['sales','marketing']).withMessage('Department must be "sales" or "marketing".'),
   body('team_leader_id').optional({ nullable: true, checkFalsy: true }).isUUID().withMessage('Team leader must be a valid user.'),
   body('manager_id').optional({ nullable: true, checkFalsy: true }).isUUID().withMessage('Manager must be a valid user.'),
+  body('assistant_manager_id').optional({ nullable: true, checkFalsy: true }).isUUID().withMessage('Assistant manager must be a valid user.'),
   body('tata_extension').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 60 }),
   body('tata_account_type').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 60 }),
   body('tata_agent_number').optional({ nullable: true, checkFalsy: true }).trim().isLength({ max: 30 }),
@@ -1197,7 +1390,7 @@ router.patch('/crm-users/:id', crmUserPatchValidators, async (req, res) => {
   const { id } = req.params;
   const allowed = [
     'full_name', 'email', 'phone', 'role',
-    'department', 'team_leader_id', 'manager_id',
+    'department', 'team_leader_id', 'manager_id', 'assistant_manager_id', 'workspace',
     'tata_extension', 'tata_account_type', 'tata_agent_number', 'tata_caller_id',
     'tata_smartflo_api_key', 'tata_outbound_route',
     // is_active doubles as the "paused" flag — leadAssigner.js already skips
@@ -1231,9 +1424,9 @@ router.patch('/crm-users/:id', crmUserPatchValidators, async (req, res) => {
         }
       } else if (key === 'is_active') {
         updates[key] = !!raw;
-      } else if (key === 'department' || key === 'team_leader_id' || key === 'manager_id') {
+      } else if (key === 'department' || key === 'team_leader_id' || key === 'manager_id' || key === 'assistant_manager_id' || key === 'workspace') {
         // All nullable — an empty string must become NULL (team_leader_id /
-        // manager_id are UUID columns; '' would trip a type error).
+        // manager_id / assistant_manager_id are UUID columns; '' would trip a type error).
         const v = typeof raw === 'string' ? raw.trim() : raw;
         updates[key] = v ? v : null;
       } else if (typeof raw === 'string') {
@@ -1244,6 +1437,11 @@ router.patch('/crm-users/:id', crmUserPatchValidators, async (req, res) => {
     }
   }
 
+  // Custom fields (JSONB) — stored verbatim; cast applied in the SET clause.
+  if (req.body.custom_fields !== undefined) {
+    updates.custom_fields = JSON.stringify(req.body.custom_fields || {});
+  }
+
   // Optional password update — hash for login verification, and keep the
   // plain text so the admin can view the user's current password.
   if (req.body.password) {
@@ -1252,6 +1450,30 @@ router.patch('/crm-users/:id', crmUserPatchValidators, async (req, res) => {
       updates.password_plain = String(req.body.password);
     } catch (e) {
       return res.status(500).json({ error: 'Failed to hash password.' });
+    }
+  }
+
+  // Workspace ↔ role reconciliation. Only callers may carry a workspace tag;
+  // non-callers are always all-workspace (NULL). Determine the EFFECTIVE role
+  // for this update (the submitted role if changing, else the stored role) and
+  // force workspace = NULL whenever that role is not a caller. This also
+  // catches a role demotion (caller → manager) that didn't touch workspace.
+  if (
+    Object.prototype.hasOwnProperty.call(updates, 'workspace') ||
+    Object.prototype.hasOwnProperty.call(updates, 'role')
+  ) {
+    let effectiveRole = updates.role;
+    if (effectiveRole === undefined) {
+      try {
+        const { rows: r } = await pool.query('SELECT role FROM crm_users WHERE id = $1', [id]);
+        if (r.length === 0) return res.status(404).json({ error: 'User not found.' });
+        effectiveRole = r[0].role;
+      } catch (e) {
+        return res.status(500).json({ error: 'Failed to verify user.' });
+      }
+    }
+    if (!CALLER_ROLES.has(effectiveRole)) {
+      updates.workspace = null;
     }
   }
 
@@ -1318,7 +1540,7 @@ router.patch('/crm-users/:id', crmUserPatchValidators, async (req, res) => {
   // auto-pause bookkeeping so the next system-driven pause starts from a
   // clean slate. The two columns are no-ops for any user that was paused
   // manually (they were never set).
-  const setFragments = Object.keys(updates).map((k, i) => `${k} = $${i + 1}`);
+  const setFragments = Object.keys(updates).map((k, i) => (k === 'custom_fields' ? `${k} = $${i + 1}::jsonb` : `${k} = $${i + 1}`));
   if (Object.prototype.hasOwnProperty.call(updates, 'is_active') && updates.is_active === true) {
     setFragments.push('auto_paused_at = NULL', 'auto_pause_reason = NULL');
   }
@@ -1330,11 +1552,11 @@ router.patch('/crm-users/:id', crmUserPatchValidators, async (req, res) => {
     const { rows } = await pool.query(
       `UPDATE crm_users SET ${setClause}
        WHERE id = $${values.length}
-       RETURNING id, full_name, email, phone, role, is_active,
+       RETURNING id, full_name, email, phone, role, is_active, workspace,
                  auto_paused_at, auto_pause_reason,
                  department, team_leader_id, manager_id, password_plain,
                  tata_extension, tata_account_type, tata_agent_number, tata_caller_id,
-                 tata_smartflo_api_key, tata_outbound_route,
+                 tata_smartflo_api_key, tata_outbound_route, custom_fields,
                  created_at`,
       values
     );
@@ -1404,14 +1626,17 @@ router.get('/auto-paused-callers', async (req, res) => {
     // Manager + super-admin: department-wide / global as before.
     const tl  = req.adminUser && req.adminUser.kind === 'tl';
     const mgr = req.adminUser && req.adminUser.kind === 'manager';
-    let whereExtra = '';
-    let params     = [];
+    // Workspace filter: scope to callers tagged to this workspace (+ untagged).
+    // 'all' (or default) keeps every caller.
+    const source = getReportSource(req);
+    let params     = [source];   // $1 = workspace
+    let whereExtra = `AND ($1 = 'all' OR workspace IS NULL OR workspace = $1)`;
     if (tl) {
-      whereExtra = 'AND team_leader_id = $1';
-      params     = [req.adminUser.id];
+      params.push(req.adminUser.id);
+      whereExtra += ` AND team_leader_id = $${params.length}`;
     } else if (mgr) {
-      whereExtra = 'AND department = $1';
-      params     = [req.adminUser.department];
+      params.push(req.adminUser.department);
+      whereExtra += ` AND department = $${params.length}`;
     }
     const { rows } = await pool.query(
       `SELECT id, full_name, role, auto_paused_at, auto_pause_reason
@@ -1809,6 +2034,144 @@ router.get('/meta-campaigns', async (_req, res) => {
   } catch (err) {
     console.error('meta-campaigns error:', err.message);
     res.status(500).json({ error: 'Failed to load campaigns.' });
+  }
+});
+
+/* ── WhatsApp message templates (Meta Temp scheduling) ──
+   Stored per source in wa_templates. day_offset is relative to the webinar
+   ('webinar_day','1_before',…); msg_type is the content type (text/image/
+   video/document); send_time is 'HH:MM' IST. Auto-send is a separate job. */
+router.get('/wa-templates', async (req, res) => {
+  const source = getSource(req);
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM wa_templates WHERE source = $1 ORDER BY created_at DESC',
+      [source]
+    );
+    res.json({ templates: rows });
+  } catch (err) {
+    console.error('wa-templates list error:', err.message);
+    res.json({ templates: [] });
+  }
+});
+
+/* Template media upload — disk storage under backend/uploads/templates,
+   served statically at /uploads/templates (see app.js). 25 MB cap (>= the
+   15 MB minimum requested). Returns a relative URL stored on the template. */
+const TEMPLATE_UPLOAD_DIR = path.join(__dirname, '..', 'uploads', 'templates');
+try { fs.mkdirSync(TEMPLATE_UPLOAD_DIR, { recursive: true }); } catch (_) {}
+const templateUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, TEMPLATE_UPLOAD_DIR),
+    filename: (_req, file, cb) => {
+      const ext = (path.extname(file.originalname || '') || '').slice(0, 12);
+      cb(null, `${Date.now()}-${crypto.randomBytes(4).toString('hex')}${ext}`);
+    },
+  }),
+  limits: { fileSize: 25 * 1024 * 1024 },
+});
+
+router.post('/wa-templates/upload', (req, res) => {
+  templateUpload.single('file')(req, res, (err) => {
+    if (err) {
+      const msg = err.code === 'LIMIT_FILE_SIZE' ? 'File too large (max 25 MB).' : 'Upload failed.';
+      return res.status(400).json({ error: msg });
+    }
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded.' });
+    res.json({ url: `/uploads/templates/${req.file.filename}`, name: req.file.originalname, size: req.file.size });
+  });
+});
+
+router.post('/wa-templates', async (req, res) => {
+  const source = getSource(req);
+  const { name, send_time, day_offset, msg_type, media_url, body, is_active } = req.body || {};
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO wa_templates (source, name, send_time, day_offset, msg_type, media_url, body, is_active)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [source, (name || '').trim(), send_time || '', day_offset || '', msg_type || 'text',
+       media_url || '', body || '', is_active !== false]
+    );
+    res.status(201).json({ template: rows[0] });
+  } catch (err) {
+    console.error('wa-templates create error:', err.message);
+    res.status(500).json({ error: 'Failed to save template.' });
+  }
+});
+
+router.patch('/wa-templates/:id', async (req, res) => {
+  const source = getSource(req);
+  const { id } = req.params;
+  const fields = ['name', 'send_time', 'day_offset', 'msg_type', 'media_url', 'body', 'is_active'];
+  const set = [], vals = [];
+  for (const f of fields) if (req.body[f] !== undefined) { vals.push(req.body[f]); set.push(`${f} = $${vals.length}`); }
+  if (set.length === 0) return res.status(400).json({ error: 'No fields' });
+  vals.push(id); vals.push(source);
+  try {
+    const { rows } = await pool.query(
+      `UPDATE wa_templates SET ${set.join(', ')}, updated_at = NOW() WHERE id = $${vals.length - 1} AND source = $${vals.length} RETURNING *`,
+      vals
+    );
+    res.json({ template: rows[0] });
+  } catch (err) {
+    console.error('wa-templates update error:', err.message);
+    res.status(500).json({ error: 'Failed to update template.' });
+  }
+});
+
+router.delete('/wa-templates/:id', async (req, res) => {
+  const source = getSource(req);
+  try {
+    await pool.query('DELETE FROM wa_templates WHERE id = $1 AND source = $2', [req.params.id, source]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('wa-templates delete error:', err.message);
+    res.status(500).json({ error: 'Failed to delete.' });
+  }
+});
+
+/* ── Create-User form configuration (per-role field on/off + custom fields) ──
+   Stored as one JSONB blob: { [role]: { builtins: {field:bool}, custom:
+   [{ key, label, type, enabled }] } }. The Users page Create/Edit form reads
+   this to show/hide built-in fields and render custom fields. */
+router.get('/user-form-config', async (_req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT config FROM user_form_config WHERE id = 1');
+    res.json({ config: rows[0]?.config || {} });
+  } catch (err) {
+    console.error('user-form-config get:', err.message);
+    res.json({ config: {} });
+  }
+});
+
+router.put('/user-form-config', async (req, res) => {
+  try {
+    const config = req.body && req.body.config ? req.body.config : {};
+    await pool.query(
+      `INSERT INTO user_form_config (id, config, updated_at) VALUES (1, $1::jsonb, NOW())
+       ON CONFLICT (id) DO UPDATE SET config = $1::jsonb, updated_at = NOW()`,
+      [JSON.stringify(config)]
+    );
+    res.json({ success: true, config });
+  } catch (err) {
+    console.error('user-form-config put:', err.message);
+    res.status(500).json({ error: 'Failed to save configuration.' });
+  }
+});
+
+/* ── GET /api/admin/meta-leadgen-forms ──
+   Lists Meta (Facebook) lead-gen forms across all reachable pages, for the
+   Meta Temp Timer & Controls form dropdowns. Returns { configured, forms:
+   [{ id, name, page_name?, status? }] }. Empty (not an error) when Meta
+   isn't configured, so the dropdown can show a graceful "none" state. */
+router.get('/meta-leadgen-forms', async (_req, res) => {
+  if (!metaConfigured()) return res.json({ configured: false, forms: [] });
+  try {
+    const forms = await fetchAllLeadgenForms();
+    res.json({ configured: true, forms: forms || [] });
+  } catch (err) {
+    console.error('meta-leadgen-forms error:', err.message);
+    res.json({ configured: true, forms: [] });
   }
 });
 
@@ -2648,8 +3011,10 @@ router.get('/caller-report', async (req, res) => {
   // Workspace scope. With "All webinars" (no webinar_id) the report must stay
   // within the current workspace's source — otherwise a caller who also works
   // YT / Meta 2.0 leads would have those counted on the Meta page. Defaults to
-  // 'meta' (see getSource). Mirrors the source filter on /api/admin/webinars.
-  const source = getSource(req);
+  // 'meta' (see getSource), or 'all' to aggregate every workspace (the
+  // Web Reminder workspace filter). Each source/workspace condition below is
+  // guarded with `$4 = 'all' OR …` so a concrete source behaves as before.
+  const source = getReportSource(req);
   const params = [dayStart, dayEnd, webinarId, source]; // $1, $2, $3, $4
 
   try {
@@ -2661,11 +3026,13 @@ router.get('/caller-report', async (req, res) => {
         -- Report shows only the callers themselves (junior + senior) —
         -- team leaders and managers are intentionally excluded.
         SELECT u.id AS caller_id, u.full_name AS name, u.role, u.is_active,
-               u.tata_extension,
+               u.tata_extension, u.team_leader_id,
                u.activity_status, u.last_heartbeat_at, u.activity_break, u.rest_started_at
           FROM crm_users u
          WHERE u.role IN ('junior_caller','senior_caller')
            AND u.deleted_at IS NULL
+           -- Workspace scope: only this source's callers (plus untagged).
+           AND ($4::text = 'all' OR u.workspace IS NULL OR u.workspace = $4::text)
       ),
       call_agg AS (
         -- Telephony activity, date-windowed, outbound only. "answered" =
@@ -2689,7 +3056,7 @@ router.get('/caller-report', async (req, res) => {
            -- source: only count calls tied to a lead of this source.
            AND ($3::text IS NOT NULL OR EXISTS (
                  SELECT 1 FROM leads ll
-                  WHERE ll.id = c.lead_id AND ll.source = $4::text
+                  WHERE ll.id = c.lead_id AND ($4::text = 'all' OR ll.source = $4::text)
                ))
          GROUP BY c.caller_id
       ),
@@ -2727,8 +3094,34 @@ router.get('/caller-report', async (req, res) => {
          WHERE n.caller_id IS NOT NULL
            AND n.created_at >= w.d_start AND n.created_at <= w.d_end
            AND ($3::text IS NULL OR l.webinar_id::text = $3::text)
-           AND ($3::text IS NOT NULL OR l.source = $4::text)
+           AND ($3::text IS NOT NULL OR $4::text = 'all' OR l.source = $4::text)
          GROUP BY n.caller_id
+      ),
+      break_agg AS (
+        -- BREAK / not-making-auto-call time per caller, OFFICE HOURS ONLY
+        -- (9 AM-6 PM IST), summed over the report window. "Working" tags
+        -- (ON_CALL / IN_FORM / REASON_CARD / EDITING_COMPLETED) are excluded;
+        -- everything else the caller sits in while logged in counts as break:
+        -- ON_BREAK, BREAK_PICKER, BLOCKED, PAUSED_BY_ADMIN, and the idle ON_PAGE_*
+        -- tabs (sitting on a page, not auto-calling). Each span is clipped to BOTH
+        -- the report window AND the 9-18 IST office window of its own IST day, so
+        -- off-hours time never counts and a span can't exceed real elapsed time.
+        -- Only single-tag-model rows (>= the activity-log redesign cutover) count.
+        SELECT e.caller_id,
+               COALESCE(SUM(GREATEST(0, EXTRACT(EPOCH FROM (
+                     LEAST(COALESCE(e.ended_at, NOW()), w.d_end,
+                           ((e.started_at AT TIME ZONE 'Asia/Kolkata')::date + TIME '18:00') AT TIME ZONE 'Asia/Kolkata')
+                   - GREATEST(e.started_at, w.d_start,
+                           ((e.started_at AT TIME ZONE 'Asia/Kolkata')::date + TIME '09:00') AT TIME ZONE 'Asia/Kolkata')
+                 ))::int)), 0)::int AS break_sec
+          FROM caller_activity_events e CROSS JOIN w
+         WHERE e.tag IN ('ON_BREAK','BREAK_PICKER','BLOCKED','PAUSED_BY_ADMIN',
+                         'ON_PAGE_CALL','ON_PAGE_ASSIGNED','ON_PAGE_COMPLETED',
+                         'ON_PAGE_NOT_PICKED','ON_PAGE_MISSED_CALLS','ON_PAGE_UNTOUCHED','ON_PAGE_NEXT_BATCH')
+           AND e.started_at < w.d_end
+           AND (e.ended_at IS NULL OR e.ended_at >= w.d_start)
+           AND e.started_at >= COALESCE((SELECT MIN(applied_at) FROM activity_log_redesign_flag), '1970-01-01'::timestamptz)
+         GROUP BY e.caller_id
       ),
       assign_agg AS (
         -- CUMULATIVE assignment EVENTS from lead_assignments history, windowed by
@@ -2741,7 +3134,7 @@ router.get('/caller-report', async (req, res) => {
           JOIN leads l ON l.id = a.lead_id
          WHERE a.created_at >= w.d_start AND a.created_at <= w.d_end
            AND ($3::text IS NULL OR l.webinar_id::text = $3::text)
-           AND ($3::text IS NOT NULL OR l.source = $4::text)
+           AND ($3::text IS NOT NULL OR $4::text = 'all' OR l.source = $4::text)
          GROUP BY a.caller_id
       ),
       disp_agg AS (
@@ -2768,10 +3161,10 @@ router.get('/caller-report', async (req, res) => {
            AND ($3::text IS NULL OR l.webinar_id::text = $3::text)
            -- "All webinars" means "all webinars of THIS source" — exclude
            -- YT / Meta 2.0 (and test) leads from the Meta page.
-           AND ($3::text IS NOT NULL OR l.source = $4::text)
+           AND ($3::text IS NOT NULL OR $4::text = 'all' OR l.source = $4::text)
          GROUP BY l.assigned_user_id
       )
-      SELECT cb.caller_id, cb.name, cb.role, cb.is_active, cb.tata_extension,
+      SELECT cb.caller_id, cb.name, cb.role, cb.is_active, cb.tata_extension, cb.team_leader_id,
              cb.activity_status, cb.last_heartbeat_at, cb.activity_break, cb.rest_started_at,
              da.batch,
              COALESCE(na.touched, 0)          AS touched,
@@ -2780,6 +3173,7 @@ router.get('/caller-report', async (req, res) => {
              COALESCE(ca.answered_dur_sec, 0) AS answered_dur_sec,
              COALESCE(ca.missed_dur_sec, 0)   AS missed_dur_sec,
              COALESCE(ca.total_dur_sec, 0)    AS total_dur_sec,
+             COALESCE(bka.break_sec, 0)       AS break_sec,
              COALESCE(ag.assigned, 0)         AS assigned,
              COALESCE(ag.actual_leads, 0)     AS actual_leads,
              COALESCE(da.new_leads, 0)        AS new_leads,
@@ -2813,13 +3207,14 @@ router.get('/caller-report', async (req, res) => {
         LEFT JOIN call_agg   ca ON ca.caller_id = cb.caller_id
         LEFT JOIN note_agg   na ON na.caller_id = cb.caller_id
         LEFT JOIN assign_agg ag ON ag.caller_id = cb.caller_id
+        LEFT JOIN break_agg  bka ON bka.caller_id = cb.caller_id
         LEFT JOIN disp_agg   da ON da.caller_id = cb.caller_id
        ORDER BY cb.name ASC
     `, params);
 
     // Numeric atom keys — summed into the totals footer in one place.
     const NUM_KEYS = [
-      'touched','answered','missed','answered_dur_sec','missed_dur_sec','total_dur_sec',
+      'touched','answered','missed','answered_dur_sec','missed_dur_sec','total_dur_sec','break_sec',
       'assigned','actual_leads','new_leads','interested','next_batch',
       'hot','warm','cold','junk','untouched',
       'o_completed','o_follow_up','o_not_interested','o_not_picked','o_incomplete',

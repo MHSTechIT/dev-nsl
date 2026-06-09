@@ -183,7 +183,7 @@ function endOfTodayISO() {
    new result set. */
 const PAGE_SIZE = 10;
 
-export default function SalesCompletedCallsView({ token }) {
+export default function SalesCompletedCallsView({ token, source = 'all' }) {
   const [rows, setRows]         = useState([]);
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState('');
@@ -275,7 +275,7 @@ export default function SalesCompletedCallsView({ token }) {
     setLoading(true);
     setError('');
     try {
-      const res = await fetch('/api/admin/completed-calls', {
+      const res = await fetch(`/api/admin/completed-calls?source=${encodeURIComponent(source)}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error('Failed to load completed calls.');
@@ -286,23 +286,23 @@ export default function SalesCompletedCallsView({ token }) {
     } finally {
       setLoading(false);
     }
-  }, [token]);
+  }, [token, source]);
 
   useEffect(() => { load(); }, [load]);
 
   // Fetch callers + webinars once for the dropdown options.
   useEffect(() => {
-    fetch('/api/admin/crm-users', { headers: { Authorization: `Bearer ${token}` } })
+    fetch(`/api/admin/crm-users?workspace=${encodeURIComponent(source)}`, { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.json())
       .then(d => setCallers((d.users || []).filter(u =>
         ['junior_caller','senior_caller','team_leader','manager'].includes(u.role)
       )))
       .catch(() => {});
-    fetch('/api/admin/webinars', { headers: { Authorization: `Bearer ${token}` } })
+    fetch(`/api/admin/webinars?source=${encodeURIComponent(source)}`, { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.json())
       .then(d => setWebinars(d.webinars || []))
       .catch(() => {});
-  }, [token]);
+  }, [token, source]);
 
   // Outside-click guards for the four popovers.
   useEffect(() => {

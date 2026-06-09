@@ -4,7 +4,7 @@ const pool = require('../db');
 const cache = require('../utils/webinarConfigCache');
 const { addClient, removeClient, broadcast } = require('../utils/sseClients');
 
-const ALLOWED_SOURCES = new Set(['meta', 'yt', 'meta2']);
+const ALLOWED_SOURCES = new Set(['meta', 'yt', 'meta2', 'metatemp']);
 function normalizeSource(value) {
   return ALLOWED_SOURCES.has(value) ? value : 'meta';
 }
@@ -99,7 +99,7 @@ router.get('/webinar-config', async (req, res) => {
   try {
     const [configResult, countResult] = await Promise.all([
       pool.query(
-        'SELECT next_webinar_at, backup_webinar_at, tuesday_whatsapp_link, friday_whatsapp_link, kill_switch, pending_whatsapp_link, whatsapp_link_swap_at, pending_whatsapp_link_2, whatsapp_link_swap_at_2, current_webinar_date, next_webinar_date FROM webinar_config WHERE source = $1',
+        'SELECT next_webinar_at, backup_webinar_at, tuesday_whatsapp_link, friday_whatsapp_link, kill_switch, pending_whatsapp_link, whatsapp_link_swap_at, pending_whatsapp_link_2, whatsapp_link_swap_at_2, current_webinar_date, next_webinar_date, current_form_id, next_form_id, permanent_whatsapp_link, current_webinar_datetime, current_webinar_link, next_webinar_datetime, next_webinar_link FROM webinar_config WHERE source = $1',
         [source]
       ),
       pool.query('SELECT COUNT(*) FROM leads WHERE source = $1', [source]),

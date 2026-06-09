@@ -55,6 +55,15 @@ async function assignNewLead(leadId, sugarLevel, webinarId) {
       return null;
     }
 
+    // 0b. The lead's workspace = its source (meta / yt / meta2). A caller
+    //     tagged to a workspace only receives that workspace's leads; untagged
+    //     callers (workspace IS NULL) receive everything (no regression).
+    const { rows: srcRow } = await client.query(
+      'SELECT source FROM leads WHERE id = $1',
+      [leadId]
+    );
+    const leadSource = srcRow[0]?.source ?? null;
+
     // 1. Eligible callers for this webinar.
     //    A caller "in the leads logic" = an enabled lead_share_config row.
     //    Paused callers (crm_users.is_active = FALSE) are intentionally NOT
@@ -69,8 +78,9 @@ async function assignNewLead(leadId, sugarLevel, webinarId) {
          AND lsc.enabled    = TRUE
          AND ('all' = ANY(lsc.allowed_lead_types) OR $2 = ANY(lsc.allowed_lead_types))
          AND u.deleted_at IS NULL
+         AND (u.workspace IS NULL OR u.workspace = $3::text)
        ORDER BY lsc.position ASC, lsc.created_at ASC
-    `, [webinarId, sugarLevel]);
+    `, [webinarId, sugarLevel, leadSource]);
 
     if (eligible.length === 0) {
       await client.query('COMMIT');

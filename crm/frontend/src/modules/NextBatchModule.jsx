@@ -34,7 +34,7 @@ function fmtRelative(iso) {
   return `${Math.floor(secs / 86400)}d ago`;
 }
 
-export default function NextBatchModule({ jwt, onCount }) {
+export default function NextBatchModule({ jwt, onCount, previewMode = false }) {
   const [leads, setLeads]     = useState([]);
   // Bubble the count up to CallerShell for the header chip.
   useEffect(() => { if (typeof onCount === 'function') onCount(leads.length); }, [leads.length, onCount]);
@@ -67,7 +67,7 @@ export default function NextBatchModule({ jwt, onCount }) {
   // lead.assigned with promoted_from=next_batch (admin started a new
   // batch → rows leave this page).
   useEffect(() => {
-    if (!jwt) return;
+    if (!jwt || previewMode) return;   // preview: no live stream (read-only)
     const url = `/api/caller/leads/events?token=${encodeURIComponent(jwt)}`;
     const es  = new EventSource(url);
     sseRef.current = es;

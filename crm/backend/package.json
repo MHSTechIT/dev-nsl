@@ -4,14 +4,16 @@
   "main": "servers/crm.js",
   "scripts": {
     "start": "node servers/crm.js",
-    "dev":   "node servers/crm.js",
+    "dev": "node servers/crm.js",
     "ngrok": "node scripts/start-ngrok.js",
     "test": "jest --forceExit",
     "test:coverage": "jest --coverage --forceExit"
   },
   "jest": {
     "testEnvironment": "node",
-    "testMatch": ["**/tests/**/*.test.js"],
+    "testMatch": [
+      "**/tests/**/*.test.js"
+    ],
     "clearMocks": true,
     "testTimeout": 10000
   },
@@ -24,6 +26,7 @@
     "googleapis": "^171.4.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
+    "multer": "^2.1.1",
     "node-cron": "^4.2.1",
     "nodemailer": "^8.0.5",
     "pg": "^8.12.0"

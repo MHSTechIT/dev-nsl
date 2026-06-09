@@ -17,6 +17,33 @@ const { notifyAutoPause } = require('../utils/telegramNotifier');
 
 router.use(callerAuth);
 
+/* ── Preview (admin "view as caller") read-only gate ──
+   When an admin opens a caller's pages via a preview token (preview:true),
+   every data READ is a GET, so we allow GETs through but reject any
+   state-mutating / telephony call (POST/PATCH/PUT/DELETE) with 403. This
+   guarantees an admin preview can never start a real call, log activity,
+   self-pause, or otherwise touch the real caller's live session. */
+router.use((req, res, next) => {
+  if (req.caller?.preview && req.method !== 'GET') {
+    return res.status(403).json({ error: 'preview_read_only' });
+  }
+  next();
+});
+
+/* ── GET /api/caller/page-access ──
+   Returns the logged-in caller's page_access map ({ pageId: bool }) so the
+   CallerShell can hide pages an admin turned off in Marketing/Web Reminder →
+   Access. Default (missing key) = visible. */
+router.get('/page-access', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT page_access FROM crm_users WHERE id = $1', [req.caller.id]);
+    res.json({ page_access: rows[0]?.page_access || {} });
+  } catch (err) {
+    console.error('caller page-access error:', err.message);
+    res.json({ page_access: {} });
+  }
+});
+
 /* ── POST /api/caller/heartbeat ──
    Caller's browser fires this every ~30s and on every activity-state change
    (auto-call start/stop, call start/end, break start/end). Server records the
@@ -175,6 +202,47 @@ router.get('/break-budget', async (req, res) => {
   } catch (err) {
     console.error('caller/break-budget error:', err.message);
     res.status(500).json({ error: 'break_budget_failed' });
+  }
+});
+
+/* ── GET /api/caller/stats ──
+   Live numbers for the Call-page status card:
+     • assigned — active assigned leads (same definition as GET /leads)
+     • tags     — counts of this caller's leads by qualification tag
+                  (HOT/WARM/COLD/JUNK) + FOLLOW-UP (follow_up) + DNP (not_picked).
+   Scoped to the caller's recent webinars, so it reflects the current batch. */
+router.get('/stats', async (req, res) => {
+  const cfg = workspaceConfig(req.caller.workspace);
+  try {
+    const { rows } = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (
+           WHERE l.next_batch_parked = FALSE
+             AND (l.last_note_outcome IS NULL
+                  OR (l.last_note_outcome = 'follow_up' AND l.follow_up_at <= NOW()))
+         )::int AS assigned,
+         COUNT(*) FILTER (WHERE l.lead_tag = 'HOT')::int  AS hot,
+         COUNT(*) FILTER (WHERE l.lead_tag = 'WARM')::int AS warm,
+         COUNT(*) FILTER (WHERE l.lead_tag = 'COLD')::int AS cold,
+         COUNT(*) FILTER (WHERE l.lead_tag = 'JUNK')::int AS junk,
+         COUNT(*) FILTER (WHERE l.last_note_outcome = 'follow_up')::int   AS followup,
+         COUNT(*) FILTER (WHERE l.last_note_outcome = 'not_picked')::int  AS dnp
+       FROM leads l
+       WHERE l.assigned_user_id = $1
+         AND (l.webinar_id IS NULL OR l.webinar_id IN ${cfg.recentWebinars})`,
+      [req.caller.id]
+    );
+    const r = rows[0] || {};
+    res.json({
+      assigned: r.assigned || 0,
+      tags: {
+        hot: r.hot || 0, warm: r.warm || 0, cold: r.cold || 0,
+        junk: r.junk || 0, followup: r.followup || 0, dnp: r.dnp || 0,
+      },
+    });
+  } catch (err) {
+    console.error('caller/stats error:', err.message);
+    res.status(500).json({ error: 'stats_failed' });
   }
 });
 

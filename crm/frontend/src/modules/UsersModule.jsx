@@ -1,11 +1,13 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import Loading from '../components/Loading';
 
 const ROLES = [
   { value: 'junior_caller', label: 'Junior Caller' },
   { value: 'senior_caller', label: 'Senior Caller' },
-  { value: 'manager',       label: 'Manager' },
-  { value: 'trainer',       label: 'Trainer' },
+  { value: 'manager',           label: 'Manager' },
+  { value: 'assistant_manager', label: 'Assistant Manager' },
+  { value: 'trainer',           label: 'Trainer' },
   { value: 'admin',         label: 'Admin' },
   { value: 'team_leader',   label: 'Team Leader' },
   { value: 'webinar',       label: 'Webinar' },
@@ -27,13 +29,49 @@ const TATA_ACCOUNT_TYPES = [
 const ROLE_BADGE = {
   junior_caller: { bg: '#FEF9C3', fg: '#A16207' },
   senior_caller: { bg: '#FFEDD5', fg: '#C2410C' },
-  manager:       { bg: '#DCFCE7', fg: '#166534' },
-  trainer:       { bg: '#DBEAFE', fg: '#1E40AF' },
+  manager:           { bg: '#DCFCE7', fg: '#166534' },
+  assistant_manager: { bg: '#D1FAE5', fg: '#047857' },
+  trainer:           { bg: '#DBEAFE', fg: '#1E40AF' },
   admin:         { bg: '#FCE7F3', fg: '#9D174D' },
   team_leader:   { bg: '#EDE9FE', fg: '#5B21B6' },
   webinar:       { bg: '#CFFAFE', fg: '#0E7490' },
   l1_sales:      { bg: '#E0E7FF', fg: '#3730A3' },
 };
+
+/* Short description shown under each role card. */
+const CARD_DESC = {
+  callers:     'People who make and receive calls',
+  manager:     'People who manage teams and access',
+  assistant_manager: 'People who assist managers',
+  team_leader: 'People who lead and supervise teams',
+  trainer:     'People who train and onboard the team',
+  admin:       'People with full system access',
+  webinar:     'People who run the webinars',
+  l1_sales:    'First-line sales people',
+};
+
+/* Icon per role card — inherits its colour via currentColor. */
+function roleIcon(key) {
+  const p = { width: 28, height: 28, viewBox: '0 0 24 24', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' };
+  switch (key) {
+    case 'callers':
+      return <svg {...p} fill="none" stroke="currentColor"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>;
+    case 'manager':
+      return <svg {...p} fill="none" stroke="currentColor"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>;
+    case 'team_leader':
+      return <svg {...p} fill="currentColor" stroke="none"><path d="M2 7l4.5 4L12 4l5.5 7L22 7l-1.7 11.3a1 1 0 0 1-1 .7H4.7a1 1 0 0 1-1-.7L2 7z"/></svg>;
+    case 'trainer':
+      return <svg {...p} fill="none" stroke="currentColor"><path d="M22 10L12 5 2 10l10 5 10-5z"/><path d="M6 12v5c0 1 2.7 2 6 2s6-1 6-2v-5"/></svg>;
+    case 'admin':
+      return <svg {...p} fill="none" stroke="currentColor"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>;
+    case 'webinar':
+      return <svg {...p} fill="none" stroke="currentColor"><rect x="2" y="5" width="14" height="14" rx="2"/><path d="M16 9l6-3v12l-6-3"/></svg>;
+    case 'l1_sales':
+      return <svg {...p} fill="none" stroke="currentColor"><path d="M20 12V8H6a2 2 0 0 1 0-4h12v4"/><path d="M4 6v12a2 2 0 0 0 2 2h14v-4"/><path d="M18 12a2 2 0 0 0 0 4h4v-4z"/></svg>;
+    default:
+      return <svg {...p} fill="none" stroke="currentColor"><circle cx="12" cy="8" r="4"/><path d="M6 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/></svg>;
+  }
+}
 
 function fmtDate(iso) {
   if (!iso) return '—';
@@ -49,6 +87,7 @@ export default function UsersModule({
   // '/api/admin/nsm/users' base so it reads/writes the independent nsm_users
   // table instead. The endpoints are response-compatible.
   apiBase            = '/api/admin/crm-users',
+  workspace          = null,   // scope the list to this workspace: shows non-callers + untagged callers + callers tagged to it
   lockedDepartment   = null,
   lockedManagerId    = null,
   // TL mode: pin team_leader_id on every create/edit to the logged-in TL,
@@ -68,7 +107,8 @@ export default function UsersModule({
     setLoading(true);
     setError('');
     try {
-      const res = await fetch(apiBase, { headers: { Authorization: `Bearer ${token}` } });
+      const url = workspace ? `${apiBase}?workspace=${encodeURIComponent(workspace)}` : apiBase;
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
       if (!res.ok) throw new Error('Failed to load users.');
       const data = await res.json();
       setUsers(data.users || []);
@@ -77,7 +117,7 @@ export default function UsersModule({
     } finally {
       setLoading(false);
     }
-  }, [token, apiBase]);
+  }, [token, apiBase, workspace]);
 
   useEffect(() => { fetchUsers(); }, [fetchUsers]);
 
@@ -97,6 +137,7 @@ export default function UsersModule({
   const [query,       setQuery]       = useState('');
   const [roleFilter,  setRoleFilter]  = useState(() => new Set()); // empty = all roles
   const [showFilter,  setShowFilter]  = useState(false);
+  const [selectedCard, setSelectedCard] = useState(null); // null = show the cards; { label, roles:[...] } = drilled into those roles
   const filterWrapRef = useRef(null);
 
   // Close the role-filter popover on outside click + Escape.
@@ -119,6 +160,7 @@ export default function UsersModule({
   const filteredUsers = useMemo(() => {
     const q = query.trim().toLowerCase();
     return users.filter(u => {
+      if (selectedCard && !selectedCard.roles.includes(u.role)) return false;
       if (roleFilter.size > 0 && !roleFilter.has(u.role)) return false;
       if (q) {
         const hay = `${u.full_name || ''} ${u.email || ''} ${u.phone || ''}`.toLowerCase();
@@ -126,7 +168,30 @@ export default function UsersModule({
       }
       return true;
     });
-  }, [users, query, roleFilter]);
+  }, [users, query, roleFilter, selectedCard]);
+
+  /* How many users per role — drives the count on each card. */
+  const roleCounts = useMemo(() => {
+    const m = {};
+    for (const u of users) m[u.role] = (m[u.role] || 0) + 1;
+    return m;
+  }, [users]);
+
+  /* The drill cards. Junior + Senior callers are merged into ONE "Callers"
+     card (combined count, drills into both); every other role keeps its own. */
+  const cards = useMemo(() => {
+    const CALLER_ROLES = ['junior_caller', 'senior_caller'];
+    const list = [];
+    const callerN = (roleCounts.junior_caller || 0) + (roleCounts.senior_caller || 0);
+    // Always show every role type — count 0 when there are no users in it.
+    list.push({ key: 'callers', label: 'Callers', roles: CALLER_ROLES, n: callerN, badge: ROLE_BADGE.senior_caller });
+    for (const r of ROLES) {
+      if (CALLER_ROLES.includes(r.value)) continue;
+      const n = roleCounts[r.value] || 0;
+      list.push({ key: r.value, label: r.label, roles: [r.value], n, badge: ROLE_BADGE[r.value] });
+    }
+    return list;
+  }, [roleCounts]);
 
   function toggleRole(value) {
     setRoleFilter(prev => {
@@ -209,8 +274,8 @@ export default function UsersModule({
         />
       </div>
 
-      {/* Role filter — popover with multi-select checkboxes */}
-      <div ref={filterWrapRef} style={{ position: 'relative' }}>
+      {/* Role filter removed per request — hidden on the cards overview and inside opened cards. */}
+      <div ref={filterWrapRef} style={{ position: 'relative', display: 'none' }}>
         <button
           onClick={() => setShowFilter(o => !o)}
           style={{
@@ -333,9 +398,9 @@ export default function UsersModule({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-      {actionsSlotEl
-        ? createPortal(toolbar, actionsSlotEl)
-        : <div style={{ display: 'flex', justifyContent: 'flex-end' }}>{toolbar}</div>}
+      {/* When a dashboard action slot is provided (manager dashboard), portal
+          the toolbar there. Otherwise it renders inside the card top bar below. */}
+      {actionsSlotEl && createPortal(toolbar, actionsSlotEl)}
 
       {/* Error banner */}
       {error && (
@@ -346,19 +411,76 @@ export default function UsersModule({
 
       {/* Users table */}
       <div className="bg-white rounded-card shadow-card" style={{ padding: 0, overflow: 'hidden' }}>
+        {/* Toolbar — search + filter + Create User, shown inside the card top
+            bar whenever there's no external dashboard action slot. */}
+        {(!actionsSlotEl || selectedCard !== null) && (
+          <div style={{
+            padding: '14px 18px',
+            borderBottom: '1px solid rgba(209,196,240,0.35)',
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap',
+          }}>
+            {/* Left: drilled-in role back header (All roles + label + count). Empty on the cards view. */}
+            {selectedCard !== null ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <button onClick={() => { setSelectedCard(null); setQuery(''); }}
+                  title="Back to all roles" aria-label="Back to all roles"
+                  style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 38, height: 38, border: '1px solid rgba(124,58,237,0.3)', background: '#fff', borderRadius: '50%', cursor: 'pointer', color: '#5B21B6', flexShrink: 0 }}>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+                </button>
+                <span style={{ fontFamily: 'Outfit, sans-serif', fontWeight: 800, color: '#3B0764', fontSize: '1rem' }}>{selectedCard.label}</span>
+                <span style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', color: 'rgba(91,33,182,0.55)' }}>{filteredUsers.length} {filteredUsers.length === 1 ? 'person' : 'people'}</span>
+              </div>
+            ) : <span />}
+            {!actionsSlotEl ? toolbar : <span />}
+          </div>
+        )}
         {loading ? (
-          <div style={{ padding: 40, textAlign: 'center', color: 'rgba(91,33,182,0.55)', fontFamily: 'Outfit,sans-serif', fontSize: '0.9rem' }}>Loading users…</div>
+          <div style={{ padding: 30 }}><Loading label="Loading users…" /></div>
         ) : users.length === 0 ? (
           <div style={{ padding: 60, textAlign: 'center', fontFamily: 'Outfit,sans-serif' }}>
             <div style={{ fontWeight: 700, color: '#3B0764', fontSize: '1rem', marginBottom: 6 }}>No users yet</div>
             <div style={{ color: 'rgba(91,33,182,0.55)', fontSize: '0.85rem' }}>Click "Create User" above to add your first team member.</div>
           </div>
+        ) : selectedCard === null ? (
+          /* ── Cards — Junior+Senior merged into "Callers"; click to drill in ── */
+          <div style={{ padding: 18, display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 14 }}>
+            {cards.map(c => {
+              const badge = c.badge || { bg: '#F3F4F6', fg: '#4B5563' };
+              const n = c.n;
+              return (
+                <button
+                  key={c.key}
+                  onClick={() => { setSelectedCard({ label: c.label, roles: c.roles }); setQuery(''); setRoleFilter(new Set()); }}
+                  style={{ width: '100%', textAlign: 'left', cursor: 'pointer', border: '1px solid rgba(209,196,240,0.55)', borderRadius: 18, padding: '16px 18px', background: '#fff', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'nowrap', transition: 'transform 120ms, box-shadow 120ms' }}
+                  onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = '0 8px 24px rgba(91,33,182,0.12)'; }}
+                  onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = 'none'; }}
+                >
+                  {/* Icon square */}
+                  <span style={{ flexShrink: 0, width: 60, height: 60, borderRadius: 16, background: badge.bg, color: badge.fg, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
+                    {roleIcon(c.key)}
+                  </span>
+                  {/* Title + description (shrinks; description truncates) */}
+                  <span style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0, flex: 1 }}>
+                    <span style={{ fontFamily: 'Outfit, sans-serif', fontWeight: 800, fontSize: '1.1rem', color: badge.fg, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.label}</span>
+                    <span style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.8rem', color: 'rgba(91,33,182,0.55)', lineHeight: 1.35, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{CARD_DESC[c.key] || ''}</span>
+                  </span>
+                  {/* Count badge + people — small, right-aligned, same row */}
+                  <span style={{ flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ flexShrink: 0, width: 38, height: 38, borderRadius: '50%', background: badge.bg, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'Outfit, sans-serif', fontWeight: 800, fontSize: '0.95rem', color: '#3B0764' }}>{n}</span>
+                    <span style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', color: 'rgba(91,33,182,0.55)' }}>{n === 1 ? 'person' : 'people'}</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
         ) : (
-          <div style={{ overflowX: 'auto' }}>
+          <>
+            <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'Outfit, sans-serif' }}>
               <thead>
                 <tr style={{ background: 'rgba(237,234,248,0.50)', textAlign: 'left' }}>
                   <th style={thStyle}>Name</th>
+                  <th style={thStyle}>Workspace</th>
                   <th style={thStyle}>Email</th>
                   <th style={thStyle}>Phone</th>
                   <th style={thStyle}>Role</th>
@@ -373,7 +495,7 @@ export default function UsersModule({
               <tbody>
                 {filteredUsers.length === 0 && (query || roleFilter.size > 0) && (
                   <tr>
-                    <td colSpan={10} style={{
+                    <td colSpan={11} style={{
                       padding: '32px 16px', textAlign: 'center',
                       fontFamily: 'Outfit, sans-serif', fontSize: '0.86rem',
                       color: 'rgba(91,33,182,0.55)',
@@ -399,6 +521,9 @@ export default function UsersModule({
                     <tr key={u.id} style={{ borderTop: '1px solid rgba(209,196,240,0.30)' }}>
                       <td style={tdStyle}>
                         <span style={{ fontWeight: 600, color: '#3B0764' }}>{u.full_name}</span>
+                      </td>
+                      <td style={tdStyle}>
+                        <WorkspaceCell user={u} />
                       </td>
                       <td style={tdStyle}>{u.email}</td>
                       <td style={tdStyle}>{u.phone || '—'}</td>
@@ -465,6 +590,7 @@ export default function UsersModule({
               </tbody>
             </table>
           </div>
+          </>
         )}
       </div>
 
@@ -683,6 +809,44 @@ function DeptCell({ dept }) {
   );
 }
 
+/* Workspace pill — which funnel a caller is pinned to (Meta / YT / Meta 2.0).
+   Callers with no tag show a muted "All" (they receive leads from every
+   workspace); non-callers aren't workspace-scoped, so they show an em-dash. */
+const WORKSPACE_BADGE = {
+  meta:  { label: 'Meta',     bg: '#DBEAFE', fg: '#1E40AF' },
+  yt:    { label: 'YT',       bg: '#FEE2E2', fg: '#B91C1C' },
+  meta2: { label: 'Meta 2.0', bg: '#E0E7FF', fg: '#3730A3' },
+  metatemp: { label: 'Meta Temp', bg: '#FEF3C7', fg: '#92400E' },
+};
+function WorkspaceCell({ user }) {
+  const ws = user.workspace;
+  if (ws && WORKSPACE_BADGE[ws]) {
+    const b = WORKSPACE_BADGE[ws];
+    return (
+      <span style={{
+        display: 'inline-block', padding: '3px 10px', borderRadius: 50,
+        fontSize: '0.7rem', fontWeight: 700, letterSpacing: 0.3,
+        background: b.bg, color: b.fg, whiteSpace: 'nowrap',
+      }}>
+        {b.label}
+      </span>
+    );
+  }
+  const isCaller = user.role === 'junior_caller' || user.role === 'senior_caller';
+  if (isCaller) {
+    return (
+      <span style={{
+        display: 'inline-block', padding: '3px 10px', borderRadius: 50,
+        fontSize: '0.7rem', fontWeight: 700, letterSpacing: 0.3,
+        background: '#F3F4F6', color: '#6B7280', whiteSpace: 'nowrap',
+      }}>
+        All
+      </span>
+    );
+  }
+  return <span style={{ fontSize: '0.78rem', color: 'rgba(91,33,182,0.40)' }}>—</span>;
+}
+
 /* Compact summary of a user's Smartflo settings for the users table */
 function SmartfloCell({ user }) {
   const isCaller = user.role === 'junior_caller' || user.role === 'senior_caller';
@@ -729,8 +893,11 @@ function UserFormModal({
   const [email, setEmail]       = useState(existing?.email || '');
   const [phone, setPhone]       = useState(existing?.phone || '');
   const [role, setRole]         = useState(existing?.role || 'junior_caller');
+  // Workspace tag — only meaningful for callers. '' = all workspaces (NULL).
+  const [workspace, setWorkspace]       = useState(existing?.workspace || '');
   const [department, setDepartment]     = useState(existing?.department || lockedDepartment || '');
   const [managerId, setManagerId]       = useState(existing?.manager_id || lockedManagerId || '');
+  const [assistantManagerId, setAssistantManagerId] = useState(existing?.assistant_manager_id || '');
   const [teamLeaderId, setTeamLeaderId] = useState(existing?.team_leader_id || lockedTeamLeaderId || '');
   const [tataExtension, setTataExtension]     = useState(existing?.tata_extension || '');
   const [tataAccountType, setTataAccountType] = useState(existing?.tata_account_type || '');
@@ -745,6 +912,20 @@ function UserFormModal({
   const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError]       = useState('');
   const [loading, setLoading]   = useState(false);
+
+  /* Per-role form configuration (Settings → Edit/Create User). Controls which
+     built-in fields show and which custom fields to render. Defaults to "all
+     built-ins on, no custom" so behavior is unchanged until configured. */
+  const [formConfig, setFormConfig] = useState({});
+  useEffect(() => {
+    fetch('/api/admin/user-form-config', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json()).then(d => setFormConfig(d.config || {})).catch(() => {});
+  }, [token]);
+  const roleCfg    = formConfig[role] || {};
+  const fieldOn    = (key) => roleCfg.builtins?.[key] !== false; // default ON
+  const customDefs = (roleCfg.custom || []).filter(c => c && c.enabled);
+  const [customValues, setCustomValues] = useState(existing?.custom_fields || {});
+  const setCustomValue = (key, val) => setCustomValues(prev => ({ ...prev, [key]: val }));
 
   /* Team leaders pickable for the selected department — only team_leader-role
      users in that department, excluding the user currently being edited. */
@@ -768,12 +949,24 @@ function UserFormModal({
     [allUsers, department, existing]
   );
 
+  /* Assistant managers pickable for the selected department. */
+  const assistantManagers = useMemo(
+    () => allUsers.filter(u =>
+      u.role === 'assistant_manager' &&
+      u.department === department &&
+      u.id !== existing?.id
+    ),
+    [allUsers, department, existing]
+  );
+
   /* Field visibility by role:
        Manager field     — shown for every role EXCEPT manager / admin
                            (they sit at the top — no manager above them).
        Team Leader field — shown ONLY for caller roles (jr/sr caller). */
   const showTeamLeader = role === 'junior_caller' || role === 'senior_caller';
   const showManager    = role !== 'manager' && role !== 'admin';
+  // Assistant Manager field — shown for every role EXCEPT manager / trainer / webinar.
+  const showAssistantManager = role !== 'manager' && role !== 'trainer' && role !== 'webinar';
 
   function handleDepartmentChange(d) {
     setDepartment(d);
@@ -788,6 +981,12 @@ function UserFormModal({
       u.id === managerId && u.role === 'manager' && u.department === d
     )) {
       setManagerId('');
+    }
+    // Drop an assistant-manager pick that no longer belongs to the new department.
+    if (assistantManagerId && !allUsers.some(u =>
+      u.id === assistantManagerId && u.role === 'assistant_manager' && u.department === d
+    )) {
+      setAssistantManagerId('');
     }
   }
 
@@ -812,7 +1011,13 @@ function UserFormModal({
         role,
         department:     department || null,
         manager_id:     showManager ? (managerId || null) : null,
+        assistant_manager_id: showAssistantManager ? (assistantManagerId || null) : null,
         team_leader_id: showTeamLeader ? (teamLeaderId || null) : null,
+        // Callers carry a workspace tag (null = all workspaces); non-callers
+        // are always all-workspace. Backend force-NULLs it for non-callers too.
+        workspace:      isCaller ? (workspace || null) : null,
+        // Custom fields (Settings → Edit/Create User) — only the enabled ones.
+        custom_fields:  customDefs.reduce((acc, c) => { acc[c.key] = customValues[c.key] ?? ''; return acc; }, {}),
       };
       // Smartflo settings only apply to callers; clear them on other roles.
       if (isCaller) {
@@ -929,6 +1134,7 @@ function UserFormModal({
             </div>
 
             {/* Phone */}
+            {fieldOn('phone') && (
             <div>
               <label style={fieldLabelStyle}>Phone <span style={{ color: 'rgba(91,33,182,0.40)', fontWeight: 500 }}>(optional)</span></label>
               <input
@@ -940,6 +1146,7 @@ function UserFormModal({
                 maxLength={30}
               />
             </div>
+            )}
 
             {/* Role — TL mode restricts to caller-level roles only.
                 A TL cannot create a peer/superior (no team_leader /
@@ -958,6 +1165,7 @@ function UserFormModal({
             </div>
 
             {/* Department */}
+            {fieldOn('department') && (
             <div>
               <label style={fieldLabelStyle}>Department</label>
               <BrandSelect
@@ -971,10 +1179,33 @@ function UserFormModal({
                 ]}
               />
             </div>
+            )}
+
+            {/* Workspace — pins a caller to ONE workspace (Meta / YT /
+                Meta 2.0); the caller then appears in and receives leads
+                only from that workspace. "All workspaces" (NULL) leaves
+                the caller unrestricted. Only callers can be tagged; for
+                non-callers the backend always stores NULL. */}
+            {showTeamLeader && fieldOn('workspace') && (
+              <div>
+                <label style={fieldLabelStyle}>Workspace</label>
+                <BrandSelect
+                  value={workspace}
+                  onChange={setWorkspace}
+                  options={[
+                    { value: '',      label: 'All workspaces' },
+                    { value: 'meta',  label: 'Meta' },
+                    { value: 'yt',    label: 'YT' },
+                    { value: 'meta2', label: 'Meta 2.0' },
+                    { value: 'metatemp', label: 'Meta Temp' },
+                  ]}
+                />
+              </div>
+            )}
 
             {/* Manager — manager-role users within the chosen department.
                 Hidden for manager / admin roles (top of the hierarchy). */}
-            {showManager && (
+            {showManager && fieldOn('manager_id') && (
               <div>
                 <label style={fieldLabelStyle}>Manager</label>
                 <BrandSelect
@@ -993,11 +1224,32 @@ function UserFormModal({
               </div>
             )}
 
+            {/* Assistant Manager — assistant_manager-role users within the chosen
+                department. Shown for every role except manager / trainer / webinar. */}
+            {showAssistantManager && fieldOn('assistant_manager_id') && (
+              <div>
+                <label style={fieldLabelStyle}>Assistant Manager</label>
+                <BrandSelect
+                  value={assistantManagerId}
+                  onChange={setAssistantManagerId}
+                  disabled={!department}
+                  options={[
+                    { value: '', label: !department
+                        ? 'Select a department first'
+                        : assistantManagers.length === 0
+                          ? 'No assistant managers in this department'
+                          : 'Select assistant manager…' },
+                    ...assistantManagers.map(m => ({ value: m.id, label: m.full_name })),
+                  ]}
+                />
+              </div>
+            )}
+
             {/* Team Leader — team_leader-role users within the chosen
                 department. Shown only for caller roles. In TL mode the
                 select is locked to the logged-in TL: callers created
                 from a TL's Users tab automatically join that TL's team. */}
-            {showTeamLeader && (
+            {showTeamLeader && fieldOn('team_leader_id') && (
               <div>
                 <label style={fieldLabelStyle}>Team Leader</label>
                 <BrandSelect
@@ -1017,8 +1269,10 @@ function UserFormModal({
             )}
 
             {/* Smartflo settings — only for caller roles. Spans both columns
-                with its own internal 2-column grid. */}
-            {(role === 'junior_caller' || role === 'senior_caller') && (
+                with its own internal 2-column grid. Each field is gated by the
+                per-role config; the whole block hides if all four are off. */}
+            {(role === 'junior_caller' || role === 'senior_caller') &&
+             (fieldOn('tata_account_type') || fieldOn('tata_extension') || fieldOn('tata_agent_number') || fieldOn('tata_caller_id')) && (
               <div className="uf-full" style={{
                 marginTop: 4,
                 padding: 16,
@@ -1030,20 +1284,17 @@ function UserFormModal({
                   Smartflo Settings <span style={{ fontWeight: 500, fontSize: '0.78rem', color: 'rgba(91,33,182,0.55)' }}>(Tata Tele)</span>
                 </div>
                 <div className="uf-grid">
+                  {fieldOn('tata_account_type') && (
                   <div>
                     <label style={fieldLabelStyle}>Account Type</label>
-                    {/* Known Tata Smartflo Account Types (top of file).
-                        Each value maps to TATA_TELE_API_KEY_<value> on
-                        the backend so the click-to-call resolver picks
-                        the right JWT for each sub-account. When you add
-                        a new Tata account, add a row to
-                        TATA_ACCOUNT_TYPES + set the matching env var. */}
                     <BrandSelect
                       value={TATA_ACCOUNT_TYPES.some(o => o.value === tataAccountType) ? tataAccountType : ''}
                       onChange={setTataAccountType}
                       options={TATA_ACCOUNT_TYPES}
                     />
                   </div>
+                  )}
+                  {fieldOn('tata_extension') && (
                   <div>
                     <label style={fieldLabelStyle}>Extension</label>
                     <input
@@ -1056,6 +1307,8 @@ function UserFormModal({
                       inputMode="numeric"
                     />
                   </div>
+                  )}
+                  {fieldOn('tata_agent_number') && (
                   <div>
                     <label style={fieldLabelStyle}># Agent Number</label>
                     <input
@@ -1068,6 +1321,8 @@ function UserFormModal({
                       inputMode="tel"
                     />
                   </div>
+                  )}
+                  {fieldOn('tata_caller_id') && (
                   <div>
                     <label style={fieldLabelStyle}>Caller ID</label>
                     <input
@@ -1080,12 +1335,27 @@ function UserFormModal({
                       inputMode="tel"
                     />
                   </div>
+                  )}
                 </div>
                 <p style={{ fontSize: '0.72rem', color: 'rgba(91,33,182,0.55)', margin: '10px 2px 0' }}>
                   Used by the Call button to route through Smartflo. Leave blank if you don't have these from Tata Tele yet.
                 </p>
               </div>
             )}
+
+            {/* Custom fields configured for this role (Settings → Edit/Create User) */}
+            {customDefs.map(cf => (
+              <div key={cf.key}>
+                <label style={fieldLabelStyle}>{cf.label}</label>
+                <input
+                  type={cf.type === 'number' ? 'number' : cf.type === 'email' ? 'email' : cf.type === 'phone' ? 'tel' : cf.type === 'date' ? 'date' : 'text'}
+                  value={customValues[cf.key] ?? ''}
+                  onChange={e => setCustomValue(cf.key, e.target.value)}
+                  placeholder={cf.label}
+                  style={inputStyle}
+                />
+              </div>
+            ))}
 
             {/* Password — Edit shows the current password (view-only) plus
                 New + Confirm; Create shows Password + Confirm. */}
@@ -1214,12 +1484,18 @@ function BrandSelect({ value, onChange, options = [], disabled = false }) {
   const [pos, setPos]   = useState({ top: 0, left: 0, width: 0, maxH: 280 });
   const wrapRef    = useRef(null);
   const triggerRef = useRef(null);
+  const panelRef   = useRef(null);
 
   useEffect(() => {
     function onDown(e) {
       if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
     }
-    function onScroll() { setOpen(false); }
+    // Close on page/modal scroll (the panel is position:fixed and won't follow),
+    // but NOT when the scroll happens inside the dropdown's own option list.
+    function onScroll(e) {
+      if (panelRef.current && panelRef.current.contains(e.target)) return;
+      setOpen(false);
+    }
     document.addEventListener('mousedown', onDown);
     document.addEventListener('scroll', onScroll, true);
     return () => {
@@ -1276,6 +1552,7 @@ function BrandSelect({ value, onChange, options = [], disabled = false }) {
 
       {open && createPortal(
         <div
+          ref={panelRef}
           onMouseDown={e => e.stopPropagation()}
           style={{
             position: 'fixed', top: pos.top, left: pos.left, width: pos.width,
