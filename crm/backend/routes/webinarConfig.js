@@ -4,7 +4,7 @@ const pool = require('../db');
 const cache = require('../utils/webinarConfigCache');
 const { addClient, removeClient, broadcast } = require('../utils/sseClients');
 
-const ALLOWED_SOURCES = new Set(['meta', 'yt', 'meta2', 'metatemp']);
+const ALLOWED_SOURCES = new Set(['meta', 'yt', 'meta2', 'metatemp', 'tagmango']);
 function normalizeSource(value) {
   return ALLOWED_SOURCES.has(value) ? value : 'meta';
 }

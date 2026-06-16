@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react';
 import AdminLogin           from './admin/AdminLogin';
-import SaveSuccess          from './components/SaveSuccess';
 import MarketingModule      from './modules/MarketingModule';
 import UsersModule          from './modules/UsersModule';
 import SalesDashboardModule from './modules/SalesDashboardModule';
 import ZoomModule           from './modules/ZoomModule';
+import SettingsPage          from './modules/SettingsPage';
 
 const MODULES = [
   {
@@ -54,6 +54,17 @@ const MODULES = [
     ),
     enabled: true,
   },
+  {
+    id: 'settings',
+    label: 'Settings',
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    ),
+    enabled: true,
+  },
 ];
 
 const MODULE_TITLES = {
@@ -61,6 +72,7 @@ const MODULE_TITLES = {
   users:     { title: 'Users',            subtitle: 'Manage staff and access' },
   sales:     { title: 'Web Reminder',     subtitle: 'Revenue and pipeline metrics' },
   zoom:      { title: 'Zoom',             subtitle: 'Webinar & meeting integration' },
+  settings:  { title: 'Settings',         subtitle: 'Configuration and preferences' },
 };
 
 function ComingSoonPanel({ label }) {
@@ -85,31 +97,10 @@ const WORKSPACES = [
   { id: 'yt',         label: 'YT'         },
   { id: 'meta2',      label: 'Meta 2.0'   },
   { id: 'metatemp',   label: 'Meta Temp'  },
+  { id: 'tagmango',   label: 'TagMango'   },
 ];
 
 export default function CrmShell() {
-  /* Global "save success" animation — wrap window.fetch while the admin shell
-     is mounted and fire `mhs:saved` on any successful admin mutation
-     (POST/PUT/PATCH to /api/admin/*). SaveSuccess (rendered below) plays the
-     tick animation. Restored on unmount, so the caller login is never affected. */
-  useEffect(() => {
-    const orig = window.fetch;
-    window.fetch = async (...args) => {
-      const res = await orig(...args);
-      try {
-        const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
-        const method = String(
-          (args[1] && args[1].method) || (typeof args[0] === 'object' && args[0] && args[0].method) || 'GET'
-        ).toUpperCase();
-        if (res && res.ok && /^(POST|PUT|PATCH)$/.test(method) && url.includes('/api/admin/')) {
-          window.dispatchEvent(new Event('mhs:saved'));
-        }
-      } catch { /* observation only — never break the request */ }
-      return res;
-    };
-    return () => { window.fetch = orig; };
-  }, []);
-
   const [token, setToken]           = useState(() => sessionStorage.getItem('mhs_admin_token') || '');
   const [activeModule, setActive]   = useState('marketing');
   const [sidebarOpen, setSidebarOpen] = useState(false); // mobile drawer
@@ -156,8 +147,6 @@ export default function CrmShell() {
 
   return (
     <div style={{ display: 'flex', minHeight: '100vh', background: '#EDEAF8', fontFamily: 'Outfit, sans-serif', padding: 16, gap: 16 }}>
-      {/* Global save-success tick animation (plays on any admin save). */}
-      <SaveSuccess />
       <style>{`
         @media (max-width: 900px) {
           .crm-shell-row { padding: 0 !important; gap: 0 !important; }
@@ -366,6 +355,7 @@ export default function CrmShell() {
           {activeModule === 'users' && <UsersModule token={token} workspace={null} />}
           {activeModule === 'sales' && <SalesDashboardModule token={token} />}
           {activeModule === 'zoom' && <ZoomModule token={token} source={workspace} />}
+          {activeModule === 'settings' && <SettingsPage token={token} source={workspace} />}
         </>
       </main>
     </div>

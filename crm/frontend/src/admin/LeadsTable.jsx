@@ -3,6 +3,7 @@ import DateTimePicker from './DateTimePicker';
 import SourceBadge from '../components/SourceBadge';
 import AddLeadsModal from './AddLeadsModal';
 import Loading from '../components/Loading';
+import { isMetaTempLike } from '../utils/workspaceFlags';
 
 const DURATION_LABELS = { new: '< 1 yr', mid: '1–5 yrs', long: '5+ yrs', pre: 'Pre-diabetic' };
 const SUGAR_LABELS    = { '150-250': '150–250', '250+': '250+' };
@@ -179,6 +180,27 @@ export default function LeadsTable({ token, source = 'meta' }) {
 
   const duplicateCount = duplicateIds.size;
 
+  /* Meta-Temp / TagMango: build the table columns from the actual Meta lead
+     fields (leads.field_data) so each lead form's questions become their own
+     columns — "columns created dynamically according to the leads generated".
+     Falls back to the static columns when no field_data is present yet (e.g.
+     only legacy CSV-imported leads exist). */
+  const prettyLabel = (k) => String(k).replace(/[_-]+/g, ' ').replace(/\?+$/, '').trim().replace(/\b\w/g, c => c.toUpperCase());
+  const fieldKeys = (() => {
+    if (!isMetaTempLike(source)) return [];
+    const keys = []; const seen = new Set();
+    for (const l of leads) {
+      const fd = l.field_data;
+      if (fd && typeof fd === 'object') {
+        for (const k of Object.keys(fd)) { if (!seen.has(k)) { seen.add(k); keys.push(k); } }
+      }
+    }
+    return keys;
+  })();
+  const dynamicMode = isMetaTempLike(source) && fieldKeys.length > 0;
+  const cellValue = (l, key) =>
+    (key && key.startsWith('fd:')) ? (l.field_data?.[key.slice(3)] ?? '') : (l[key] ?? '');
+
   const filtered = leads.filter(l => {
     // Webinar filter — match by webinar_id
     if (webinarFilter && String(l.webinar_id) !== String(webinarFilter)) return false;
@@ -205,8 +227,8 @@ export default function LeadsTable({ token, source = 'meta' }) {
   });
 
   const sorted = [...filtered].sort((a, b) => {
-    const va = a[sortKey] ?? '';
-    const vb = b[sortKey] ?? '';
+    const va = cellValue(a, sortKey);
+    const vb = cellValue(b, sortKey);
     return sortAsc ? (va > vb ? 1 : -1) : (va < vb ? 1 : -1);
   });
 
@@ -214,6 +236,21 @@ export default function LeadsTable({ token, source = 'meta' }) {
   const paginated = sorted.slice((page - 1) * perPage, page * perPage);
 
   function exportCSV() {
+    // Meta-Temp/TagMango dynamic mode: export exactly the dynamic columns shown.
+    if (dynamicMode) {
+      const headers = cols.map(c => c.label);
+      const rows = sorted.map(l => cols.map(c => {
+        if (c.key === 'created_at') return l.created_at ? new Date(l.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '';
+        if (c.key === 'wa_clicked') return l.wa_clicked ? 'Yes' : 'No';
+        return cellValue(l, c.key);
+      }));
+      const csv = [headers, ...rows].map(r => r.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = 'mhs_leads.csv'; a.click();
+      URL.revokeObjectURL(url);
+      return;
+    }
     // CSV headers + row mapper kept in lockstep with the on-screen `cols`
     // array above. Adding a new column here should always be paired with
     // both an entry in `cols` and a `<td>` in the body so admins can
@@ -332,21 +369,48 @@ export default function LeadsTable({ token, source = 'meta' }) {
   // conditional — 'meta' shows everything, 'yt' shows only the fields the
   // YT funnel actually captures.
   const isMeta = source === 'meta';
-  const cols = [
-    { key: 'full_name',         label: 'Name' },
-    { key: 'whatsapp_number',   label: 'Phone' },
-    { key: 'email',             label: 'Email' },
-    { key: 'sugar_level',       label: 'Sugar Level' },
-    { key: 'diabetes_duration', label: 'Duration' },
-    ...(isMeta ? [
-      { key: 'on_medication', label: 'Medication' },
-      { key: 'age_group',     label: 'Do you know Tamil?' },
-      { key: 'occupation',    label: 'Occupation' },
-    ] : []),
-    { key: 'utm_content',       label: 'Ad Source' },
-    { key: 'created_at',        label: 'Registered' },
-    { key: 'wa_clicked',        label: 'WhatsApp' },
-  ];
+  const cols = dynamicMode
+    ? [
+        ...fieldKeys.map(k => ({ key: `fd:${k}`, label: prettyLabel(k) })),
+        { key: 'created_at', label: 'Registered' },
+        { key: 'wa_clicked', label: 'WhatsApp' },
+      ]
+    : [
+        { key: 'full_name',         label: 'Name' },
+        { key: 'whatsapp_number',   label: 'Phone' },
+        { key: 'email',             label: 'Email' },
+        { key: 'sugar_level',       label: 'Sugar Level' },
+        { key: 'diabetes_duration', label: 'Duration' },
+        ...(isMeta ? [
+          { key: 'on_medication', label: 'Medication' },
+          { key: 'age_group',     label: 'Do you know Tamil?' },
+          { key: 'occupation',    label: 'Occupation' },
+        ] : []),
+        { key: 'utm_content',       label: 'Ad Source' },
+        { key: 'created_at',        label: 'Registered' },
+        { key: 'wa_clicked',        label: 'WhatsApp' },
+      ];
+
+  /* Generic cell renderer for the dynamic (Meta-Temp/TagMango) table. The
+     first field column also carries the source badge. */
+  const renderDynCell = (c, l, isFirst) => {
+    if (c.key === 'created_at') {
+      return <span className="text-gray-400">{l.created_at ? new Date(l.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—'}</span>;
+    }
+    if (c.key === 'wa_clicked') {
+      return l.wa_clicked
+        ? <span className="inline-flex items-center px-2 py-0.5 rounded-pill text-xs font-semibold bg-green-100 text-green-700">Clicked</span>
+        : <span className="inline-flex items-center px-2 py-0.5 rounded-pill text-xs font-medium bg-gray-100 text-gray-400">Not yet</span>;
+    }
+    const v = cellValue(l, c.key);
+    const shown = (v !== '' && v != null) ? String(v) : null;
+    return (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+        {shown !== null ? shown : <span className="text-gray-300">—</span>}
+        {isFirst && <SourceBadge source={l.source} />}
+      </span>
+    );
+  };
 
   if (loading) {
     return (
@@ -380,7 +444,7 @@ export default function LeadsTable({ token, source = 'meta' }) {
         <div className="leads-actions" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
 
           {/* Add Leads (bulk CSV/Excel upload) — Meta Temp only */}
-          {source === 'metatemp' && (
+          {isMetaTempLike(source) && (
             <button
               onClick={() => setAddOpen(true)}
               className="leads-action-btn"
@@ -670,6 +734,11 @@ export default function LeadsTable({ token, source = 'meta' }) {
                     />
                   </td>
                 )}
+                {dynamicMode ? cols.map((c, ci) => (
+                  <td key={c.key} className="px-3 py-3 whitespace-nowrap text-xs text-gray-700" style={{ maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis' }} title={typeof cellValue(l, c.key) === 'string' ? cellValue(l, c.key) : ''}>
+                    {renderDynCell(c, l, ci === 0)}
+                  </td>
+                )) : (<>
                 <td className="px-3 py-3 font-semibold text-gray-900 whitespace-nowrap">
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                     {l.full_name}
@@ -743,6 +812,7 @@ export default function LeadsTable({ token, source = 'meta' }) {
                       </span>
                   }
                 </td>
+                </>)}
               </tr>
             ))}
             {sorted.length === 0 && (

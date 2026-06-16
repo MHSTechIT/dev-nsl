@@ -139,6 +139,8 @@ export default function TimerConfig({ token }) {
   const [currentWebinarDate, setCurrentWebinarDate] = useState(''); // actual webinar date (current_webinar_date)
   const [nextWebinar, setNextWebinar] = useState('');               // upcoming registration deadline (backup_webinar_at)
   const [nextWebinarDate, setNextWebinarDate] = useState('');       // upcoming actual webinar date (next_webinar_date)
+  const [currentName, setCurrentName] = useState('');               // custom display name for the active webinar
+  const [nextName, setNextName] = useState('');                     // custom display name for the upcoming webinar
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState(null);
 
@@ -164,7 +166,15 @@ export default function TimerConfig({ token }) {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();
-      setWebinars(data.webinars || []);
+      const ws = data.webinars || [];
+      setWebinars(ws);
+      // Seed the editable name fields from the active / upcoming webinar rows.
+      const active = ws.find(w => w.is_active);
+      const upcoming = ws
+        .filter(w => !w.is_active && w.webinar_at && new Date(w.webinar_at) > new Date())
+        .sort((a, b) => new Date(a.webinar_at) - new Date(b.webinar_at))[0];
+      setCurrentName(active?.name || '');
+      setNextName(upcoming?.name || '');
     } catch (_) {
       setWebinars([]);
     } finally {
@@ -190,6 +200,8 @@ export default function TimerConfig({ token }) {
     if (currentWebinarDate) body.current_webinar_date = fromLocalDatetimeValue(currentWebinarDate);
     if (nextWebinar)        body.backup_webinar_at    = fromLocalDatetimeValue(nextWebinar);
     if (nextWebinarDate)    body.next_webinar_date    = fromLocalDatetimeValue(nextWebinarDate);
+    body.current_webinar_name = currentName.trim();
+    body.next_webinar_name    = nextName.trim();
 
     const res = await fetch('/api/admin/webinar-config', {
       method: 'PUT',
@@ -253,6 +265,23 @@ export default function TimerConfig({ token }) {
                   )}
                 </label>
               </div>
+
+              {/* Custom display name */}
+              <label className="block font-sans text-xs text-purple-400 mb-1" style={{ fontWeight: 600 }}>Display name</label>
+              <input
+                type="text"
+                value={currentName}
+                onChange={e => setCurrentName(e.target.value)}
+                placeholder="e.g. AWS - 101"
+                maxLength={80}
+                style={{
+                  width: '100%', marginBottom: 14, padding: '8px 10px',
+                  borderRadius: 8, border: '1px solid rgba(147,51,234,0.20)',
+                  fontFamily: 'Outfit, sans-serif', fontSize: '0.85rem',
+                  color: '#3B0764', outline: 'none', boxSizing: 'border-box',
+                }}
+              />
+
               <p className="font-sans text-xs text-purple-400 mb-3">Registration countdown ends in</p>
               <DateTimePicker value={currentWebinar} onChange={setCurrentWebinar} />
               {currentWebinar && (
@@ -298,6 +327,23 @@ export default function TimerConfig({ token }) {
                   </span>
                 )}
               </label>
+
+              {/* Custom display name */}
+              <label className="block font-sans text-xs text-purple-400 mb-1" style={{ fontWeight: 600 }}>Display name</label>
+              <input
+                type="text"
+                value={nextName}
+                onChange={e => setNextName(e.target.value)}
+                placeholder="e.g. AWS - 102"
+                maxLength={80}
+                style={{
+                  width: '100%', marginBottom: 14, padding: '8px 10px',
+                  borderRadius: 8, border: '1px solid rgba(147,51,234,0.20)',
+                  fontFamily: 'Outfit, sans-serif', fontSize: '0.85rem',
+                  color: '#3B0764', outline: 'none', boxSizing: 'border-box',
+                }}
+              />
+
               <p className="font-sans text-xs text-purple-400 mb-3">Auto-switches when current webinar ends</p>
               <DateTimePicker value={nextWebinar} onChange={setNextWebinar} />
               {nextWebinar && (

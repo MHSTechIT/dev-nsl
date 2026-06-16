@@ -69,6 +69,8 @@ const configValidators = [
   body('whatsapp_link_swap_at').optional({ nullable: true }).isISO8601(),
   body('pending_whatsapp_link_2').optional().isString(),
   body('whatsapp_link_swap_at_2').optional({ nullable: true }).isISO8601(),
+  body('current_webinar_name').optional({ nullable: true }).isString().isLength({ max: 80 }),
+  body('next_webinar_name').optional({ nullable: true }).isString().isLength({ max: 80 }),
 ];
 
 router.put('/webinar-config', configValidators, async (req, res) => {
@@ -85,7 +87,14 @@ router.put('/webinar-config', configValidators, async (req, res) => {
     if (req.body[key] !== undefined) updates[key] = req.body[key];
   }
 
-  if (Object.keys(updates).length === 0) {
+  // Custom webinar names live on the webinars table (not webinar_config), so
+  // they're applied separately from the `allowed` config fields below. They can
+  // be saved on their own, without any date/link change.
+  const currentWebinarName = req.body.current_webinar_name;
+  const nextWebinarName    = req.body.next_webinar_name;
+  const hasNameUpdate = currentWebinarName !== undefined || nextWebinarName !== undefined;
+
+  if (Object.keys(updates).length === 0 && !hasNameUpdate) {
     return res.status(400).json({ error: 'No fields to update' });
   }
 
@@ -224,6 +233,41 @@ router.put('/webinar-config', configValidators, async (req, res) => {
         webinarWarning = (webinarWarning ? webinarWarning + '; ' : '') +
           `upcoming webinar: ${webinarErr.message}${webinarErr.code ? ` [${webinarErr.code}]` : ''}`;
         console.error(`[admin] ${source} upcoming webinar update error:`, webinarErr.message, webinarErr.code, webinarErr.detail);
+      }
+    }
+
+    // ── Apply custom display names (independent of date changes) ──
+    // Runs AFTER the webinars date-sync above so any just-created row exists.
+    // An empty string clears the name → card falls back to the date label.
+    if (currentWebinarName !== undefined) {
+      try {
+        await pool.query(
+          'UPDATE webinars SET name = $1 WHERE is_active = TRUE AND source = $2',
+          [currentWebinarName.trim() || null, source]
+        );
+      } catch (nameErr) {
+        webinarWarning = (webinarWarning ? webinarWarning + '; ' : '') + `current name: ${nameErr.message}`;
+        console.error(`[admin] ${source} current webinar name error:`, nameErr.message);
+      }
+    }
+    if (nextWebinarName !== undefined) {
+      try {
+        // Target the same upcoming row the backup_webinar_at date-sync touches.
+        await pool.query(
+          `UPDATE webinars SET name = $1
+           WHERE id = (
+             SELECT w.id FROM webinars w
+             LEFT JOIN leads l ON l.webinar_id = w.id
+             WHERE w.is_active = FALSE AND w.source = $2
+             GROUP BY w.id
+             HAVING COUNT(l.id) = 0
+             ORDER BY w.created_at DESC LIMIT 1
+           )`,
+          [nextWebinarName.trim() || null, source]
+        );
+      } catch (nameErr) {
+        webinarWarning = (webinarWarning ? webinarWarning + '; ' : '') + `next name: ${nameErr.message}`;
+        console.error(`[admin] ${source} next webinar name error:`, nameErr.message);
       }
     }
 

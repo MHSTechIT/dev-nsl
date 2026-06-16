@@ -1,8 +1,10 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { funnelMetrics, num } from './callerReportCategories';
 import Loading from '../components/Loading';
+import DateTimePicker from '../admin/DateTimePicker';
 import CallerLeadsMoveDrawer from '../admin/CallerLeadsMoveDrawer';
 import CallerActivityDrawer from '../admin/CallerActivityDrawer';
+import CallLogDrawer from '../admin/CallLogDrawer';
 
 /* ── "Caller 360" combined report ────────────────────────────────────────────
    One row per caller merging telephony activity (the Intern Hourly Report) with
@@ -127,7 +129,6 @@ const GROUPS = [
   ]},
   { id: 'dnp', label: 'DNP', color: '#7C3AED', collapsible: true, cols: [
     { id: 'dnp',      label: 'DNP',               get: (r) => num(r.o_not_picked) },
-    { id: 'misstalk', label: 'Miss Talk (h.m.s)', get: (r) => secToHms(r.missed_dur_sec) },
   ]},
   { id: 'outcome', label: 'OUTCOME', color: '#5B21B6', cols: [
     { id: 'nextbatch', label: 'Next Batch',   get: (r) => num(r.next_batch) },
@@ -140,11 +141,6 @@ const GROUPS = [
 
 /* Per-caller ⋮ menu actions. Handlers are wired in the component (stubs for now). */
 const MENU_ITEMS = [
-  { id: 'move', label: 'Move leads', icon: (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/>
-      <line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/>
-    </svg>) },
   { id: 'calllog', label: 'View call log', icon: (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
@@ -164,6 +160,8 @@ export default function SalesNewPageView({ token, source = 'all' }) {
   const [preset, setPreset]       = useState('today');     // 'today' | 'custom'
   const [customFrom, setCustomFrom] = useState(todayIstYmd());
   const [customTo, setCustomTo]     = useState(todayIstYmd());
+  const [fromTime, setFromTime]     = useState('00:00');   // time-of-day filter (custom range)
+  const [toTime, setToTime]         = useState('23:59');
   const [webinars, setWebinars]   = useState([]);
   const [webinarId, setWebinarId] = useState('');
   const [wbOpen, setWbOpen]       = useState(false);
@@ -223,6 +221,7 @@ export default function SalesNewPageView({ token, source = 'all' }) {
   const [selectedId, setSelectedId] = useState(null);      // clicked → highlighted caller row
   const [menu, setMenu]           = useState(null);        // per-caller ⋮ menu { callerId, name, x, y }
   const [callerPageRow, setCallerPageRow] = useState(null); // "Caller page" drawer target
+  const [callLogRow, setCallLogRow]       = useState(null); // "View call log" drawer target
   const [activityRow, setActivityRow]     = useState(null); // status-pill → activity timeline drawer
   const [isFs, setIsFs]           = useState(false);       // laptop full-screen view
   const rootRef                   = useRef(null);
@@ -302,6 +301,11 @@ export default function SalesNewPageView({ token, source = 'all' }) {
     try {
       const qs = new URLSearchParams({ from: range.from, to: range.to, source });
       if (webinarId) qs.set('webinar_id', webinarId);
+      // Time-of-day filter — only in Custom mode (Today/All stay full-day).
+      if (preset === 'custom' && (fromTime !== '00:00' || toTime !== '23:59')) {
+        qs.set('from_time', fromTime);
+        qs.set('to_time', toTime);
+      }
       const res = await fetch(`/api/admin/caller-report?${qs.toString()}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -314,7 +318,7 @@ export default function SalesNewPageView({ token, source = 'all' }) {
     } finally {
       setLoading(false);
     }
-  }, [token, range.from, range.to, webinarId, source]);
+  }, [token, range.from, range.to, webinarId, source, preset, fromTime, toTime]);
 
   useEffect(() => { fetchReport(); }, [fetchReport]);
   useEffect(() => {
@@ -463,9 +467,23 @@ export default function SalesNewPageView({ token, source = 'all' }) {
           </div>
           {preset === 'custom' && (
             <>
-              <input type="date" value={customFrom} max={customTo} onChange={(e) => setCustomFrom(e.target.value)} style={dateInput} />
+              <div style={{ width: 250 }}>
+                <DateTimePicker
+                  allowPast
+                  placeholder="From date & time"
+                  value={`${customFrom}T${fromTime}:00`}
+                  onChange={(local) => { const [d, t] = local.split('T'); setCustomFrom(d); setFromTime((t || '00:00').slice(0, 5)); }}
+                />
+              </div>
               <span style={{ color: 'rgba(91,33,182,0.5)' }}>→</span>
-              <input type="date" value={customTo} min={customFrom} onChange={(e) => setCustomTo(e.target.value)} style={dateInput} />
+              <div style={{ width: 250 }}>
+                <DateTimePicker
+                  allowPast
+                  placeholder="To date & time"
+                  value={`${customTo}T${toTime}:00`}
+                  onChange={(local) => { const [d, t] = local.split('T'); setCustomTo(d); setToTime((t || '23:59').slice(0, 5)); }}
+                />
+              </div>
             </>
           )}
         </div>
@@ -775,7 +793,7 @@ export default function SalesNewPageView({ token, source = 'all' }) {
         {error ? (
           <div style={{ padding: 24, color: '#B91C1C', fontFamily: 'Outfit, sans-serif' }}>{error}</div>
         ) : (
-          <div ref={scrollRef} style={{ overflow: 'auto', height: scrollH ? `${scrollH}px` : (isFs ? 'calc(100vh - 150px)' : '72vh') }}>
+          <div ref={scrollRef} style={{ overflow: 'auto', maxHeight: scrollH ? `${scrollH}px` : (isFs ? 'calc(100vh - 150px)' : '72vh') }}>
             <table style={{ borderCollapse: 'separate', borderSpacing: 0, width: '100%', minWidth: 760 }}>
               <thead>
                 {/* group header row */}
@@ -844,7 +862,7 @@ export default function SalesNewPageView({ token, source = 'all' }) {
                       <td style={{ ...tdBase, width: WORKSPACE_W, minWidth: WORKSPACE_W, textAlign: 'left' }}>
                         {(() => {
                           const ws = workspaceById[r.caller_id];
-                          const label = !ws ? 'All' : ({ meta: 'Meta', yt: 'YT', meta2: 'Meta 2.0', metatemp: 'Meta Temp' }[ws] || ws);
+                          const label = !ws ? 'All' : ({ meta: 'Meta', yt: 'YT', meta2: 'Meta 2.0', metatemp: 'Meta Temp', tagmango: 'TagMango' }[ws] || ws);
                           return (
                             <span style={{ display: 'inline-block', padding: '2px 9px', borderRadius: 50, fontSize: '0.7rem', fontWeight: 700, background: 'rgba(124,58,237,0.10)', color: '#5B21B6', whiteSpace: 'nowrap' }}>{label}</span>
                           );
@@ -896,7 +914,8 @@ export default function SalesNewPageView({ token, source = 'all' }) {
                   const cid = menu.callerId, cname = menu.name;
                   setMenu(null);
                   if (it.id === 'callerpage') setCallerPageRow({ caller_id: cid, name: cname });
-                  // TODO: wire 'move' / 'calllog' / 'pause' actions
+                  if (it.id === 'calllog')    setCallLogRow({ caller_id: cid, name: cname });
+                  // TODO: wire 'pause' action
                 }}
                 style={{ display: 'flex', alignItems: 'center', gap: 11, width: '100%', textAlign: 'left', border: 'none', background: 'transparent', cursor: 'pointer', borderRadius: 8, padding: '9px 12px', fontFamily: 'Outfit, sans-serif', fontWeight: 600, fontSize: '0.86rem', color: it.danger ? '#DC2626' : INK }}
                 onMouseEnter={(e) => { e.currentTarget.style.background = it.danger ? 'rgba(220,38,38,0.08)' : 'rgba(124,58,237,0.08)'; }}
@@ -921,6 +940,15 @@ export default function SalesNewPageView({ token, source = 'all' }) {
         />
       )}
 
+      {/* ── "View call log" drawer — caller's call history + recordings ────── */}
+      {callLogRow && (
+        <CallLogDrawer
+          token={token}
+          caller={callLogRow}
+          onClose={() => setCallLogRow(null)}
+        />
+      )}
+
       {/* Status pill → full activity timeline for that caller (same drawer as the
           Performance page). */}
       {activityRow && (
@@ -938,6 +966,7 @@ export default function SalesNewPageView({ token, source = 'all' }) {
 
 /* ── style atoms ─────────────────────────────────────────────────────────── */
 const dateInput  = { border: '1px solid rgba(124,58,237,0.25)', borderRadius: 9, padding: '6px 10px', fontFamily: 'Outfit, sans-serif', fontSize: '0.8rem', color: INK };
+const timeInput  = { height: '2.1rem', border: '1px solid rgba(124,58,237,0.25)', borderRadius: 9, padding: '0 8px', fontFamily: 'Outfit, sans-serif', fontSize: '0.8rem', color: INK, background: '#fff', outline: 'none' };
 const dropdownBtn = { border: '1px solid rgba(124,58,237,0.25)', borderRadius: 9, padding: '7px 12px', background: '#fff', cursor: 'pointer', fontFamily: 'Outfit, sans-serif', fontSize: '0.8rem', color: INK, whiteSpace: 'nowrap' };
 const dropdownPanel = { position: 'absolute', top: '110%', left: 0, zIndex: 20, background: '#fff', border: '1px solid rgba(124,58,237,0.2)', borderRadius: 10, boxShadow: '0 8px 24px rgba(91,33,182,0.18)', minWidth: 200, maxHeight: 300, overflowY: 'auto', padding: 4 };
 const dropdownItem = (active) => ({ display: 'block', width: '100%', textAlign: 'left', border: 'none', cursor: 'pointer', borderRadius: 7, padding: '7px 10px', fontFamily: 'Outfit, sans-serif', fontSize: '0.8rem', background: active ? 'rgba(124,58,237,0.1)' : 'transparent', color: INK });

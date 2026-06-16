@@ -43,6 +43,7 @@ function timeAgo(iso) {
 
 export default function SalesNotificationsView({ token, source = 'all' }) {
   const [callers, setCallers]       = useState([]);
+  const [emptyQueue, setEmptyQueue] = useState([]);   // active callers with an empty Assigned page
   const [loading, setLoading]       = useState(true);
   const [error, setError]           = useState('');
   const [updatedAt, setUpdatedAt]   = useState(null);
@@ -51,12 +52,15 @@ export default function SalesNotificationsView({ token, source = 'all' }) {
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch(`/api/admin/auto-paused-callers?source=${encodeURIComponent(source)}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) throw new Error('Failed to load notifications.');
-      const data = await res.json();
+      const auth = { Authorization: `Bearer ${token}` };
+      const [pausedRes, emptyRes] = await Promise.all([
+        fetch(`/api/admin/auto-paused-callers?source=${encodeURIComponent(source)}`, { headers: auth }),
+        fetch(`/api/admin/empty-queue-callers?source=${encodeURIComponent(source)}`,  { headers: auth }),
+      ]);
+      if (!pausedRes.ok) throw new Error('Failed to load notifications.');
+      const data = await pausedRes.json();
       setCallers(data.callers || []);
+      if (emptyRes.ok) { const ed = await emptyRes.json(); setEmptyQueue(ed.callers || []); }
       setError('');
       setUpdatedAt(new Date());
     } catch (e) {
@@ -216,6 +220,44 @@ export default function SalesNotificationsView({ token, source = 'all' }) {
                 </svg>
                 {resumingId === c.id ? 'Resuming…' : 'Resume'}
               </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── Empty assigned queue alerts ── */}
+      {emptyQueue.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 6 }}>
+            <h3 style={{ margin: 0, fontFamily: 'Outfit, sans-serif', fontWeight: 700, fontSize: '1rem', color: '#3B0764' }}>
+              Empty assigned queue
+            </h3>
+            <span style={{ background: '#DC2626', color: '#fff', borderRadius: 50, padding: '2px 9px', fontSize: '0.72rem', fontWeight: 800, fontFamily: 'Outfit, sans-serif' }}>
+              {emptyQueue.length}
+            </span>
+          </div>
+          {emptyQueue.map(c => (
+            <div
+              key={c.id}
+              className="bg-white rounded-card shadow-card"
+              style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', padding: '15px 18px', borderLeft: '4px solid #DC2626' }}
+            >
+              <div style={{ width: 44, height: 44, borderRadius: 12, background: 'rgba(220,38,38,0.10)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#DC2626" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>
+                </svg>
+              </div>
+              <div style={{ flex: 1, minWidth: 180 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontFamily: 'Outfit, sans-serif', fontWeight: 700, color: '#3B0764', fontSize: '0.95rem' }}>{c.full_name}</span>
+                  <span style={{ display: 'inline-block', padding: '3px 10px', borderRadius: 50, fontSize: '0.68rem', fontWeight: 700, background: '#EDE9FE', color: '#5B21B6', fontFamily: 'Outfit, sans-serif' }}>
+                    {ROLE_LABEL[c.role] || c.role}
+                  </span>
+                </div>
+                <div style={{ marginTop: 5, fontFamily: 'Outfit, sans-serif', fontSize: '0.82rem', color: 'rgba(59,7,100,0.78)' }}>
+                  Assigned queue is empty — pull leads from another bucket to refill.
+                </div>
+              </div>
             </div>
           ))}
         </div>

@@ -26,7 +26,7 @@ function toLocalDatetime(iso) {
   } catch { return ''; }
 }
 
-export default function EditCallNoteModal({ jwt, lead, onClose, onSaved }) {
+export default function EditCallNoteModal({ jwt, lead, onClose, onSaved, previewMode = false }) {
   const initialOutcome  = lead.last_note_outcome === 'follow_up' ? 'follow_up'
                         : lead.last_note_outcome === 'not_interested' ? 'not_interested'
                         : 'completed';
@@ -55,10 +55,11 @@ export default function EditCallNoteModal({ jwt, lead, onClose, onSaved }) {
 
   /* Report the EDITING_COMPLETED activity sub-tag while this modal is open. */
   useEffect(() => {
-    if (!jwt) return undefined;
+    // Admin preview impersonation: never log activity as the caller.
+    if (!jwt || previewMode) return undefined;
     setActivitySub(jwt, 'EDITING_COMPLETED', { lead_name: lead?.full_name || '', lead_id: lead?.id || null });
     return () => { setActivitySub(jwt, null, null); };
-  }, [jwt, lead?.id, lead?.full_name]);
+  }, [jwt, lead?.id, lead?.full_name, previewMode]);
 
   async function handleSubmit() {
     setError('');
@@ -132,6 +133,17 @@ export default function EditCallNoteModal({ jwt, lead, onClose, onSaved }) {
             <input type="text" value={lead.whatsapp_number ? '+91 ' + lead.whatsapp_number : '—'} readOnly
               style={{ ...inputStyle, background: 'rgba(237,234,248,0.50)', cursor: 'default' }} />
           </Field>
+
+          {lead.last_call_recording_url && lead.last_call_id && (
+            <Field label="Call Recording" wide>
+              <audio
+                controls
+                preload="none"
+                style={{ width: '100%', height: 40 }}
+                src={`/api/caller/recordings/${lead.last_call_id}?token=${encodeURIComponent(jwt)}`}
+              />
+            </Field>
+          )}
 
           <Field label="3. Confirm Range">
             <Pills options={RANGES} value={confirmedRange} onChange={setConfirmedRange} />

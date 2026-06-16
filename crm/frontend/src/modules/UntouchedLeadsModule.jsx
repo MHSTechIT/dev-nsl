@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import LeadCallNoteModal from './LeadCallNoteModal';
+import CallerLeadsTable from '../components/CallerLeadsTable';
 import SourceBadge from '../components/SourceBadge';
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -123,62 +124,10 @@ export default function UntouchedLeadsModule({ jwt, onCount, previewMode = false
             </div>
           </div>
         ) : (
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'Outfit, sans-serif' }}>
-              <thead>
-                <tr style={{ background: 'rgba(237,234,248,0.50)', textAlign: 'left' }}>
-                  <Th>Name</Th>
-                  <Th>Phone</Th>
-                  <Th>Sugar</Th>
-                  <Th>Webinar</Th>
-                  <Th>Registered</Th>
-                  <Th>{''}</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {leads.map(l => {
-                  const sugar = SUGAR_BADGE[l.sugar_level] || { bg: '#F3F4F6', fg: '#4B5563' };
-                  return (
-                    <tr key={l.id} style={{ borderTop: '1px solid rgba(209,196,240,0.30)' }}>
-                      <Td>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                          <span style={{ fontWeight: 600, color: '#3B0764' }}>{l.full_name || '—'}</span>
-                          <SourceBadge source={l.source} />
-                        </div>
-                        <div style={{ fontSize: '0.72rem', color: 'rgba(91,33,182,0.55)' }}>{l.email || '—'}</div>
-                      </Td>
-                      <Td mono>{fmtPhone(l.whatsapp_number)}</Td>
-                      <Td>
-                        <span style={{ display: 'inline-block', padding: '2px 10px', borderRadius: 50, fontSize: '0.72rem', fontWeight: 700, background: sugar.bg, color: sugar.fg }}>
-                          {l.sugar_level || '—'}
-                        </span>
-                      </Td>
-                      <Td bold>{l.webinar_name || '—'}</Td>
-                      <Td muted>{fmtDate(l.created_at)}</Td>
-                      <Td>
-                        <button
-                          onClick={() => handleCall(l)}
-                          style={{
-                            display: 'inline-flex', alignItems: 'center', gap: 6,
-                            height: '2rem', padding: '0 14px', borderRadius: 50, border: 'none',
-                            background: 'linear-gradient(135deg, #5B21B6, #7C3AED)', color: '#fff',
-                            fontFamily: 'Outfit, sans-serif', fontWeight: 700, fontSize: '0.78rem',
-                            cursor: 'pointer', whiteSpace: 'nowrap',
-                            boxShadow: '0 2px 8px rgba(91,33,182,0.30)',
-                          }}
-                        >
-                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
-                          </svg>
-                          Call
-                        </button>
-                      </Td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          <CallerLeadsTable
+            leads={leads}
+            onRowClick={previewMode ? undefined : (l) => setEditLead({ ...l, last_call_id: null })}
+          />
         )}
       </div>
 

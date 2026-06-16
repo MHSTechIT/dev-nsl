@@ -58,8 +58,12 @@ export function funnelMetrics(row) {
   const notPicking  = num(row.missed);
   const interested  = num(row.interested);
   const actualLeads = num(row.actual_leads);
-  const connPct     = assigned > 0 ? Math.round((connected / assigned) * 1000) / 10 : null;
-  return { assigned, connected, notPicking, interested, actualLeads, connPct };
+  // L→C % = connected (answered) ÷ leads actually assigned to the caller (their
+  // current book). Falls back to windowed assignment events only if the snapshot
+  // count isn't present (older API response).
+  const assignedLeads = num(row.current_assigned) || assigned;
+  const connPct     = assignedLeads > 0 ? Math.round((connected / assignedLeads) * 1000) / 10 : null;
+  return { assigned, assignedLeads, connected, notPicking, interested, actualLeads, connPct };
 }
 
 export { num };

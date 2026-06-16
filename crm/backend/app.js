@@ -23,7 +23,8 @@ const _migrationResult = pool.query(`
     ADD COLUMN IF NOT EXISTS pending_whatsapp_link_2 TEXT DEFAULT '',
     ADD COLUMN IF NOT EXISTS whatsapp_link_swap_at_2 TIMESTAMPTZ DEFAULT NULL,
     ADD COLUMN IF NOT EXISTS current_webinar_date TIMESTAMPTZ DEFAULT NULL,
-    ADD COLUMN IF NOT EXISTS next_webinar_date    TIMESTAMPTZ DEFAULT NULL
+    ADD COLUMN IF NOT EXISTS next_webinar_date    TIMESTAMPTZ DEFAULT NULL,
+    ADD COLUMN IF NOT EXISTS whapi_channel_id     TEXT DEFAULT NULL
 `);
 if (_migrationResult && typeof _migrationResult.catch === 'function') {
   _migrationResult.catch(err => console.error('[Migration] slot-2 columns error:', err.message));
@@ -33,6 +34,14 @@ if (_migrationResult && typeof _migrationResult.catch === 'function') {
 const _asstMgrMigration = pool.query(
   `ALTER TABLE crm_users ADD COLUMN IF NOT EXISTS assistant_manager_id UUID`
 );
+
+// Auto-migrate: user profile photo (stored as a small base64 data URL).
+const _avatarMigration = pool.query(
+  `ALTER TABLE crm_users ADD COLUMN IF NOT EXISTS avatar_url TEXT`
+);
+if (_avatarMigration && typeof _avatarMigration.catch === 'function') {
+  _avatarMigration.catch(err => console.error('[Migration] avatar_url error:', err.message));
+}
 if (_asstMgrMigration && typeof _asstMgrMigration.catch === 'function') {
   _asstMgrMigration.catch(err => console.error('[Migration] assistant_manager_id error:', err.message));
 }
@@ -160,6 +169,42 @@ const _timerSettingsMigration = pool.query(`
 `);
 if (_timerSettingsMigration && typeof _timerSettingsMigration.catch === 'function') {
   _timerSettingsMigration.catch(err => console.error('[Migration] timer_settings error:', err.message));
+}
+
+// Auto-migrate: create workspace_flags table (Settings → Workspace on/off map)
+const _workspaceFlagsMigration = pool.query(`
+  CREATE TABLE IF NOT EXISTS workspace_flags (
+    id          SMALLINT PRIMARY KEY DEFAULT 1,
+    flags       JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+  INSERT INTO workspace_flags (id, flags) VALUES (1, '{}'::jsonb) ON CONFLICT (id) DO NOTHING;
+`);
+if (_workspaceFlagsMigration && typeof _workspaceFlagsMigration.catch === 'function') {
+  _workspaceFlagsMigration.catch(err => console.error('[Migration] workspace_flags error:', err.message));
+}
+
+// Auto-migrate: Meta lead-gen import columns on leads.
+//   field_data   — the lead's variable form answers, verbatim, as a JSON map
+//                  ({ field_name: "joined, values" }) → powers dynamic columns.
+//   meta_lead_id — Meta's leadgen id; unique (when present) for dedup on re-fetch.
+//   meta_form_id — which Meta lead form the lead came from.
+const _metaLeadColumnsMigration = pool.query(`
+  ALTER TABLE leads ADD COLUMN IF NOT EXISTS field_data   JSONB;
+  ALTER TABLE leads ADD COLUMN IF NOT EXISTS meta_lead_id TEXT;
+  ALTER TABLE leads ADD COLUMN IF NOT EXISTS meta_form_id TEXT;
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_meta_lead_id
+    ON leads (meta_lead_id) WHERE meta_lead_id IS NOT NULL;
+  -- Funnel-only fields (collected by the registration funnel, not by Meta lead
+  -- forms). Relax NOT NULL so Meta-imported leads can omit them — the existing
+  -- CHECK constraints still allow NULL, and the funnel keeps providing values.
+  ALTER TABLE leads ALTER COLUMN email             DROP NOT NULL;
+  ALTER TABLE leads ALTER COLUMN sugar_level       DROP NOT NULL;
+  ALTER TABLE leads ALTER COLUMN diabetes_duration DROP NOT NULL;
+  ALTER TABLE leads ALTER COLUMN language_pref     DROP NOT NULL;
+`);
+if (_metaLeadColumnsMigration && typeof _metaLeadColumnsMigration.catch === 'function') {
+  _metaLeadColumnsMigration.catch(err => console.error('[Migration] meta lead columns error:', err.message));
 }
 
 // Auto-migrate: lead-share-config + round-robin state + leads.assigned_user_id + audit log
@@ -727,6 +772,23 @@ const _sourceMigration = Promise.all([_webinarTableMigration, _clickMigration]).
     SELECT NOW() + INTERVAL '4 days', TRUE, 'M2-101', 'meta2'
     WHERE NOT EXISTS (SELECT 1 FROM webinars WHERE source = 'meta2')
   `)
+).then(() =>
+  // Seed TagMango config row (id=6) — a Meta Temp-style workspace. Blank
+  // defaults; admin sets values via CRM → TagMango. The config PUT is a plain
+  // UPDATE WHERE source, so this row must exist for admin saves to take effect.
+  pool.query(`
+    INSERT INTO webinar_config (id, source, kill_switch, tuesday_whatsapp_link, friday_whatsapp_link)
+    VALUES (6, 'tagmango', false, '', '')
+    ON CONFLICT (source) DO NOTHING
+  `)
+).then(() =>
+  // Baseline active webinar for 'tagmango' so leads get a webinar_id and the
+  // admin's first timer save can UPDATE. 'TM-101' avoids name-space collisions.
+  pool.query(`
+    INSERT INTO webinars (date_time, is_active, name, source)
+    SELECT NOW() + INTERVAL '4 days', TRUE, 'TM-101', 'tagmango'
+    WHERE NOT EXISTS (SELECT 1 FROM webinars WHERE source = 'tagmango')
+  `)
 ).catch(err => console.error('[Migration] source dimension error:', err.message));
 
 // Auto-migrate: alert phone + alert log for leads-alert scheduler
@@ -789,6 +851,40 @@ const leadsLimiter = rateLimit({
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
+/* ── Public WhatsApp permalink redirect ──────────────────────────────────
+ * A branded subdomain (e.g. https://chat.myhealthschool.in) proxies to this
+ * route and we 302 to the CURRENT WhatsApp group for the given source —
+ * day-based (Mon/Tue → tuesday link, else friday link), so it always reflects
+ * the admin's latest link and scheduled swaps. Lets you print a permanent
+ * link while changing the underlying group anytime. Per source via ?source=.
+ * Public (no auth). */
+app.get(['/go', '/join', '/wa'], async (req, res) => {
+  const source = String(req.query.source || 'meta').toLowerCase();
+  try {
+    const { rows } = await pool.query(
+      'SELECT tuesday_whatsapp_link, friday_whatsapp_link FROM webinar_config WHERE source = $1',
+      [source]
+    );
+    const cfg = rows[0] || {};
+    const day = new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata', weekday: 'short' });
+    const link = (day === 'Mon' || day === 'Tue') ? cfg.tuesday_whatsapp_link : cfg.friday_whatsapp_link;
+    if (link && /^https?:\/\//i.test(link)) {
+      res.set('Cache-Control', 'no-store');
+      return res.redirect(302, link);
+    }
+    return res.status(404).type('html').send('<h2 style="font-family:sans-serif">WhatsApp link not configured yet.</h2>');
+  } catch (e) {
+    console.error('[/go] redirect error:', e.message);
+    return res.status(500).type('html').send('<h2 style="font-family:sans-serif">Something went wrong.</h2>');
+  }
+});
+
+// Permanent WhatsApp subdomain redirect — when a branded subdomain (saved in
+// webinar_config.permanent_whatsapp_link) is pointed at this backend, 302 to
+// that workspace's current active WhatsApp link. Matched by Host header; any
+// unmatched host (the API domain, health checks) falls straight through.
+app.use(require('./utils/permanentRedirect').permanentRedirect);
+
 // Serve uploaded template media (images/videos) saved by the wa-templates
 // upload endpoint. Public read — these are meant to be fetchable (e.g. by
 // WhatsApp media senders).
@@ -801,6 +897,7 @@ app.use('/api',        leadsRouter);
 app.use('/api',        eventsRouter);
 app.use('/api/auth',   authLimiter, authRouter);
 app.use('/api/admin/telegram-alerts', telegramAlertsRouter);
+app.use('/api/admin/whapi', require('./routes/whapi'));
 app.use('/api/admin',  adminRouter);
 // Recordings MUST be mounted before /api/caller — callerRouter uses
 // the bearer-JWT callerAuth middleware which rejects any request that
@@ -816,5 +913,8 @@ app.use('/api/caller', callsRouter);
 // Tata posts call-status/recording callbacks with NO auth and NO workspace
 // marker. Meta's /api/webhooks/* mount bound to calls / leads / crm_users.
 app.use('/api/webhooks',     createWebhooksRouter({ calls: 'calls',     leads: 'leads',     users: 'crm_users' }));
+// Meta Lead Ads webhook (push leads instead of polling the Graph API). Public,
+// GET handshake + POST leadgen events → inserts into the Meta `leads` table.
+app.use('/api/meta-leadgen', require('./routes/metaLeadgenWebhook'));
 
 module.exports = app;

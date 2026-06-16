@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import TemplateModal from './TemplateModal';
+import { isMetaTempLike } from '../utils/workspaceFlags';
 
 const TPL_DAY_LABEL = {
   webinar_day: 'Webinar day', '3_before': '3 days before', '2_before': '2 days before',
@@ -343,7 +344,7 @@ export default function WhatsAppLinksEditor({ token, source = 'meta' }) {
   const [templates, setTemplates]   = useState([]);
 
   function loadTemplates() {
-    if (source !== 'metatemp') { setTemplates([]); return; }
+    if (!isMetaTempLike(source)) { setTemplates([]); return; }
     fetch(`/api/admin/wa-templates?source=${source}`, { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.json())
       .then(d => setTemplates(d.templates || []))
@@ -534,10 +535,13 @@ export default function WhatsAppLinksEditor({ token, source = 'meta' }) {
         }
       `}</style>
       {/* Permanent WhatsApp link — Meta Temp only */}
-      {source === 'metatemp' && (
+      {isMetaTempLike(source) && (
         <div style={{ marginBottom: 22 }}>
           <p style={{ fontFamily: 'Outfit, sans-serif', fontWeight: 700, fontSize: '0.8rem', color: 'rgba(91,33,182,0.7)', margin: '0 0 8px' }}>
             Permanent Whatsapp Link
+          </p>
+          <p style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.72rem', color: 'rgba(91,33,182,0.5)', margin: '0 0 8px', lineHeight: 1.5 }}>
+            Your branded subdomain pointed at this backend. Visiting it always redirects to the current active WhatsApp link below — share this link instead of the raw group invite.
           </p>
           <div style={{
             display: 'flex', alignItems: 'center', gap: 6,
@@ -548,7 +552,7 @@ export default function WhatsAppLinksEditor({ token, source = 'meta' }) {
               type="text"
               value={permLink}
               onChange={(e) => setPermLink(e.target.value)}
-              placeholder="https://chat.whatsapp.com/…"
+              placeholder="https://join.yourdomain.com"
               style={{
                 flex: 1, border: 'none', outline: 'none', background: 'transparent',
                 fontFamily: 'Outfit, sans-serif', fontSize: '0.92rem', color: '#3B0764',
@@ -580,7 +584,7 @@ export default function WhatsAppLinksEditor({ token, source = 'meta' }) {
       )}
 
       {/* Heading hidden in the Meta Temp workspace */}
-      {source !== 'metatemp' && (
+      {!isMetaTempLike(source) && (
         <div style={{ marginBottom: 24 }}>
           <h3 className="font-sans text-xl font-bold text-purple-900">WhatsApp Group Link</h3>
           <p className="font-sans text-sm text-purple-400 mt-1">
@@ -613,7 +617,7 @@ export default function WhatsAppLinksEditor({ token, source = 'meta' }) {
         />
 
         {/* Previous Webinar Card — Meta Temp only */}
-        {source === 'metatemp' && (
+        {isMetaTempLike(source) && (
           <WebinarCard
             type="previous"
             webinarDate={previousWebinar?.webinar_at}
@@ -630,7 +634,7 @@ export default function WhatsAppLinksEditor({ token, source = 'meta' }) {
         )}
 
         {/* Upcoming Webinar Card — hidden in the Meta Temp workspace */}
-        {source !== 'metatemp' && (
+        {!isMetaTempLike(source) && (
           <WebinarCard
             type="upcoming"
             webinarDate={config.backup_webinar_at}
@@ -648,7 +652,7 @@ export default function WhatsAppLinksEditor({ token, source = 'meta' }) {
 
       {/* Templates — Meta Temp only: a separate card with the Create button + a
           full-width (one-per-row) list of saved templates. */}
-      {source === 'metatemp' && (
+      {isMetaTempLike(source) && (
         <div style={{ marginTop: 24, background: '#fff', border: '1px solid rgba(91,33,182,0.18)', borderRadius: 18, padding: 20, boxShadow: '0 2px 16px rgba(91,33,182,0.06)' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
             <p style={{ fontFamily: 'Outfit, sans-serif', fontWeight: 700, fontSize: '0.9rem', color: '#3B0764', margin: 0 }}>

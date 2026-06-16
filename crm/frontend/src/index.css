@@ -8,6 +8,17 @@
     box-sizing: border-box;
   }
 
+  /* Hide all scrollbars app-wide — scrolling still works, the bar is just invisible */
+  * {
+    scrollbar-width: none;      /* Firefox */
+    -ms-overflow-style: none;   /* IE / legacy Edge */
+  }
+  *::-webkit-scrollbar {        /* Chrome / Safari / Edge / Opera */
+    width: 0;
+    height: 0;
+    display: none;
+  }
+
   /* GPU-accelerate all animated elements */
   canvas,
   [style*="animation"],

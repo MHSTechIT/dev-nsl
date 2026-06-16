@@ -1,4 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import Lottie from 'lottie-react';
+import trophyAnim from '../assets/trophy.json';
 
 /* CallStatsPanel — glossy status card for the LEFT of the Call page.
    Shows the caller's live status (break countdown / blocked reason), the real
@@ -173,6 +176,7 @@ export default function CallStatsPanel({
   counts = {},
   status = { kind: 'active' },
 }) {
+  touchedPercent = 100; // TEMP TEST: force 100% to preview the celebration — REMOVE after testing
   // 1-second tick — only runs while on a break, to animate the countdown.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -181,6 +185,42 @@ export default function CallStatsPanel({
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [status?.kind, status?.endsAt]);
+
+  /* ── 100% celebration ──────────────────────────────────────────────────
+     When TOUCHED hits 100%, a trophy Lottie launches FROM the card's trophy
+     icon, flies to screen-centre while growing large, and the page behind it
+     blurs. Fires once per crossing into 100 (resets when it drops below). */
+  const trophyRef = useRef(null);     // the in-card trophy icon
+  const lottieRef = useRef(null);     // the flying trophy animation instance
+  const cardTrophyRef = useRef(null); // the resting in-card trophy (frozen on last frame)
+  const firedRef  = useRef(false);
+  const [celebrate, setCelebrate] = useState(null); // { from:{top,left,width,height} } | null
+  const [big, setBig] = useState(false);
+  const [show, setShow] = useState(false);          // opacity: fade in at start, fade out at end
+
+  useEffect(() => {
+    const pct = Number(touchedPercent) || 0;
+    if (pct < 100) { firedRef.current = false; return; }
+    if (pct >= 100 && !firedRef.current) {
+      firedRef.current = true;
+      const el = trophyRef.current;
+      const r = el ? el.getBoundingClientRect() : { top: window.innerHeight / 2, left: window.innerWidth / 2, width: 104, height: 104 };
+      setBig(false); setShow(false);
+      setCelebrate({ from: { top: r.top, left: r.left, width: r.width, height: r.height } });
+      // next frame → fade in + animate to centre + blur in
+      requestAnimationFrame(() => requestAnimationFrame(() => { setBig(true); setShow(true); }));
+    }
+  }, [touchedPercent]);
+
+  // Fade out (and drift back toward the icon), then remove.
+  function dismissCelebrate() { setShow(false); setBig(false); setTimeout(() => setCelebrate(null), 700); }
+
+  const winW = typeof window !== 'undefined' ? window.innerWidth : 1200;
+  const winH = typeof window !== 'undefined' ? window.innerHeight : 800;
+  const bigSize = Math.min(460, winW * 0.7, winH * 0.7);
+  const flyStyle = celebrate && (big
+    ? { top: winH / 2, left: winW / 2, width: bigSize, height: bigSize, transform: 'translate(-50%, -50%)' }
+    : { top: celebrate.from.top, left: celebrate.from.left, width: celebrate.from.width, height: celebrate.from.height, transform: 'translate(0,0)' });
 
   // Banner appearance + text driven by the caller's current status.
   const banner = (() => {
@@ -273,7 +313,7 @@ export default function CallStatsPanel({
             border: '1px solid rgba(255,255,255,0.7)',
             borderRadius: 20,
             padding: '12px 12px',
-            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8,
+            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 0,
             boxShadow: glossShadow,
           }}
         >
@@ -281,8 +321,21 @@ export default function CallStatsPanel({
           <span style={{ position: 'relative', fontSize: '0.64rem', fontWeight: 700, letterSpacing: '0.10em', color: MUTED }}>
             TOUCHED
           </span>
-          <div style={{ position: 'relative' }}>
-            <TrophyFill percent={touchedPercent} />
+          <div ref={trophyRef} style={{ position: 'relative' }}>
+            {Number(touchedPercent) >= 100 ? (
+              <div style={{ width: 'min(280px, 22vw)', height: 'min(280px, 22vw)', marginTop: -40, marginBottom: -40 }}>
+                <Lottie
+                  lottieRef={cardTrophyRef}
+                  animationData={trophyAnim}
+                  loop={false}
+                  autoplay={false}
+                  onDOMLoaded={() => { const a = cardTrophyRef.current; if (a) a.goToAndStop(Math.max(0, a.getDuration(true) - 1), true); }}
+                  style={{ width: '100%', height: '100%' }}
+                />
+              </div>
+            ) : (
+              <TrophyFill percent={touchedPercent} />
+            )}
           </div>
         </div>
       </div>
@@ -335,6 +388,39 @@ export default function CallStatsPanel({
           </div>
         ))}
       </div>
+
+      {/* 100% trophy celebration — portaled to <body> so the blur covers the
+          whole screen and the trophy can travel from the card to centre. */}
+      {celebrate && createPortal(
+        <div style={{ position: 'fixed', inset: 0, zIndex: 99999, pointerEvents: 'auto' }} onClick={dismissCelebrate}>
+          {/* blurred backdrop, fades in as the trophy flies */}
+          <div style={{
+            position: 'absolute', inset: 0,
+            backdropFilter: 'blur(9px)', WebkitBackdropFilter: 'blur(9px)',
+            background: 'rgba(91,33,182,0.14)',
+            opacity: show ? 1 : 0, transition: 'opacity 600ms ease',
+          }} />
+          {/* flying + growing trophy — fades in at start, fades out at end */}
+          <div style={{
+            position: 'fixed', ...flyStyle,
+            opacity: show ? 1 : 0,
+            transition: 'opacity 550ms ease, top 950ms cubic-bezier(.2,.9,.25,1), left 950ms cubic-bezier(.2,.9,.25,1), width 950ms cubic-bezier(.2,.9,.25,1), height 950ms cubic-bezier(.2,.9,.25,1), transform 950ms cubic-bezier(.2,.9,.25,1)',
+            filter: 'drop-shadow(0 20px 50px rgba(124,58,237,0.45))',
+            willChange: 'opacity,top,left,width,height,transform',
+          }}>
+            <Lottie
+              lottieRef={lottieRef}
+              animationData={trophyAnim}
+              loop={false}
+              autoplay
+              onDOMLoaded={() => lottieRef.current?.setSpeed(0.5)}
+              onComplete={() => setTimeout(dismissCelebrate, 600)}
+              style={{ width: '100%', height: '100%' }}
+            />
+          </div>
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }

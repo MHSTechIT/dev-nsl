@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import BrandSelect from '../components/BrandSelect';
 import ManagerProfileMenu from '../components/ManagerProfileMenu';
+import { isMetaTempLike, useEnabledWorkspaces } from '../utils/workspaceFlags';
 import FunnelOverview      from '../admin/FunnelOverview';
 import HomeDashboard       from '../admin/HomeDashboard';
 import LeadsTable          from '../admin/LeadsTable';
@@ -73,6 +74,7 @@ const WORKSPACE_OPTS = [
   { id: 'yt',    label: 'YT' },
   { id: 'meta2', label: 'Meta 2.0' },
   { id: 'metatemp', label: 'Meta Temp' },
+  { id: 'tagmango', label: 'TagMango' },
 ];
 
 export default function MarketingModule({
@@ -90,10 +92,22 @@ export default function MarketingModule({
 }) {
   const [tab, setTab] = useState('funnel');
 
+  /* Workspace on/off flags (Settings → Workspace). Hide disabled workspaces
+     from the switcher; if the active one gets turned off, fall back to the
+     first enabled workspace. */
+  const { isEnabled } = useEnabledWorkspaces(token);
+  const visibleWorkspaceOpts = WORKSPACE_OPTS.filter((o) => isEnabled(o.id));
+  useEffect(() => {
+    if (!onSourceChange) return;
+    if (visibleWorkspaceOpts.length && !visibleWorkspaceOpts.some((o) => o.id === source)) {
+      onSourceChange(visibleWorkspaceOpts[0].id);
+    }
+  }, [source, visibleWorkspaceOpts.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
   /* Funnel + Page Performance are hidden in the Meta Temp workspace. */
   const HIDDEN_IN_METATEMP = ['funnel', 'dashboard'];
   const METATEMP_ONLY = ['whapi']; // Whapi tab only shows in the Meta Temp workspace
-  const workspaceTabs = source === 'metatemp'
+  const workspaceTabs = isMetaTempLike(source)
     ? TABS.filter(t => !HIDDEN_IN_METATEMP.includes(t.id))
     : TABS.filter(t => !METATEMP_ONLY.includes(t.id));
 
@@ -168,7 +182,7 @@ export default function MarketingModule({
             value={source}
             onChange={(v) => onSourceChange && onSourceChange(v)}
             disabled={!onSourceChange}
-            options={WORKSPACE_OPTS.map(o => ({ value: o.id, label: o.label }))}
+            options={visibleWorkspaceOpts.map(o => ({ value: o.id, label: o.label }))}
           />
         </div>
 

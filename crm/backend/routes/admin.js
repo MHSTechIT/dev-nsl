@@ -24,6 +24,7 @@ const {
   fetchAllCampaigns,
   fetchAllPromotePages,
   fetchAllLeadgenForms,
+  fetchFormLeads,
   clearMetaCache,
 } = require('../utils/metaInsights');
 
@@ -41,6 +42,12 @@ router.use(adminAuth);
 router.post('/callers/:callerId/preview-token', async (req, res) => {
   const { callerId } = req.params;
   if (!callerId) return res.status(400).json({ error: 'callerId required' });
+  // writable=true mints a FULL caller token (preview:false) so the admin can
+  // edit the caller's leads (save notes / change outcome) from the preview. The
+  // frontend still passes previewMode to suppress calls / heartbeat / activity
+  // logging, so impersonating to edit never places paid calls or pollutes the
+  // caller's activity log — only the deliberate note/outcome saves go through.
+  const writable = req.query.writable === 'true' || req.body?.writable === true;
   try {
     const { rows } = await pool.query(
       `SELECT id, full_name, role, department, workspace, is_active
@@ -56,16 +63,16 @@ router.post('/callers/:callerId/preview-token', async (req, res) => {
       department: u.department || null,
       // Scope reads to the caller's own workspace tables, mirroring login.
       workspace:  u.workspace || 'meta',
-      preview:    true,
+      preview:    !writable,
     });
-    res.json({ token, caller: { id: u.id, full_name: u.full_name, role: u.role } });
+    res.json({ token, writable, caller: { id: u.id, full_name: u.full_name, role: u.role } });
   } catch (err) {
     console.error('preview-token error:', err.message);
     res.status(500).json({ error: 'server_error' });
   }
 });
 
-const ALLOWED_SOURCES = new Set(['meta', 'yt', 'meta2', 'metatemp']);
+const ALLOWED_SOURCES = new Set(['meta', 'yt', 'meta2', 'metatemp', 'tagmango']);
 function getSource(req) {
   const v = req.query.source ?? req.body?.source;
   return ALLOWED_SOURCES.has(v) ? v : 'meta';
@@ -246,6 +253,8 @@ const configValidators = [
   body('whatsapp_link_swap_at').optional({ nullable: true }).isISO8601(),
   body('pending_whatsapp_link_2').optional().isString(),
   body('whatsapp_link_swap_at_2').optional({ nullable: true }).isISO8601(),
+  body('current_webinar_name').optional({ nullable: true }).isString().isLength({ max: 80 }),
+  body('next_webinar_name').optional({ nullable: true }).isString().isLength({ max: 80 }),
 ];
 
 router.put('/webinar-config', configValidators, async (req, res) => {
@@ -262,7 +271,14 @@ router.put('/webinar-config', configValidators, async (req, res) => {
     if (req.body[key] !== undefined) updates[key] = req.body[key];
   }
 
-  if (Object.keys(updates).length === 0) {
+  // Custom webinar display names live on the webinars table (not webinar_config),
+  // so they're applied separately from the `allowed` config fields. They can be
+  // saved on their own — e.g. the inline pencil-rename sends just a name.
+  const currentWebinarName = req.body.current_webinar_name;
+  const nextWebinarName    = req.body.next_webinar_name;
+  const hasNameUpdate = currentWebinarName !== undefined || nextWebinarName !== undefined;
+
+  if (Object.keys(updates).length === 0 && !hasNameUpdate) {
     return res.status(400).json({ error: 'No fields to update' });
   }
 
@@ -401,6 +417,42 @@ router.put('/webinar-config', configValidators, async (req, res) => {
         webinarWarning = (webinarWarning ? webinarWarning + '; ' : '') +
           `upcoming webinar: ${webinarErr.message}${webinarErr.code ? ` [${webinarErr.code}]` : ''}`;
         console.error(`[admin] ${source} upcoming webinar update error:`, webinarErr.message, webinarErr.code, webinarErr.detail);
+      }
+    }
+
+    // ── Apply custom display names (independent of date changes) ──
+    // Runs AFTER the webinars date-sync above, so a just-created row exists and
+    // its auto-generated name gets overridden with the custom one. An empty
+    // string clears the name → the card falls back to the date label.
+    if (currentWebinarName !== undefined) {
+      try {
+        await pool.query(
+          'UPDATE webinars SET name = $1 WHERE is_active = TRUE AND source = $2',
+          [currentWebinarName.trim() || null, source]
+        );
+      } catch (nameErr) {
+        webinarWarning = (webinarWarning ? webinarWarning + '; ' : '') + `current name: ${nameErr.message}`;
+        console.error(`[admin] ${source} current webinar name error:`, nameErr.message);
+      }
+    }
+    if (nextWebinarName !== undefined) {
+      try {
+        // Target the same upcoming row the backup_webinar_at date-sync touches.
+        await pool.query(
+          `UPDATE webinars SET name = $1
+           WHERE id = (
+             SELECT w.id FROM webinars w
+             LEFT JOIN leads l ON l.webinar_id = w.id
+             WHERE w.is_active = FALSE AND w.source = $2
+             GROUP BY w.id
+             HAVING COUNT(l.id) = 0
+             ORDER BY w.created_at DESC LIMIT 1
+           )`,
+          [nextWebinarName.trim() || null, source]
+        );
+      } catch (nameErr) {
+        webinarWarning = (webinarWarning ? webinarWarning + '; ' : '') + `next name: ${nameErr.message}`;
+        console.error(`[admin] ${source} next webinar name error:`, nameErr.message);
       }
     }
 
@@ -552,6 +604,107 @@ router.post('/leads/import', async (req, res) => {
   } catch (err) {
     console.error('Leads import error:', err.message);
     res.status(500).json({ error: 'Failed to import leads' });
+  }
+});
+
+/* ── POST /api/admin/leads/fetch-meta ──
+   Pulls lead-gen leads from Meta for the given forms within [since, until]
+   and inserts them into the leads table for this workspace. Each Meta lead's
+   variable answers are stored verbatim in leads.field_data (JSONB) so the
+   Leads page can render columns dynamically; name / phone / email are also
+   mapped into the standard columns so the existing caller-assignment flow
+   keeps working. Dedup is by Meta's leadgen id (meta_lead_id).
+   Body: { source, form_ids: string[], since?: ISO, until?: ISO }.
+   Returns { inserted, skipped_duplicates, forms_processed, errors }. */
+const META_NAME_KEYS  = ['full_name', 'name', 'your_name', 'full name'];
+const META_PHONE_KEYS = ['phone_number', 'phone', 'mobile_number', 'mobile', 'whatsapp_number', 'contact_number'];
+const META_EMAIL_KEYS = ['email', 'email_address', 'e-mail'];
+const toUnix = (iso) => { const t = Date.parse(iso); return Number.isFinite(t) ? Math.floor(t / 1000) : null; };
+/* field_data → { lowercased_name: "joined, values" } */
+function flattenFieldData(fd) {
+  const out = {};
+  for (const f of (Array.isArray(fd) ? fd : [])) {
+    if (!f || !f.name) continue;
+    out[String(f.name).toLowerCase()] = (Array.isArray(f.values) ? f.values : [f.values]).filter(v => v != null).join(', ');
+  }
+  return out;
+}
+const pickKey = (map, keys) => { for (const k of keys) if (map[k]) return map[k]; return ''; };
+
+router.post('/leads/fetch-meta', async (req, res) => {
+  const source = getSource(req);
+  const formIds = (Array.isArray(req.body?.form_ids) ? req.body.form_ids : []).map(String).filter(Boolean);
+  if (!formIds.length) return res.status(400).json({ error: 'No forms selected' });
+  if (!metaConfigured()) return res.status(400).json({ error: 'Meta is not configured on the server' });
+
+  const sinceUnix = req.body?.since ? toUnix(req.body.since) : null;
+  const untilUnix = req.body?.until ? toUnix(req.body.until) : null;
+
+  try {
+    // Active webinar for this source, so imported leads attach to it (and the
+    // lead.created assigner has a webinarId to scope round-robin to).
+    let webinar_id = null;
+    try {
+      const { rows: wRows } = await pool.query(
+        'SELECT id FROM webinars WHERE is_active = TRUE AND source = $1 LIMIT 1', [source]);
+      webinar_id = wRows[0]?.id ?? null;
+    } catch { /* webinars table optional */ }
+
+    // Dedup set: Meta leadgen ids already imported for this source.
+    const { rows: seenRows } = await pool.query(
+      'SELECT meta_lead_id FROM leads WHERE source = $1 AND meta_lead_id IS NOT NULL', [source]);
+    const seen = new Set(seenRows.map(r => String(r.meta_lead_id)));
+
+    let inserted = 0, skipped_duplicates = 0;
+    const errors = [];
+    const newLeadIds = [];
+
+    for (const formId of formIds) {
+      const { leads: metaLeads, error } = await fetchFormLeads(formId, sinceUnix, untilUnix);
+      if (error) errors.push({ form_id: formId, error: String(error).slice(0, 160) });
+      for (const ml of (metaLeads || [])) {
+        const metaLeadId = String(ml.id || '');
+        if (!metaLeadId || seen.has(metaLeadId)) { skipped_duplicates++; continue; }
+        seen.add(metaLeadId);
+
+        const map = flattenFieldData(ml.field_data);
+        let full_name = pickKey(map, META_NAME_KEYS);
+        if (!full_name && (map['first_name'] || map['last_name'])) {
+          full_name = [map['first_name'], map['last_name']].filter(Boolean).join(' ').trim();
+        }
+        const phone = pickKey(map, META_PHONE_KEYS).replace(/\D/g, '').slice(-10);
+        const email = pickKey(map, META_EMAIL_KEYS) || null;
+        const created_at = ml.created_time ? new Date(ml.created_time) : new Date();
+
+        const { rows } = await pool.query(
+          `INSERT INTO leads
+             (full_name, whatsapp_number, email, lead_score, webinar_id, source,
+              field_data, meta_lead_id, meta_form_id, created_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10)
+           RETURNING id`,
+          [full_name || '', phone, email, 2, webinar_id, source,
+           JSON.stringify(map), metaLeadId, formId, created_at]
+        );
+        inserted++;
+        if (rows[0]?.id) newLeadIds.push(rows[0].id);
+      }
+    }
+
+    // Feed the caller flow: fire the same notification the funnel fires on a
+    // real registration, so the round-robin assigner picks these up. Best
+    // effort — the recovery sweep also catches any that slip through.
+    if (webinar_id) {
+      for (const leadId of newLeadIds) {
+        pool.query(`SELECT pg_notify('lead.created', $1)`,
+          [JSON.stringify({ leadId, source, sugarLevel: null, webinarId: webinar_id })]
+        ).catch(e => console.error('[fetch-meta notify]', e.message));
+      }
+    }
+
+    res.json({ success: true, inserted, skipped_duplicates, forms_processed: formIds.length, errors });
+  } catch (err) {
+    console.error('Meta lead fetch error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch leads from Meta' });
   }
 });
 
@@ -1132,7 +1285,7 @@ router.get('/crm-users', async (req, res) => {
               department, team_leader_id, manager_id, assistant_manager_id, password_plain,
               tata_extension, tata_account_type, tata_agent_number, tata_caller_id,
               tata_smartflo_api_key, tata_outbound_route, custom_fields,
-              page_access, created_at
+              page_access, avatar_url, created_at
          FROM crm_users
         ${whereSQL}
         ORDER BY created_at DESC`,
@@ -1164,7 +1317,7 @@ function isMaskedKey(v) {
 /* ── POST /api/admin/crm-users ── */
 const ALLOWED_ROLES = ['junior_caller','senior_caller','manager','assistant_manager','trainer','admin','team_leader','webinar','l1_sales'];
 // Workspace tags a caller can be pinned to (mirrors the top-left switcher).
-const ALLOWED_WORKSPACES = ['meta','yt','meta2','metatemp'];
+const ALLOWED_WORKSPACES = ['meta','yt','meta2','metatemp','tagmango'];
 const CALLER_ROLES = new Set(['junior_caller','senior_caller']);
 
 /* Resolve the workspace column value for a write.
@@ -1302,12 +1455,12 @@ router.post('/crm-users', crmUserValidators, async (req, res) => {
           department, team_leader_id,
           tata_extension, tata_account_type, tata_agent_number, tata_caller_id,
           tata_smartflo_api_key, tata_outbound_route, manager_id, password_plain,
-          workspace, custom_fields, assistant_manager_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18)
+          workspace, custom_fields, assistant_manager_id, avatar_url)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18, $19)
        RETURNING id, full_name, email, phone, role, is_active, workspace,
                  department, team_leader_id, manager_id, assistant_manager_id, password_plain,
                  tata_extension, tata_account_type, tata_agent_number, tata_caller_id,
-                 tata_smartflo_api_key, tata_outbound_route, custom_fields,
+                 tata_smartflo_api_key, tata_outbound_route, custom_fields, avatar_url,
                  created_at`,
       [
         full_name.trim(),
@@ -1330,6 +1483,7 @@ router.post('/crm-users', crmUserValidators, async (req, res) => {
         effectiveWorkspace,
         JSON.stringify(req.body.custom_fields || {}),
         effectiveAssistantManagerId,
+        (typeof req.body.avatar_url === 'string' && req.body.avatar_url) ? req.body.avatar_url : null,
       ]
     );
     // Mask the API key in the response so the freshly-created secret
@@ -1391,6 +1545,7 @@ router.patch('/crm-users/:id', crmUserPatchValidators, async (req, res) => {
   const allowed = [
     'full_name', 'email', 'phone', 'role',
     'department', 'team_leader_id', 'manager_id', 'assistant_manager_id', 'workspace',
+    'avatar_url',
     'tata_extension', 'tata_account_type', 'tata_agent_number', 'tata_caller_id',
     'tata_smartflo_api_key', 'tata_outbound_route',
     // is_active doubles as the "paused" flag — leadAssigner.js already skips
@@ -1556,7 +1711,7 @@ router.patch('/crm-users/:id', crmUserPatchValidators, async (req, res) => {
                  auto_paused_at, auto_pause_reason,
                  department, team_leader_id, manager_id, password_plain,
                  tata_extension, tata_account_type, tata_agent_number, tata_caller_id,
-                 tata_smartflo_api_key, tata_outbound_route, custom_fields,
+                 tata_smartflo_api_key, tata_outbound_route, custom_fields, avatar_url,
                  created_at`,
       values
     );
@@ -1652,6 +1807,58 @@ router.get('/auto-paused-callers', async (req, res) => {
   } catch (err) {
     console.error('auto-paused-callers error:', err.message);
     res.status(500).json({ error: 'Failed to load notifications.' });
+  }
+});
+
+/* ── GET /api/admin/empty-queue-callers ──
+   Active callers whose ASSIGNED page is empty — the exact "No leads in your
+   queue" state the caller sees. The assigned-queue predicate mirrors
+   routes/caller.js GET /leads (not parked, no outcome or follow-up due, recent
+   webinar or pinned). Surfaced on the Notifications page so the admin can refill
+   them. Same workspace / TL / manager scoping as auto-paused-callers. */
+router.get('/empty-queue-callers', async (req, res) => {
+  try {
+    const tl  = req.adminUser && req.adminUser.kind === 'tl';
+    const mgr = req.adminUser && req.adminUser.kind === 'manager';
+    const source = getReportSource(req);
+    const params     = [source];   // $1 = workspace
+    let   whereExtra = `AND ($1 = 'all' OR u.workspace IS NULL OR u.workspace = $1)`;
+    if (tl) {
+      params.push(req.adminUser.id);
+      whereExtra += ` AND u.team_leader_id = $${params.length}`;
+    } else if (mgr) {
+      params.push(req.adminUser.department);
+      whereExtra += ` AND u.department = $${params.length}`;
+    }
+    const { rows } = await pool.query(
+      `SELECT u.id, u.full_name, u.role
+         FROM crm_users u
+        WHERE u.role IN ('junior_caller','senior_caller')
+          AND u.is_active = TRUE
+          AND u.deleted_at IS NULL
+          ${whereExtra}
+          AND NOT EXISTS (
+            SELECT 1 FROM leads l
+             WHERE l.assigned_user_id = u.id
+               AND ($1 = 'all' OR l.source = $1)
+               AND l.next_batch_parked = FALSE
+               AND (
+                 l.last_note_outcome IS NULL
+                 OR (l.last_note_outcome = 'follow_up' AND l.follow_up_at <= NOW())
+               )
+               AND (
+                 l.webinar_id IS NULL
+                 OR l.webinar_id IN ${RECENT_WEBINARS_SQL}
+                 OR l.pinned_at IS NOT NULL
+               )
+          )
+        ORDER BY u.full_name ASC`,
+      params
+    );
+    res.json({ callers: rows });
+  } catch (err) {
+    console.error('empty-queue-callers error:', err.message);
+    res.status(500).json({ error: 'Failed to load empty-queue alerts.' });
   }
 });
 
@@ -2159,6 +2366,38 @@ router.put('/user-form-config', async (req, res) => {
   }
 });
 
+/* ── Workspace on/off flags (Settings → Workspace card) ──
+   Stored as one JSONB map { [workspaceId]: boolean }. A workspace is hidden
+   from the CRM's workspace switchers only when its value is explicitly false;
+   a missing key (e.g. a brand-new workspace) is treated as enabled. */
+router.get('/workspace-flags', async (_req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT flags FROM workspace_flags WHERE id = 1');
+    res.json({ flags: rows[0]?.flags || {} });
+  } catch (err) {
+    console.error('workspace-flags get:', err.message);
+    res.json({ flags: {} });
+  }
+});
+
+router.put('/workspace-flags', async (req, res) => {
+  try {
+    const raw = req.body && req.body.flags ? req.body.flags : {};
+    // Coerce to a clean { id: bool } map — ignore anything non-boolean.
+    const flags = {};
+    for (const [k, v] of Object.entries(raw)) flags[k] = v !== false;
+    await pool.query(
+      `INSERT INTO workspace_flags (id, flags, updated_at) VALUES (1, $1::jsonb, NOW())
+       ON CONFLICT (id) DO UPDATE SET flags = $1::jsonb, updated_at = NOW()`,
+      [JSON.stringify(flags)]
+    );
+    res.json({ success: true, flags });
+  } catch (err) {
+    console.error('workspace-flags put:', err.message);
+    res.status(500).json({ error: 'Failed to save workspace settings.' });
+  }
+});
+
 /* ── GET /api/admin/meta-leadgen-forms ──
    Lists Meta (Facebook) lead-gen forms across all reachable pages, for the
    Meta Temp Timer & Controls form dropdowns. Returns { configured, forms:
@@ -2172,6 +2411,40 @@ router.get('/meta-leadgen-forms', async (_req, res) => {
   } catch (err) {
     console.error('meta-leadgen-forms error:', err.message);
     res.json({ configured: true, forms: [] });
+  }
+});
+
+/* ── GET /api/admin/tagmango-memberships ──
+   Lists the creator's TagMango "mangos" (memberships) for the TagMango Timer &
+   Controls dropdowns — the TagMango analogue of meta-leadgen-forms. Calls the
+   TagMango external API server-side (key + whitelabel host from .env, never
+   exposed to the browser). Returns { configured, memberships: [{ id, title }] }.
+   Empty (not an error) when TagMango isn't configured. */
+router.get('/tagmango-memberships', async (_req, res) => {
+  const key  = (process.env.TAGMANGO_API_KEY || '').trim();
+  const host = (process.env.TAGMANGO_WHITELABEL_HOST || '').trim();
+  if (!key || !host) return res.json({ configured: false, memberships: [] });
+  try {
+    const r = await fetch('https://api-prod-new.tagmango.com/api/v1/external/mangos', {
+      headers: { Authorization: `Bearer ${key}`, 'x-whitelabel-host': host },
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      console.error('[tagmango-memberships]', r.status, JSON.stringify(d).slice(0, 200));
+      return res.json({ configured: true, memberships: [], error: d.message || `tagmango_${r.status}` });
+    }
+    // TagMango wraps payloads in `result`; the list may be the array itself or
+    // nested under a common key. Normalise id/title defensively.
+    const arr = Array.isArray(d.result) ? d.result
+      : (d.result?.mangoes || d.result?.mangos || d.result?.data || d.data || []);
+    const memberships = (arr || [])
+      .filter(m => !m.isDeleted)
+      .map(m => ({ id: String(m._id || m.id || ''), title: m.title || m.name || m.mangoName || '(untitled)' }))
+      .filter(m => m.id);
+    res.json({ configured: true, memberships });
+  } catch (err) {
+    console.error('tagmango-memberships error:', err.message);
+    res.json({ configured: true, memberships: [], error: 'request_failed' });
   }
 });
 
@@ -2529,6 +2802,108 @@ router.get('/caller-missed-calls/:callerId', async (req, res) => {
   }
 });
 
+/* ── GET /api/admin/caller-calls/:callerId ──
+   Full call history (both inbound + outbound) for one caller, newest first,
+   each row carrying its recording_url when available. Powers the New Page →
+   ⋮ → "View call log" drawer. Read-only — these are call records, not
+   movable leads. Recordings play back through /api/caller/recordings/:id
+   (the proxy accepts the same ADMIN_PASSWORD bearer via ?token=). */
+router.get('/caller-calls/:callerId', async (req, res) => {
+  const { callerId } = req.params;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(callerId || '')) {
+    return res.status(400).json({ error: 'invalid callerId' });
+  }
+  const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 200));
+  try {
+    const { rows } = await pool.query(
+      `SELECT c.id, c.lead_id, c.direction, c.status,
+              c.started_at, c.duration_sec, c.recording_url, c.caller_phone,
+              l.full_name      AS lead_full_name,
+              l.whatsapp_number AS lead_phone,
+              l.sugar_level    AS lead_sugar_level
+         FROM calls c
+         LEFT JOIN leads l ON l.id = c.lead_id
+        WHERE c.caller_id = $1
+        ORDER BY c.started_at DESC NULLS LAST
+        LIMIT $2`,
+      [callerId, limit]
+    );
+    const calls = rows.map(r => ({
+      id: r.id,
+      lead_id: r.lead_id,
+      direction: r.direction || 'outbound',
+      status: r.status,
+      full_name: r.lead_full_name || 'Unknown',
+      phone: (r.caller_phone || r.lead_phone)
+        ? String(r.caller_phone || r.lead_phone).replace(/\D/g, '').slice(-10)
+        : null,
+      sugar_level: r.lead_sugar_level,
+      started_at: r.started_at,
+      duration_sec: r.duration_sec,
+      recording_url: r.recording_url,
+      has_recording: !!r.recording_url,
+    }));
+    res.json({ calls, total: calls.length });
+  } catch (err) {
+    console.error('[admin] caller-calls error:', err.message);
+    res.status(500).json({ error: 'failed to load calls' });
+  }
+});
+
+/* ── GET /api/admin/caller-active-call/:callerId ──
+   The caller's CURRENT in-progress call (if any), for the live monitor at
+   the top of the "View call log" drawer. A call is "live" when it hasn't
+   ended and is still ringing/answered within a recent window (the 30-min
+   guard stops a stale 'answered' row — one whose ended webhook never
+   arrived — from showing as live forever; in prod staleCallReaper closes
+   these, but the guard makes the panel correct even when it doesn't). */
+router.get('/caller-active-call/:callerId', async (req, res) => {
+  const { callerId } = req.params;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(callerId || '')) {
+    return res.status(400).json({ error: 'invalid callerId' });
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT c.id, c.direction, c.status, c.started_at, c.answered_at,
+              c.agent_answered_at, c.provider_call_id, c.caller_phone,
+              l.full_name      AS lead_full_name,
+              l.whatsapp_number AS lead_phone
+         FROM calls c
+         LEFT JOIN leads l ON l.id = c.lead_id
+        WHERE c.caller_id = $1
+          AND c.ended_at IS NULL
+          AND c.status IN ('initiated','ringing','answered')
+          AND c.started_at > NOW() - INTERVAL '30 minutes'
+        ORDER BY c.started_at DESC
+        LIMIT 1`,
+      [callerId]
+    );
+    if (rows.length === 0) return res.json({ active: null });
+    const r = rows[0];
+    const connected = r.status === 'answered' || !!r.agent_answered_at;
+    res.json({
+      active: {
+        id: r.id,
+        direction: r.direction || 'outbound',
+        status: r.status,
+        connected,
+        full_name: r.lead_full_name || 'Unknown',
+        phone: (r.caller_phone || r.lead_phone)
+          ? String(r.caller_phone || r.lead_phone).replace(/\D/g, '').slice(-10)
+          : null,
+        started_at: r.started_at,
+        // Tick the live timer from when the conversation actually connected,
+        // falling back to ring-start so a ringing call still shows elapsed time.
+        since: r.answered_at || r.agent_answered_at || r.started_at,
+        provider_call_id: r.provider_call_id,
+      },
+    });
+  } catch (err) {
+    console.error('[admin] caller-active-call error:', err.message);
+    res.status(500).json({ error: 'failed to load active call' });
+  }
+});
+
 /* ── POST /api/admin/leads/reopen ──
    Bulk-reopen leads — moves them back to the caller's Assigned bucket
    by clearing every closing-state column (outcome, follow_up, completed_at).
@@ -2578,7 +2953,7 @@ router.post('/leads/reopen', async (req, res) => {
    lead data — it does NOT change any caller's interface.
 
    Body: { lead_ids: ["uuid",...],
-           target_bucket?: 'assigned'|'completed'|'not_picked'|'next_batch',
+           target_bucket?: 'assigned'|'completed'|'not_picked'|'next_batch'|'untouched',
            target_caller_id?: "uuid" }
    Returns: { moved: <count> }
 */
@@ -2623,6 +2998,13 @@ router.post('/leads/move', async (req, res) => {
     });
   } else if (targetBucket === 'next_batch') {
     Object.assign(cols, { next_batch_parked: 'TRUE', next_batch_parked_at: 'NOW()' });
+  } else if (targetBucket === 'untouched') {
+    // Reset to a fresh, no-outcome state and drop any park/pin so the lead
+    // re-enters Untouched (when it's on a past webinar) or Assigned (recent).
+    Object.assign(cols, {
+      last_note_outcome: 'NULL', completed_at: 'NULL', follow_up_at: 'NULL',
+      next_batch_parked: 'FALSE', pinned_at: 'NULL',
+    });
   } else if (targetBucket) {
     return res.status(422).json({ error: 'invalid target_bucket' });
   }
@@ -3005,8 +3387,12 @@ router.get('/caller-report', async (req, res) => {
   const todayYmd = istNow.toISOString().slice(0, 10);
   const fromYmd  = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || '') ? req.query.from : todayYmd;
   const toYmd    = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to   || '') ? req.query.to   : fromYmd;
-  const dayStart = new Date(`${fromYmd}T00:00:00+05:30`).toISOString();
-  const dayEnd   = new Date(`${toYmd}T23:59:59.999+05:30`).toISOString();
+  // Optional time-of-day filter (HH:MM, IST). Defaults to the whole day, so
+  // omitting them keeps the previous full-day behaviour.
+  const fromTime = /^\d{2}:\d{2}$/.test(req.query.from_time || '') ? req.query.from_time : '00:00';
+  const toTime   = /^\d{2}:\d{2}$/.test(req.query.to_time   || '') ? req.query.to_time   : '23:59';
+  const dayStart = new Date(`${fromYmd}T${fromTime}:00+05:30`).toISOString();
+  const dayEnd   = new Date(`${toYmd}T${toTime}:59.999+05:30`).toISOString();
   const webinarId = req.query.webinar_id ? String(req.query.webinar_id) : null;
   // Workspace scope. With "All webinars" (no webinar_id) the report must stay
   // within the current workspace's source — otherwise a caller who also works
@@ -3143,6 +3529,9 @@ router.get('/caller-report', async (req, res) => {
         -- and the snapshot outcome atoms used by the detail row.
         SELECT l.assigned_user_id AS caller_id,
                mode() WITHIN GROUP (ORDER BY web.name) AS batch,
+               -- current_assigned = every lead currently assigned to this caller
+               -- (the caller's whole book) — the denominator for L→C %.
+               COUNT(*)::int AS current_assigned,
                COUNT(*) FILTER (WHERE l.last_note_outcome IS NULL)::int AS new_leads,
                COUNT(*) FILTER (WHERE l.next_batch_parked = TRUE)::int AS next_batch,
                COUNT(*) FILTER (
@@ -3175,6 +3564,7 @@ router.get('/caller-report', async (req, res) => {
              COALESCE(ca.total_dur_sec, 0)    AS total_dur_sec,
              COALESCE(bka.break_sec, 0)       AS break_sec,
              COALESCE(ag.assigned, 0)         AS assigned,
+             COALESCE(da.current_assigned, 0) AS current_assigned,
              COALESCE(ag.actual_leads, 0)     AS actual_leads,
              COALESCE(da.new_leads, 0)        AS new_leads,
              COALESCE(na.interested, 0)       AS interested,
@@ -3215,7 +3605,7 @@ router.get('/caller-report', async (req, res) => {
     // Numeric atom keys — summed into the totals footer in one place.
     const NUM_KEYS = [
       'touched','answered','missed','answered_dur_sec','missed_dur_sec','total_dur_sec','break_sec',
-      'assigned','actual_leads','new_leads','interested','next_batch',
+      'assigned','current_assigned','actual_leads','new_leads','interested','next_batch',
       'hot','warm','cold','junk','untouched',
       'o_completed','o_follow_up','o_not_interested','o_not_picked','o_incomplete',
       'st_other_languages','st_already_paid','st_not_available_for_webinar','st_no_diabetes',

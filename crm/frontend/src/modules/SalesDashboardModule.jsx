@@ -11,13 +11,14 @@ import AccessView             from '../admin/AccessView';
 import SalesCompletedCallsView from './SalesCompletedCallsView';
 import SalesNewPageView       from './SalesNewPageView';
 import UsersModule            from './UsersModule';
+import { useEnabledWorkspaces } from '../utils/workspaceFlags';
 
 const TABS = [
   {
     // Lead-ops landing tab (Performance tab was removed). Renders
     // SalesNewPageView. Rename id/label when its scope is finalized.
     id: 'newpage',
-    label: 'New Page',
+    label: 'Overview',
     icon: (
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
@@ -48,16 +49,6 @@ const TABS = [
     ),
   },
   {
-    id: 'notifications',
-    label: 'Notifications',
-    icon: (
-      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
-        <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
-      </svg>
-    ),
-  },
-  {
     // New tab — functionality to be wired in a follow-up. For now it
     // renders a placeholder card so the tab is reachable and the layout
     // is settled.
@@ -67,6 +58,16 @@ const TABS = [
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
         <polyline points="9 12 11 14 15 10"/>
+      </svg>
+    ),
+  },
+  {
+    id: 'notifications',
+    label: 'Notifications',
+    icon: (
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+        <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
       </svg>
     ),
   },
@@ -104,14 +105,17 @@ const TABS = [
 
 /* Sales (Web Reminder) pages a manager/TL/admin sales user can be granted/denied. */
 const SALES_ACCESS_PAGES = [
-  { id: 'newpage',        label: 'New Page' },
+  { id: 'newpage',        label: 'Overview' },
   { id: 'leads',          label: 'Leads' },
   { id: 'logic',          label: 'Leads Logic' },
-  { id: 'notifications',  label: 'Notifications' },
   { id: 'completed_calls',label: 'Completed Calls' },
+  { id: 'notifications',  label: 'Notifications' },
   { id: 'timer',          label: 'Timer' },
   { id: 'alerts',         label: 'Alerts' },
   { id: 'users',          label: 'Users' },
+  // Access is grant-only (default OFF): a super-admin grants it to a manager/TL,
+  // and whoever holds it can grant pages onward to their team via this tab.
+  { id: 'access',         label: 'Access' },
 ];
 
 /* The actual pages a caller sees in the CallerShell login — used for
@@ -171,7 +175,15 @@ export default function SalesDashboardModule({
     { id: 'yt',    label: 'YT' },
     { id: 'meta2', label: 'Meta 2.0' },
     { id: 'metatemp', label: 'Meta Temp' },
+    { id: 'tagmango', label: 'TagMango' },
   ];
+  /* Hide disabled workspaces (Settings → Workspace) from the filter. 'all'
+     always stays. If the active source gets turned off, fall back to 'all'. */
+  const { isEnabled } = useEnabledWorkspaces(token);
+  const visibleWorkspaceOpts = WORKSPACE_OPTS.filter((o) => o.id === 'all' || isEnabled(o.id));
+  useEffect(() => {
+    if (source !== 'all' && !isEnabled(source)) setSource('all');
+  }, [source, visibleWorkspaceOpts.length]); // eslint-disable-line react-hooks/exhaustive-deps
   /* Manager mode slots the "User" tab in just before Notifications and drops
      "Timer" — Timer lives in the Settings page (reached via the profile menu).
      Order: New Page · Leads · Leads Logic · User · Notifications.
@@ -186,24 +198,29 @@ export default function SalesDashboardModule({
     const i = list.findIndex(t => t.id === 'notifications');
     return i === -1 ? [...list, USER_TAB] : [...list.slice(0, i), USER_TAB, ...list.slice(i)];
   };
+  // Managers and TLs both get the FULL page set; the Access-panel toggles
+  // (crm_users.page_access) decide exactly which tabs each user sees. The
+  // super-admin (neither mode) always sees every tab.
   let tabs;
-  if (tlMode) {
-    // Drop the 'timer' and 'alerts' tabs from the TL view.
-    const tlVisible = TABS.filter(t => t.id !== 'timer' && t.id !== 'alerts');
-    tabs = withUserBeforeNotifications(tlVisible);
-  } else if (managerMode) {
-    // Manager subset: New Page, Leads, Leads Logic, User, Notifications.
-    // Timer/Alerts/Completed Calls are intentionally out.
-    const mgrIds = ['newpage', 'leads', 'logic', 'notifications'];
-    tabs = withUserBeforeNotifications(TABS.filter(t => mgrIds.includes(t.id)));
+  if (tlMode || managerMode) {
+    tabs = withUserBeforeNotifications(TABS); // every page + the User tab
   } else {
     tabs = TABS;
   }
 
-  /* Per-user page access — mirrors CallerShell. A manager/TL only sees the
-     pages left ON in the Access panel (crm_users.page_access). Default ON:
-     a missing key (or super-admin, who gets {}) means "shown". The 'user'
-     tab maps to the 'users' Access key; every other tab uses its own id. */
+  /* The workspace (source) filter scopes ONLY the four data pages below. The
+     other tabs (Notifications, Timer, Alerts, Access, Users) are common to all
+     workspaces, so they always run with source='all' and the dropdown is hidden
+     while they're active. */
+  const WORKSPACE_FILTER_TABS = ['newpage', 'leads', 'logic', 'completed_calls'];
+  const filterApplies   = WORKSPACE_FILTER_TABS.includes(tab);
+  const effectiveSource = filterApplies ? source : 'all';
+
+  /* Per-user page access — mirrors CallerShell. The pages a manager/TL sees are
+     driven entirely by crm_users.page_access (set in the Access panel). Default
+     ON: a missing key (or super-admin, who gets {}) means "shown", so toggling a
+     page ON/OFF directly shows/hides its tab. The 'user' tab maps to the 'users'
+     Access key; every other tab uses its own id. */
   const [pageAccess, setPageAccess] = useState({});
   useEffect(() => {
     if (!(tlMode || managerMode) || !token) return;
@@ -325,13 +342,18 @@ export default function SalesDashboardModule({
             );
           })}
         </div>
-        {/* Workspace dropdown — top-right of the tabs line (like Marketing), no label. */}
-        <div style={{ marginLeft: 'auto', flexShrink: 0, width: 160 }}>
-          <BrandSelect
-            value={source}
-            onChange={(v) => setSource(v)}
-            options={WORKSPACE_OPTS.map(o => ({ value: o.id, label: o.label }))}
-          />
+        {/* Workspace dropdown — top-right of the tabs line (like Marketing), no
+            label. Shown only on the four data pages it filters; the common pages
+            (Notifications / Timer / Alerts / Access / Users) hide it. The
+            marginLeft:auto spacer stays so the actions row keeps right-aligning. */}
+        <div style={{ marginLeft: 'auto', flexShrink: 0, width: filterApplies ? 160 : 0 }}>
+          {filterApplies && (
+            <BrandSelect
+              value={source}
+              onChange={(v) => setSource(v)}
+              options={visibleWorkspaceOpts.map(o => ({ value: o.id, label: o.label }))}
+            />
+          )}
         </div>
         <div
           ref={actionsSlotRef}
@@ -342,10 +364,10 @@ export default function SalesDashboardModule({
         )}
       </div>
 
-      {tab === 'newpage'       && <SalesNewPageView       token={token} source={source} />}
-      {tab === 'leads'         && <SalesLeadsTable        token={token} source={source} />}
-      {tab === 'logic'         && <SalesLeadsLogicView    token={token} source={source} />}
-      {tab === 'notifications' && <SalesNotificationsView token={token} source={source} />}
+      {tab === 'newpage'       && <SalesNewPageView       token={token} source={effectiveSource} />}
+      {tab === 'leads'         && <SalesLeadsTable        token={token} source={effectiveSource} />}
+      {tab === 'logic'         && <SalesLeadsLogicView    token={token} source={effectiveSource} />}
+      {tab === 'notifications' && <SalesNotificationsView token={token} source={effectiveSource} />}
       {tab === 'user'          && (
         <UsersModule
           token={token}
@@ -356,9 +378,9 @@ export default function SalesDashboardModule({
           actionsSlotEl={slotEl}
         />
       )}
-      {tab === 'completed_calls' && <SalesCompletedCallsView token={token} source={source} />}
-      {tab === 'timer'         && <SalesTimerView         token={token} source={source} readOnly={tlMode} />}
-      {tab === 'alerts'        && <SalesAlertsView        token={token} source={source} />}
+      {tab === 'completed_calls' && <SalesCompletedCallsView token={token} source={effectiveSource} />}
+      {tab === 'timer'         && <SalesTimerView         token={token} source={effectiveSource} readOnly={tlMode} />}
+      {tab === 'alerts'        && <SalesAlertsView        token={token} source={effectiveSource} />}
       {tab === 'access'        && <AccessView token={token} department="sales" pages={SALES_ACCESS_PAGES} pagesForUser={accessPagesForUser} />}
     </div>
   );

@@ -28,7 +28,7 @@ const validators = [
   body('language_pref').isIn(['tamil', 'english']),
 ];
 
-const ALLOWED_SOURCES = new Set(['meta', 'yt', 'meta2', 'metatemp']);
+const ALLOWED_SOURCES = new Set(['meta', 'yt', 'meta2', 'metatemp', 'tagmango']);
 function normalizeSource(value) {
   return ALLOWED_SOURCES.has(value) ? value : 'meta';
 }

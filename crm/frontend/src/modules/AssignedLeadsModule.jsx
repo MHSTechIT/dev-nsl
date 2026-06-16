@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Lottie from 'lottie-react';
 import LeadCallNoteModal from './LeadCallNoteModal';
+import CallerLeadsTable from '../components/CallerLeadsTable';
 // One robot everywhere — the same robot-idle.json the Call page uses.
 // (Kept the `happyBot*` names to avoid churn; it's the idle robot now.)
 import happyBotRaw     from '../assets/bot/robot-idle.json';
@@ -1198,7 +1199,9 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
         {autoError && (
           <div style={{ fontSize: '0.74rem', color: '#DC2626' }}>⚠ {autoError}</div>
         )}
-        {!autoActive ? (
+        {/* Auto-Call is hidden in the admin preview (no telephony there); the
+            real caller login still sees it. */}
+        {!previewMode && (!autoActive ? (
           <button
             onClick={startAutoMode}
             disabled={!leads.length}
@@ -1228,7 +1231,7 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
             Stop Auto-Call
           </button>
-        )}
+        ))}
       </div>
 
       {/* Error */}
@@ -1248,70 +1251,22 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
             subtitle="Your manager will assign leads here. Check back soon."
           />
         ) : (
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'Outfit, sans-serif' }}>
-              <thead>
-                <tr style={{ background: '#5B21B6', textAlign: 'left' }}>
-                  <th style={thStyle}>Name</th>
-                  <th style={thStyle}>Phone</th>
-                  <th style={thStyle}>Sugar</th>
-                  <th style={thStyle}>Webinar</th>
-                  <th style={thStyle}>Registered</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map(l => {
-                  const sugar = SUGAR_BADGE[l.sugar_level] || { bg: '#F3F4F6', fg: '#4B5563' };
-                  const followUpDue = l.last_note_outcome === 'follow_up'
-                                   && l.follow_up_at
-                                   && new Date(l.follow_up_at) <= new Date();
-                  return (
-                    <tr key={l.id}
-                      ref={el => { if (el) rowRefs.current[l.id] = el; else delete rowRefs.current[l.id]; }}
-                      style={{
-                      borderTop: '1px solid rgba(91,33,182,0.18)',
-                      background: followUpDue
-                        ? 'rgba(245,158,11,0.18)'
-                        : highlightId === l.id
-                          ? 'rgba(91,33,182,0.28)'
-                          : 'transparent',
-                      transition: 'background 800ms ease',
-                    }}>
-                      <td style={tdStyle}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                          <span style={{ fontWeight: 600, color: '#3B0764' }}>{l.full_name || '—'}</span>
-                          <SourceBadge source={l.source} />
-                          {followUpDue && (
-                            <span style={{
-                              display: 'inline-block', padding: '2px 8px', borderRadius: 50,
-                              background: 'rgba(245,158,11,0.18)', color: '#B45309',
-                              fontSize: '0.66rem', fontWeight: 700,
-                              textTransform: 'uppercase', letterSpacing: '0.04em',
-                              whiteSpace: 'nowrap',
-                            }}>
-                              Follow-up due
-                            </span>
-                          )}
-                        </div>
-                        <div style={{ fontSize: '0.72rem', color: 'rgba(91,33,182,0.55)' }}>{l.email || '—'}</div>
-                      </td>
-                      <td style={{ ...tdStyle, fontFamily: 'ui-monospace, monospace', fontSize: '0.80rem' }}>
-                        {fmtPhone(l.whatsapp_number)}
-                      </td>
-                      <td style={tdStyle}>
-                        <span style={badgeStyle(sugar)}>{l.sugar_level || '—'}</span>
-                      </td>
-                      <td style={{ ...tdStyle, fontSize: '0.82rem', color: '#3B0764', fontWeight: 600 }}>
-                        {l.webinar_name || '—'}
-                      </td>
-                      <td style={{ ...tdStyle, fontSize: '0.78rem', color: 'rgba(91,33,182,0.65)' }}>
-                        {fmtDate(l.created_at)}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <div style={{ background: '#fff', borderRadius: 8 }}>
+            <CallerLeadsTable
+              leads={filtered}
+              onRowClick={previewMode ? undefined : (l) => setEditLead(l)}
+              rowRef={(l, el) => { if (el) rowRefs.current[l.id] = el; else delete rowRefs.current[l.id]; }}
+              rowStyle={(l) => {
+                const followUpDue = l.last_note_outcome === 'follow_up' && l.follow_up_at && new Date(l.follow_up_at) <= new Date();
+                return {
+                  background: followUpDue
+                    ? 'rgba(245,158,11,0.18)'
+                    : highlightId === l.id
+                      ? 'rgba(91,33,182,0.28)'
+                      : 'transparent',
+                };
+              }}
+            />
           </div>
         )}
       </div>
@@ -1965,66 +1920,9 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
               {queueEndReason === 'auto_finished' ? 'Queue complete' : 'No leads in your queue'}
             </h3>
             <p style={{ margin: '6px 0 18px', fontSize: '0.84rem', color: 'rgba(91,33,182,0.65)', textAlign: 'center' }}>
-              {queueEndReason === 'auto_finished'
-                ? 'Will you take any more calls? Add some from a bucket below and we’ll start auto-calling right away.'
-                : 'Your Assigned page is empty. Pull leads from another bucket and we’ll start auto-calling right away.'}
+              You have no leads now. Please contact your team leader to get leads assigned.
             </p>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <button
-                onClick={() => reopenFrom('missed')}
-                disabled={!!reopening}
-                style={{
-                  height: '2.9rem', borderRadius: 12, border: 'none',
-                  background: reopening === 'missed' ? 'rgba(91,33,182,0.45)' : '#5B21B6',
-                  color: '#fff', fontWeight: 700, fontSize: '0.92rem',
-                  cursor: reopening ? 'wait' : 'pointer',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-                  boxShadow: '0 4px 14px rgba(91,33,182,0.30)',
-                }}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
-                </svg>
-                {reopening === 'missed' ? 'Moving…' : 'Missed Calls'}
-              </button>
-              <button
-                onClick={() => reopenFrom('dnp')}
-                disabled={!!reopening}
-                style={{
-                  height: '2.9rem', borderRadius: 12,
-                  border: '1px solid rgba(91,33,182,0.25)',
-                  background: reopening === 'dnp' ? 'rgba(237,234,248,0.80)' : '#fff',
-                  color: '#5B21B6', fontWeight: 700, fontSize: '0.92rem',
-                  cursor: reopening ? 'wait' : 'pointer',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-                }}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z" transform="rotate(135 12 12)"/>
-                  <line x1="2" y1="22" x2="22" y2="2"/>
-                </svg>
-                {reopening === 'dnp' ? 'Moving…' : 'Not Picked (DNP)'}
-              </button>
-              <button
-                onClick={() => reopenFrom('untouched')}
-                disabled={!!reopening}
-                title="Coming soon — the Untouched bucket definition is pending."
-                style={{
-                  height: '2.9rem', borderRadius: 12,
-                  border: '1px dashed rgba(91,33,182,0.30)',
-                  background: reopening === 'untouched' ? 'rgba(237,234,248,0.80)' : '#fff',
-                  color: 'rgba(91,33,182,0.65)', fontWeight: 700, fontSize: '0.92rem',
-                  cursor: reopening ? 'wait' : 'pointer',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-                }}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="12" cy="12" r="10"/>
-                  <line x1="12" y1="8" x2="12" y2="12"/>
-                  <line x1="12" y1="16" x2="12.01" y2="16"/>
-                </svg>
-                {reopening === 'untouched' ? 'Checking…' : 'Untouched (soon)'}
-              </button>
               <button
                 onClick={() => { setQueueEndOpen(false); setQueueEndDismissed(true); }}
                 disabled={!!reopening}

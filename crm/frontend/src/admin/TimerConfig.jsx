@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import DateTimePicker from './DateTimePicker';
+import { isMetaTempLike } from '../utils/workspaceFlags';
 
 function toLocalDatetimeValue(isoString) {
   if (!isoString) return '';
@@ -30,119 +31,93 @@ function fromLocalDatetimeValue(localVal) {
   return new Date(Date.UTC(y, mo - 1, d, h, m) - 5.5 * 60 * 60 * 1000).toISOString();
 }
 
-function fmtIST(iso) {
-  if (!iso) return '';
-  return new Date(iso).toLocaleString('en-IN', {
-    timeZone: 'Asia/Kolkata',
-    day: 'numeric', month: 'short', year: 'numeric',
-    hour: '2-digit', minute: '2-digit', hour12: true,
-  });
-}
-
-/* ── Webinar Session Card ── */
-function WebinarCard({ webinar }) {
-  const isFuture = webinar.webinar_at && new Date(webinar.webinar_at) > new Date();
-  const status = webinar.is_active ? 'active' : isFuture ? 'upcoming' : 'inactive';
-  const statusStyle = {
-    active:   { bg: 'rgba(5,150,105,0.10)',  color: '#059669', dot: '#059669', label: 'Active' },
-    upcoming: { bg: 'rgba(37,99,235,0.10)',  color: '#2563EB', dot: '#3B82F6', label: 'Upcoming' },
-    inactive: { bg: 'rgba(156,163,175,0.12)', color: '#9CA3AF', dot: '#D1D5DB', label: 'Inactive' },
-  }[status];
-
+/* Multi-select dropdown for linking a webinar to Meta lead forms (Meta Temp)
+   or TagMango memberships (TagMango). Defined at MODULE scope — not inside
+   TimerConfig — so it does NOT remount on every parent re-render; otherwise the
+   panel would snap shut after each pick. `scope` = 'current' | 'next'. */
+function MetaFormSelect({ scope, value, onChange, options = [], isTagmango = false }) {
+  const noun  = isTagmango ? 'TagMango membership' : 'Meta lead forms';
+  const label = `${noun} (${scope === 'next' ? 'next' : 'current'} webinar)`;
   return (
-    <div className="timer-session-card" style={{
-      borderRadius: 14,
-      border: webinar.is_active
-        ? '1.5px solid rgba(91,33,182,0.35)'
-        : status === 'upcoming'
-          ? '1.5px solid rgba(37,99,235,0.25)'
-          : '1px solid rgba(147,51,234,0.10)',
-      background: webinar.is_active ? 'rgba(237,234,248,0.55)' : '#fff',
-      padding: '14px 16px',
-      display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
-      transition: 'all 200ms',
-    }}>
-      <div style={{ minWidth: 0 }}>
-        {/* Status badge */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-          <span style={{
-            display: 'inline-flex', alignItems: 'center', gap: 4,
-            padding: '2px 8px', borderRadius: 20,
-            fontFamily: 'Outfit, sans-serif', fontSize: '0.65rem', fontWeight: 700,
-            letterSpacing: '0.06em', textTransform: 'uppercase',
-            background: statusStyle.bg,
-            color: statusStyle.color,
-          }}>
-            <span style={{
-              width: 5, height: 5, borderRadius: '50%',
-              background: statusStyle.dot,
-              display: 'inline-block',
-            }} />
-            {statusStyle.label}
-          </span>
-        </div>
-
-        {/* Name + Date/time */}
-        <div style={{
-          fontFamily: 'Outfit, sans-serif', fontSize: '0.88rem', fontWeight: 700,
-          color: '#3B0764', lineHeight: 1.3,
-        }}>
-          {webinar.name ? (
-            <>
-              {webinar.name.replace(/^AWS-/, 'AWS - ')}
-              <span style={{
-                fontSize: '0.72rem', fontWeight: 500, fontStyle: 'italic',
-                color: 'rgba(91,33,182,0.70)', marginLeft: 6,
-              }}>
-                ({fmtIST(webinar.webinar_at)} IST)
-              </span>
-            </>
-          ) : (
-            `${fmtIST(webinar.webinar_at)} IST`
-          )}
-        </div>
-
-        {/* Created at */}
-        <div style={{
-          fontFamily: 'Outfit, sans-serif', fontSize: '0.68rem',
-          color: 'rgba(91,33,182,0.40)', marginTop: 2,
-        }}>
-          Created {fmtIST(webinar.created_at)}
-        </div>
-      </div>
-
-      {/* Lead count badge */}
-      <div style={{
-        flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'center',
-        background: webinar.is_active ? '#5B21B6' : 'rgba(91,33,182,0.08)',
-        borderRadius: 12, padding: '8px 14px', minWidth: 60,
-      }}>
-        <span style={{
-          fontFamily: 'Outfit, sans-serif', fontSize: '1.3rem', fontWeight: 800,
-          color: webinar.is_active ? '#fff' : '#5B21B6', lineHeight: 1,
-        }}>
-          {webinar.lead_count}
-        </span>
-        <span style={{
-          fontFamily: 'Outfit, sans-serif', fontSize: '0.60rem', fontWeight: 600,
-          color: webinar.is_active ? 'rgba(255,255,255,0.70)' : 'rgba(91,33,182,0.50)',
-          textTransform: 'uppercase', letterSpacing: '0.06em', marginTop: 2,
-        }}>
-          Leads
-        </span>
-      </div>
+    <div style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid rgba(209,196,240,0.45)' }}>
+      <p className="font-sans text-xs text-purple-400 mb-2" style={{ fontWeight: 600 }}>
+        {label}
+        <span style={{ color: 'rgba(91,33,182,0.45)', fontWeight: 500 }}> · {value.length} selected of {options.length}{isTagmango ? '' : ' active'}</span>
+      </p>
+      <BrandSelect
+        multiple
+        value={value}
+        onChange={onChange}
+        options={options}
+        searchable
+        searchPlaceholder={isTagmango ? 'Search memberships…' : 'Search forms…'}
+        placeholder={isTagmango ? 'Select membership…' : 'Select forms…'}
+      />
     </div>
   );
 }
 
-/* ── Skeleton Card ── */
-function SkeletonCard() {
+/* Inline editable display-name for a webinar slot.
+   - When the slot already has a saved name → shows "(AWS - 101)" + a pencil to
+     rename it.
+   - When the slot has NO name yet (unnamed or not-yet-created webinar) → shows a
+     blank input so a name can be typed.
+   `existing` is the persisted name (drives read vs. blank mode); `value`/`onChange`
+   bind to the parent's editable state; `onCommit` persists the name immediately. */
+function WebinarNameEditor({ existing, value, onChange, onCommit, accent }) {
+  const [editing, setEditing] = useState(false);
+  const [busy, setBusy]       = useState(false);
+  const fmt = (n) => (n ? n.replace(/^AWS-/, 'AWS - ') : '');
+  const showInput = editing || !existing;
+
+  async function commit() {
+    setBusy(true);
+    try { await onCommit(); } finally { setBusy(false); setEditing(false); }
+  }
+  function cancel() { onChange(existing || ''); setEditing(false); }
+
+  const iconBtn = (extra = {}) => ({
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    width: 22, height: 22, borderRadius: 6, border: 'none', cursor: 'pointer',
+    background: 'transparent', color: accent, padding: 0, ...extra,
+  });
+
+  if (!showInput) {
+    return (
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, marginLeft: 6, verticalAlign: 'middle' }}>
+        <span style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', fontWeight: 700, color: accent }}>
+          ({fmt(existing)})
+        </span>
+        <button type="button" title="Rename webinar" onClick={(e) => { e.preventDefault(); setEditing(true); }} style={iconBtn()}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+          </svg>
+        </button>
+      </span>
+    );
+  }
+
   return (
-    <div style={{
-      borderRadius: 14, border: '1px solid rgba(147,51,234,0.08)',
-      background: 'rgba(237,234,248,0.45)', padding: '14px 16px', height: 88,
-      animation: 'timerPulse 1.4s ease-in-out infinite',
-    }} />
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, marginLeft: 6, verticalAlign: 'middle' }}>
+      <input
+        type="text"
+        value={value}
+        autoFocus={editing}
+        maxLength={80}
+        placeholder="Name e.g. AWS - 101"
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } else if (e.key === 'Escape') cancel(); }}
+        style={{ width: 140, padding: '3px 8px', borderRadius: 6, border: `1px solid ${accent}66`, fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', fontWeight: 600, color: '#3B0764', outline: 'none' }}
+      />
+      <button type="button" title="Save name" onClick={(e) => { e.preventDefault(); commit(); }} disabled={busy} style={iconBtn({ opacity: busy ? 0.5 : 1 })}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+      </button>
+      {editing && existing && (
+        <button type="button" title="Cancel" onClick={(e) => { e.preventDefault(); cancel(); }} style={iconBtn({ color: 'rgba(91,33,182,0.45)' })}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      )}
+    </span>
   );
 }
 
@@ -153,16 +128,21 @@ export default function TimerConfig({ token, source = 'meta' }) {
   const [currentWebinarDate, setCurrentWebinarDate] = useState(''); // actual webinar date (current_webinar_date)
   const [nextWebinar, setNextWebinar] = useState('');               // upcoming registration deadline (backup_webinar_at)
   const [nextWebinarDate, setNextWebinarDate] = useState('');       // upcoming actual webinar date (next_webinar_date)
+  const [currentName, setCurrentName] = useState('');               // editable display name for the active webinar
+  const [nextName, setNextName] = useState('');                     // editable display name for the upcoming webinar
   const [saving, setSaving] = useState(false);
+  const [fetching, setFetching] = useState(false); // Meta lead pull in progress
   const [toast, setToast] = useState(null);
 
   /* Meta lead-gen form linkage — only shown/used in the Meta Temp workspace.
      Multiple forms can be linked per webinar; stored as a JSON array string in
      the current_form_id / next_form_id columns. */
-  const showForms = source === 'metatemp';
+  const showForms = isMetaTempLike(source);
+  const isTagmango = source === 'tagmango';
   const [currentFormIds, setCurrentFormIds] = useState([]);
   const [nextFormIds, setNextFormIds]       = useState([]);
   const [forms, setForms]                   = useState([]);
+  const [memberships, setMemberships]       = useState([]); // TagMango "mangos"
   // Meta Temp extras: actual webinar date/time + webinar (Zoom) link, per webinar.
   const [currentWebinarDT, setCurrentWebinarDT]     = useState('');
   const [currentWebinarLink, setCurrentWebinarLink] = useState('');
@@ -186,39 +166,31 @@ export default function TimerConfig({ token, source = 'meta' }) {
       });
   }, [source]);
 
-  /* Load the Meta lead-gen form list for the dropdowns (Meta Temp only). */
+  /* Load the linkable list for the dropdowns: Meta lead-gen forms for Meta
+     Temp, or TagMango memberships ("mangos") for the TagMango workspace. */
   useEffect(() => {
-    if (!showForms) { setForms([]); return; }
-    fetch('/api/admin/meta-leadgen-forms', { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.json())
-      .then(d => setForms(d.forms || []))
-      .catch(() => setForms([]));
-  }, [showForms, token]);
+    if (!showForms) { setForms([]); setMemberships([]); return; }
+    if (isTagmango) {
+      fetch('/api/admin/tagmango-memberships', { headers: { Authorization: `Bearer ${token}` } })
+        .then(r => r.json())
+        .then(d => setMemberships(d.memberships || []))
+        .catch(() => setMemberships([]));
+    } else {
+      fetch('/api/admin/meta-leadgen-forms', { headers: { Authorization: `Bearer ${token}` } })
+        .then(r => r.json())
+        .then(d => setForms(d.forms || []))
+        .catch(() => setForms([]));
+    }
+  }, [showForms, isTagmango, token]);
 
   /* Only ACTIVE Meta forms are offered for linking. */
   const activeForms = forms.filter(f => String(f.status || '').toUpperCase() === 'ACTIVE');
 
-  /* Reusable multi-select Meta-form dropdown for a webinar card. */
-  function MetaFormSelect({ label, value, onChange }) {
-    const options = activeForms.map((f) => ({ value: String(f.id), label: `${f.name || f.id}${f.page_name ? ` · ${f.page_name}` : ''}` }));
-    return (
-      <div style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid rgba(209,196,240,0.45)' }}>
-        <p className="font-sans text-xs text-purple-400 mb-2" style={{ fontWeight: 600 }}>
-          {label}
-          <span style={{ color: 'rgba(91,33,182,0.45)', fontWeight: 500 }}> · {value.length} selected of {activeForms.length} active</span>
-        </p>
-        <BrandSelect
-          multiple
-          value={value}
-          onChange={onChange}
-          options={options}
-          searchable
-          searchPlaceholder="Search forms…"
-          placeholder="Select forms…"
-        />
-      </div>
-    );
-  }
+  /* Options for the linkable dropdown — Meta lead forms (Meta Temp) or TagMango
+     memberships (TagMango). Computed once and passed to each card's picker. */
+  const linkOptions = isTagmango
+    ? memberships.map((m) => ({ value: String(m.id), label: m.title || m.id }))
+    : activeForms.map((f) => ({ value: String(f.id), label: `${f.name || f.id}${f.page_name ? ` · ${f.page_name}` : ''}` }));
 
   /* ── Right-side state ── */
   const [webinars, setWebinars]           = useState([]);
@@ -231,7 +203,15 @@ export default function TimerConfig({ token, source = 'meta' }) {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();
-      setWebinars(data.webinars || []);
+      const ws = data.webinars || [];
+      setWebinars(ws);
+      // Seed the editable name fields from the active / upcoming webinar rows.
+      const active = ws.find(w => w.is_active);
+      const upcoming = ws
+        .filter(w => !w.is_active && w.webinar_at && new Date(w.webinar_at) > new Date())
+        .sort((a, b) => new Date(a.webinar_at) - new Date(b.webinar_at))[0];
+      setCurrentName(active?.name || '');
+      setNextName(upcoming?.name || '');
     } catch (_) {
       setWebinars([]);
     } finally {
@@ -248,6 +228,23 @@ export default function TimerConfig({ token, source = 'meta' }) {
     .sort((a, b) => new Date(a.webinar_at) - new Date(b.webinar_at))[0];
   const fmtName = n => n ? n.replace(/^AWS-/, 'AWS - ') : '';
 
+  /* Persist a single webinar name immediately (inline pencil-rename). `field`
+     is 'current_webinar_name' or 'next_webinar_name'. */
+  async function saveWebinarName(field, name) {
+    const res = await fetch('/api/admin/webinar-config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ source, [field]: name.trim() }),
+    });
+    if (res.ok) {
+      await fetchWebinars();
+      setToast({ ok: true, msg: 'Webinar name saved.' });
+    } else {
+      setToast({ ok: false, msg: 'Failed to save webinar name.' });
+    }
+    setTimeout(() => setToast(null), 3000);
+  }
+
   /* ── Save handler ── */
   async function handleSave() {
     setSaving(true);
@@ -257,6 +254,10 @@ export default function TimerConfig({ token, source = 'meta' }) {
     if (currentWebinarDate) body.current_webinar_date = fromLocalDatetimeValue(currentWebinarDate);
     if (nextWebinar)        body.backup_webinar_at    = fromLocalDatetimeValue(nextWebinar);
     if (nextWebinarDate)    body.next_webinar_date    = fromLocalDatetimeValue(nextWebinarDate);
+    // Custom display names — applied to the active / upcoming webinar rows. Sent
+    // alongside dates so naming a not-yet-created webinar works in one save.
+    body.current_webinar_name = currentName.trim();
+    body.next_webinar_name    = nextName.trim();
     // Persist Meta form linkage (Meta Temp only) as a JSON array of form ids.
     if (showForms) {
       body.current_form_id = JSON.stringify(currentFormIds);
@@ -278,6 +279,50 @@ export default function TimerConfig({ token, source = 'meta' }) {
 
     // Refresh webinar list after save
     if (res.ok) fetchWebinars();
+
+    // Meta Temp: after saving the window + forms, pull the matching leads from
+    // Meta right away (the user's "select dates + forms → fetch" flow).
+    if (res.ok && source === 'metatemp' && currentFormIds.length) {
+      await fetchMetaLeads();
+    }
+  }
+
+  /* Pull lead-gen leads from Meta for the current forms within [Start, End].
+     Meta-Temp (Meta lead forms) only — TagMango memberships aren't lead forms.
+     Runs on Save and from the explicit "Fetch from Meta" button. */
+  async function fetchMetaLeads() {
+    if (isTagmango) return;
+    if (!currentFormIds.length) {
+      setToast({ ok: false, msg: 'Select at least one Meta lead form first.' });
+      setTimeout(() => setToast(null), 3500);
+      return;
+    }
+    setFetching(true);
+    try {
+      const res = await fetch('/api/admin/leads/fetch-meta', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          source,
+          form_ids: currentFormIds,
+          since: currentWebinar ? fromLocalDatetimeValue(currentWebinar) : undefined,
+          until: currentWebinarDate ? fromLocalDatetimeValue(currentWebinarDate) : undefined,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        const dup = data.skipped_duplicates ? ` · ${data.skipped_duplicates} already imported` : '';
+        const errs = (data.errors && data.errors.length) ? ` · ${data.errors.length} form(s) had errors` : '';
+        setToast({ ok: true, msg: `Fetched ${data.inserted} new lead${data.inserted !== 1 ? 's' : ''} from Meta${dup}${errs}.` });
+      } else {
+        setToast({ ok: false, msg: data.error || 'Failed to fetch leads from Meta.' });
+      }
+    } catch {
+      setToast({ ok: false, msg: 'Network error while fetching leads.' });
+    } finally {
+      setFetching(false);
+      setTimeout(() => setToast(null), 6000);
+    }
   }
 
   /* ── Layout pieces (rendered in different arrangements per workspace) ── */
@@ -306,14 +351,13 @@ export default function TimerConfig({ token, source = 'meta' }) {
         </span>
         <label className="font-sans font-semibold text-purple-900 text-sm" style={{ margin: 0 }}>
           Current Webinar
-          {activeWebinar?.name && (
-            <span style={{
-              fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', fontWeight: 700,
-              color: '#059669', marginLeft: 6,
-            }}>
-              ({fmtName(activeWebinar.name)})
-            </span>
-          )}
+          <WebinarNameEditor
+            existing={activeWebinar?.name || ''}
+            value={currentName}
+            onChange={setCurrentName}
+            onCommit={() => saveWebinarName('current_webinar_name', currentName)}
+            accent="#059669"
+          />
         </label>
       </div>
       <p className="font-sans text-xs text-purple-400 mb-3">{showForms ? 'Start Date' : 'Registration countdown ends in'}</p>
@@ -333,7 +377,7 @@ export default function TimerConfig({ token, source = 'meta' }) {
         )}
       </div>
       {showForms && (
-        <MetaFormSelect label="Meta lead forms (current webinar)" value={currentFormIds} onChange={setCurrentFormIds} />
+        <MetaFormSelect scope="current" value={currentFormIds} onChange={setCurrentFormIds} options={linkOptions} isTagmango={isTagmango} />
       )}
     </div>
   );
@@ -354,14 +398,13 @@ export default function TimerConfig({ token, source = 'meta' }) {
       </div>
       <label className="block font-sans font-semibold text-purple-900 text-sm mb-1">
         Next Webinar
-        {upcomingWebinar?.name && (
-          <span style={{
-            fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', fontWeight: 700,
-            color: '#2563EB', marginLeft: 6,
-          }}>
-            ({fmtName(upcomingWebinar.name)})
-          </span>
-        )}
+        <WebinarNameEditor
+          existing={upcomingWebinar?.name || ''}
+          value={nextName}
+          onChange={setNextName}
+          onCommit={() => saveWebinarName('next_webinar_name', nextName)}
+          accent="#2563EB"
+        />
       </label>
       <p className="font-sans text-xs text-purple-400 mb-3">{showForms ? 'Start Date' : 'Auto-switches when current webinar ends'}</p>
       <DateTimePicker value={nextWebinar} onChange={setNextWebinar} />
@@ -380,7 +423,7 @@ export default function TimerConfig({ token, source = 'meta' }) {
         )}
       </div>
       {showForms && (
-        <MetaFormSelect label="Meta lead forms (next webinar)" value={nextFormIds} onChange={setNextFormIds} />
+        <MetaFormSelect scope="next" value={nextFormIds} onChange={setNextFormIds} options={linkOptions} isTagmango={isTagmango} />
       )}
     </div>
   );
@@ -411,85 +454,6 @@ export default function TimerConfig({ token, source = 'meta' }) {
         </span>
       )}
     </div>
-  );
-
-  const sessionsPanel = (
-    <>
-      <div style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        marginBottom: 14,
-      }}>
-        <div>
-          <h3 style={{
-            fontFamily: 'Outfit, sans-serif', fontSize: '1.05rem',
-            fontWeight: 800, color: '#3B0764', margin: 0,
-          }}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#5B21B6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'inline', verticalAlign: '-3px', marginRight: 6 }}>
-              <rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>
-            </svg>
-            Webinar Sessions
-          </h3>
-          <p style={{
-            fontFamily: 'Outfit, sans-serif', fontSize: '0.72rem',
-            color: 'rgba(91,33,182,0.45)', margin: '2px 0 0',
-          }}>
-            Each session tracks its own leads
-          </p>
-        </div>
-        <button
-          onClick={fetchWebinars}
-          style={{
-            padding: '5px 12px', borderRadius: 8, border: 'none',
-            background: 'rgba(91,33,182,0.08)', color: '#5B21B6',
-            fontFamily: 'Outfit, sans-serif', fontSize: '0.75rem', fontWeight: 600,
-            cursor: 'pointer',
-          }}
-        >
-          ↻
-        </button>
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 560, overflowY: 'auto', paddingRight: 4 }}>
-        {webinarsLoading ? (
-          <>
-            <SkeletonCard />
-            <SkeletonCard />
-          </>
-        ) : webinars.length === 0 ? (
-          <div style={{
-            borderRadius: 14, border: '1px dashed rgba(147,51,234,0.20)',
-            padding: '28px 20px', textAlign: 'center',
-          }}>
-            <div style={{ marginBottom: 8, display: 'flex', justifyContent: 'center' }}>
-              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="rgba(91,33,182,0.40)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>
-              </svg>
-            </div>
-            <p style={{
-              fontFamily: 'Outfit, sans-serif', fontSize: '0.82rem',
-              fontWeight: 600, color: 'rgba(91,33,182,0.50)', margin: 0,
-            }}>
-              No webinar sessions yet.
-            </p>
-            <p style={{
-              fontFamily: 'Outfit, sans-serif', fontSize: '0.72rem',
-              color: 'rgba(91,33,182,0.35)', margin: '4px 0 0',
-            }}>
-              Pick a date on the left and click "Save Settings".
-            </p>
-          </div>
-        ) : (
-          [...webinars].sort((a, b) => {
-            const numOf = (w) => {
-              const m = /(\d+)\s*$/.exec(w.name || '');
-              return m ? parseInt(m[1], 10) : -Infinity;
-            };
-            const na = numOf(a), nb = numOf(b);
-            if (na !== nb) return nb - na;
-            return String(b.name || '').localeCompare(String(a.name || ''));
-          }).map(w => <WebinarCard key={w.id} webinar={w} />)
-        )}
-      </div>
-    </>
   );
 
   return (
@@ -529,14 +493,13 @@ export default function TimerConfig({ token, source = 'meta' }) {
                 </span>
                 <label className="font-sans font-semibold text-purple-900 text-sm" style={{ margin: 0 }}>
                   Current Webinar
-                  {activeWebinar?.name && (
-                    <span style={{
-                      fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', fontWeight: 700,
-                      color: '#059669', marginLeft: 6,
-                    }}>
-                      ({fmtName(activeWebinar.name)})
-                    </span>
-                  )}
+                  <WebinarNameEditor
+                    existing={activeWebinar?.name || ''}
+                    value={currentName}
+                    onChange={setCurrentName}
+                    onCommit={() => saveWebinarName('current_webinar_name', currentName)}
+                    accent="#059669"
+                  />
                 </label>
               </div>
               <p className="font-sans text-xs text-purple-400 mb-3">{showForms ? 'Start Date' : 'Registration countdown ends in'}</p>
@@ -559,7 +522,7 @@ export default function TimerConfig({ token, source = 'meta' }) {
               </div>
 
               {showForms && (
-                <MetaFormSelect label="Meta lead forms (current webinar)" value={currentFormIds} onChange={setCurrentFormIds} />
+                <MetaFormSelect scope="current" value={currentFormIds} onChange={setCurrentFormIds} options={linkOptions} isTagmango={isTagmango} />
               )}
               <div style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid rgba(209,196,240,0.45)' }}>
                 <p className="font-sans text-xs text-purple-400 mb-2" style={{ fontWeight: 600 }}>Webinar Date &amp; Time</p>
@@ -594,6 +557,30 @@ export default function TimerConfig({ token, source = 'meta' }) {
                   </>
                 ) : 'Save Settings'}
               </button>
+              {!isTagmango && (
+                <button
+                  onClick={fetchMetaLeads}
+                  disabled={fetching || saving}
+                  title="Pull leads from the selected Meta forms within the Start–End window"
+                  className="inline-flex items-center gap-2 font-sans font-semibold px-5 py-2.5 rounded-pill disabled:opacity-50 transition-colors"
+                  style={{ border: '1.5px solid rgba(5,150,105,0.45)', background: 'rgba(236,253,245,0.85)', color: '#059669' }}
+                >
+                  {fetching ? (
+                    <>
+                      <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+                      </svg>
+                      Fetching…
+                    </>
+                  ) : (
+                    <>
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 1 1-9-9"/><polyline points="21 3 21 9 15 9"/></svg>
+                      Fetch from Meta
+                    </>
+                  )}
+                </button>
+              )}
               {toast && (
                 <span className={`font-sans text-sm font-medium ${toast.ok ? 'text-brand-green' : 'text-red-500'}`}>
                   {toast.ok
@@ -624,14 +611,13 @@ export default function TimerConfig({ token, source = 'meta' }) {
             </div>
             <label className="block font-sans font-semibold text-purple-900 text-sm mb-1">
               Next Webinar
-              {upcomingWebinar?.name && (
-                <span style={{
-                  fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', fontWeight: 700,
-                  color: '#2563EB', marginLeft: 6,
-                }}>
-                  ({fmtName(upcomingWebinar.name)})
-                </span>
-              )}
+              <WebinarNameEditor
+                existing={upcomingWebinar?.name || ''}
+                value={nextName}
+                onChange={setNextName}
+                onCommit={() => saveWebinarName('next_webinar_name', nextName)}
+                accent="#2563EB"
+              />
             </label>
             <p className="font-sans text-xs text-purple-400 mb-3">{showForms ? 'Start Date' : 'Auto-switches when current webinar ends'}</p>
             <DateTimePicker value={nextWebinar} onChange={setNextWebinar} />
@@ -653,7 +639,7 @@ export default function TimerConfig({ token, source = 'meta' }) {
             </div>
 
             {showForms && (
-              <MetaFormSelect label="Meta lead forms (next webinar)" value={nextFormIds} onChange={setNextFormIds} />
+              <MetaFormSelect scope="next" value={nextFormIds} onChange={setNextFormIds} options={linkOptions} isTagmango={isTagmango} />
             )}
             <div style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid rgba(209,196,240,0.45)' }}>
               <p className="font-sans text-xs text-purple-400 mb-2" style={{ fontWeight: 600 }}>Webinar Date &amp; Time</p>
@@ -673,105 +659,17 @@ export default function TimerConfig({ token, source = 'meta' }) {
         </div>
       </div>
 
-      {/* ══ BOTTOM — Webinar Sessions (full width) ══ */}
-      <div className="bg-white rounded-card border border-purple-100 p-5">
-          {/* Header */}
-          <div style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            marginBottom: 14,
-          }}>
-            <div>
-              <h3 style={{
-                fontFamily: 'Outfit, sans-serif', fontSize: '1.05rem',
-                fontWeight: 800, color: '#3B0764', margin: 0,
-              }}>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#5B21B6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'inline', verticalAlign: '-3px', marginRight: 6 }}>
-                  <rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>
-                </svg>
-                Webinar Sessions
-              </h3>
-              <p style={{
-                fontFamily: 'Outfit, sans-serif', fontSize: '0.72rem',
-                color: 'rgba(91,33,182,0.45)', margin: '2px 0 0',
-              }}>
-                Each session tracks its own leads
-              </p>
-            </div>
-            <button
-              onClick={fetchWebinars}
-              style={{
-                padding: '5px 12px', borderRadius: 8, border: 'none',
-                background: 'rgba(91,33,182,0.08)', color: '#5B21B6',
-                fontFamily: 'Outfit, sans-serif', fontSize: '0.75rem', fontWeight: 600,
-                cursor: 'pointer',
-              }}
-            >
-              ↻
-            </button>
-          </div>
-
-          {/* List */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {webinarsLoading ? (
-              <>
-                <SkeletonCard />
-                <SkeletonCard />
-              </>
-            ) : webinars.length === 0 ? (
-              <div style={{
-                borderRadius: 14, border: '1px dashed rgba(147,51,234,0.20)',
-                padding: '28px 20px', textAlign: 'center',
-              }}>
-                <div style={{ marginBottom: 8, display: 'flex', justifyContent: 'center' }}>
-                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="rgba(91,33,182,0.40)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>
-                  </svg>
-                </div>
-                <p style={{
-                  fontFamily: 'Outfit, sans-serif', fontSize: '0.82rem',
-                  fontWeight: 600, color: 'rgba(91,33,182,0.50)', margin: 0,
-                }}>
-                  No webinar sessions yet.
-                </p>
-                <p style={{
-                  fontFamily: 'Outfit, sans-serif', fontSize: '0.72rem',
-                  color: 'rgba(91,33,182,0.35)', margin: '4px 0 0',
-                }}>
-                  Pick a date on the left and click "Save Settings".
-                </p>
-              </div>
-            ) : (
-              /* Sort by the numeric suffix in the webinar name, DESCENDING —
-                 highest number on top (YT-105), lowest at the bottom (YT-101).
-                 Falls back to alphabetic compare on the raw name when there's
-                 no number to parse, so unnamed rows still sort deterministically. */
-              [...webinars].sort((a, b) => {
-                const numOf = (w) => {
-                  const m = /(\d+)\s*$/.exec(w.name || '');
-                  return m ? parseInt(m[1], 10) : -Infinity;
-                };
-                const na = numOf(a), nb = numOf(b);
-                if (na !== nb) return nb - na;
-                return String(b.name || '').localeCompare(String(a.name || ''));
-              }).map(w => <WebinarCard key={w.id} webinar={w} />)
-            )}
-          </div>
-        </div>
-
       </div>
       ) : (
-      /* ══ Other workspaces — original layout: Current + Upcoming stacked left, Sessions right ══ */
+      /* ══ Other workspaces — Current + Upcoming + Save (Sessions moved to Zoom page) ══ */
         <div className="timer-layout" style={{ display: 'flex', gap: 28, alignItems: 'flex-start', flexWrap: 'wrap' }}>
-          <div className="timer-left" style={{ flex: '0 0 420px', minWidth: 280 }}>
+          <div className="timer-left" style={{ flex: '1 1 420px', minWidth: 280 }}>
             <div className="space-y-5">
               {timerHeader}
               {currentCard}
               {nextCard}
               {saveRow}
             </div>
-          </div>
-          <div className="timer-right" style={{ flex: 1, minWidth: 260 }}>
-            {sessionsPanel}
           </div>
         </div>
       )}

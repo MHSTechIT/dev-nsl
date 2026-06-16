@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import CallerLeadsTable from '../components/CallerLeadsTable';
 import SourceBadge from '../components/SourceBadge';
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -142,25 +143,6 @@ export default function NextBatchModule({ jwt, onCount, previewMode = false }) {
       )}
 
       <div className="bg-white rounded-card shadow-card" style={{ padding: 0, overflow: 'hidden' }}>
-        {/* Header row */}
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'minmax(180px,1.4fr) minmax(140px,1fr) 110px minmax(140px,1fr) minmax(140px,auto)',
-          alignItems: 'center', gap: 14,
-          padding: '12px 18px',
-          background: 'rgba(237,234,248,0.50)',
-          fontFamily: 'Outfit, sans-serif',
-          fontSize: '0.68rem', fontWeight: 800, letterSpacing: '0.06em',
-          textTransform: 'uppercase', color: 'rgba(91,33,182,0.55)',
-          borderBottom: '1px solid rgba(209,196,240,0.40)',
-        }}>
-          <div>Name</div>
-          <div>Phone</div>
-          <div>Sugar</div>
-          <div>Webinar</div>
-          <div>Parked</div>
-        </div>
-
         {loading ? (
           <Empty>Loading Next-Batch leads…</Empty>
         ) : filtered.length === 0 ? (
@@ -183,55 +165,7 @@ export default function NextBatchModule({ jwt, onCount, previewMode = false }) {
             </div>
           </div>
         ) : (
-          filtered.map(l => {
-            const sugar = SUGAR_BADGE[l.sugar_level];
-            return (
-              <div key={l.id} style={{
-                display: 'grid',
-                gridTemplateColumns: 'minmax(180px,1.4fr) minmax(140px,1fr) 110px minmax(140px,1fr) minmax(140px,auto)',
-                alignItems: 'center', gap: 14,
-                padding: '14px 18px', borderTop: '1px solid rgba(209,196,240,0.30)',
-                fontFamily: 'Outfit, sans-serif',
-              }}>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                    <span style={{ fontWeight: 600, color: '#3B0764', fontSize: '0.92rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {l.full_name || '—'}
-                    </span>
-                    <SourceBadge source={l.source} />
-                  </div>
-                  <div style={{ fontSize: '0.72rem', color: 'rgba(91,33,182,0.55)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {l.email || ''}
-                  </div>
-                </div>
-                <div style={{ fontFamily: 'ui-monospace, monospace', fontSize: '0.80rem', color: '#3B0764' }}>
-                  {l.whatsapp_number ? `+91 ${l.whatsapp_number}` : '—'}
-                </div>
-                <div>
-                  {sugar ? (
-                    <span style={{
-                      display: 'inline-block', padding: '3px 10px', borderRadius: 50,
-                      fontSize: '0.70rem', fontWeight: 700,
-                      background: sugar.bg, color: sugar.fg,
-                    }}>
-                      {l.sugar_level}
-                    </span>
-                  ) : (
-                    <span style={{ fontSize: '0.74rem', color: 'rgba(91,33,182,0.45)' }}>—</span>
-                  )}
-                </div>
-                <div style={{ fontWeight: 700, color: '#3B0764', fontSize: '0.84rem' }}>
-                  {l.webinar_name || '—'}
-                </div>
-                <div style={{ fontSize: '0.76rem', color: 'rgba(91,33,182,0.65)' }}>
-                  <div>{fmtRelative(l.next_batch_parked_at || l.last_note_at)}</div>
-                  <div style={{ fontSize: '0.70rem', color: 'rgba(91,33,182,0.45)' }}>
-                    {fmtDate(l.next_batch_parked_at || l.last_note_at)}
-                  </div>
-                </div>
-              </div>
-            );
-          })
+          <CallerLeadsTable leads={filtered} emptyText="No Next-Batch leads." />
         )}
       </div>
     </div>

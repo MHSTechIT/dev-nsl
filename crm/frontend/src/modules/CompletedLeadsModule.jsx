@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import CallerLeadsTable from '../components/CallerLeadsTable';
 import EditCallNoteModal from './EditCallNoteModal';
 import SourceBadge from '../components/SourceBadge';
 import { useTimerSettings } from '../context/TimerSettingsContext';
@@ -124,6 +125,7 @@ export default function CompletedLeadsModule({ jwt, onCount, previewMode = false
   const [filter, setFilter]   = useState('all');     // all | hot | warm | cold | junk | second_call
   const [search, setSearch]   = useState('');
   const [expandedId, setExpandedId] = useState(null);
+  const [editLead, setEditLead] = useState(null); // tap a row → open its note
   const sseRef = useRef(null);
 
   const fetchLeads = useCallback(async () => {
@@ -304,20 +306,22 @@ export default function CompletedLeadsModule({ jwt, onCount, previewMode = false
             </div>
           </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column' }}>
-            {filtered.map(l => (
-              <LeadRow
-                key={l.id}
-                lead={l}
-                jwt={jwt}
-                expanded={expandedId === l.id}
-                onToggle={() => setExpandedId(expandedId === l.id ? null : l.id)}
-                onSaved={fetchLeads}
-              />
-            ))}
-          </div>
+          <CallerLeadsTable
+            leads={filtered}
+            onRowClick={(l) => setEditLead(l)}
+          />
         )}
       </div>
+
+      {editLead && (
+        <EditCallNoteModal
+          jwt={jwt}
+          lead={editLead}
+          previewMode={previewMode}
+          onClose={() => setEditLead(null)}
+          onSaved={() => { setEditLead(null); fetchLeads(); }}
+        />
+      )}
     </div>
   );
 }

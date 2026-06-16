@@ -13,7 +13,7 @@ function getFirstDayOfMonth(year, month) {
   return (d + 6) % 7; // Mon=0 … Sun=6
 }
 
-export default function DateTimePicker({ value, onChange, placeholder = 'Select date & time' }) {
+export default function DateTimePicker({ value, onChange, placeholder = 'Select date & time', allowPast = false }) {
   const [open, setOpen]       = useState(false);
   const [viewYear, setViewYear]   = useState(() => value ? new Date(value).getFullYear() : new Date().getFullYear());
   const [viewMonth, setViewMonth] = useState(() => value ? new Date(value).getMonth()    : new Date().getMonth());
@@ -160,6 +160,7 @@ export default function DateTimePicker({ value, onChange, placeholder = 'Select 
   const isToday = (day) =>
     today.getFullYear() === viewYear && today.getMonth() === viewMonth && today.getDate() === day;
   const isPast = (day) => {
+    if (allowPast) return false;   // report filters need historical dates
     const d = new Date(viewYear, viewMonth, day, 23, 59, 59);
     return d < today;
   };
@@ -211,12 +212,12 @@ export default function DateTimePicker({ value, onChange, placeholder = 'Select 
     <div ref={ref} style={{ position: 'relative' }}>
       {/* Trigger button */}
       <button ref={triggerRef} type="button" style={pill} onClick={openPicker}>
-        <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="rgba(91,33,182,0.50)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, overflow: 'hidden' }}>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="rgba(91,33,182,0.50)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
             <rect x="3" y="4" width="18" height="18" rx="2"/>
             <line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>
           </svg>
-          {displayStr || placeholder}
+          <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{displayStr || placeholder}</span>
         </span>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(91,33,182,0.40)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
           style={{ transform: open ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 200ms' }}>

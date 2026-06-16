@@ -474,6 +474,40 @@ async function fetchFormLeads(formId, sinceUnix, untilUnix, maxPages = 200) {
 }
 
 /**
+ * Fetch ONE lead by its Meta leadgen id (sent in a leadgen webhook). Tries the
+ * page-specific token first (when the webhook gave us a page_id), then every
+ * other configured lead token, since a token not authorized on the lead's page
+ * returns a 4xx. Returns { lead:{ id, created_time, form_id, field_data } | null,
+ * error }.
+ */
+async function fetchLeadById(leadgenId, pageId) {
+  if (!leadgenId) return { lead: null, error: 'no leadgen id' };
+  // Page token (if known) first, then the rest — de-duplicated, order-preserving.
+  const ordered = [];
+  if (pageId) {
+    const pt = getTokenForPage(pageId);
+    if (pt) ordered.push(pt);
+  }
+  for (const t of getAllLeadTokens()) if (!ordered.includes(t)) ordered.push(t);
+  if (ordered.length === 0) return { lead: null, error: 'no token' };
+
+  let lastError = null;
+  for (const token of ordered) {
+    const u = new URL(`https://graph.facebook.com/${API_VERSION}/${leadgenId}`);
+    u.searchParams.set('fields', 'id,created_time,form_id,field_data');
+    u.searchParams.set('access_token', token);
+    let res;
+    try { res = await fetch(u.toString()); }
+    catch (e) { lastError = e.message; continue; }
+    if (!res.ok) { lastError = (await res.text().catch(() => '')).slice(0, 160); continue; }
+    const lead = await res.json().catch(() => null);
+    if (lead && lead.id) return { lead, error: null };
+  }
+  console.warn(`[metaInsights] fetchLeadById ${leadgenId} — no authorized token (${lastError || ''})`);
+  return { lead: null, error: lastError };
+}
+
+/**
  * Same as fetchLandingViewsByDay but restricted to the given campaign-id
  * list (across all configured accounts). If `campaignIds` is empty or
  * undefined, behaves identically to the unfiltered version.
@@ -572,5 +606,6 @@ module.exports = {
   fetchAllPromotePages,
   fetchAllLeadgenForms,
   fetchFormLeads,
+  fetchLeadById,
   clearMetaCache,
 };

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import CallerLeadsTable from '../components/CallerLeadsTable';
 import SourceBadge from '../components/SourceBadge';
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -103,43 +104,7 @@ export default function NotPickedLeadsModule({ jwt, onCount, previewMode = false
             </div>
           </div>
         ) : (
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'Outfit, sans-serif' }}>
-              <thead>
-                <tr style={{ background: 'rgba(237,234,248,0.50)', textAlign: 'left' }}>
-                  <Th>Name</Th>
-                  <Th>Phone</Th>
-                  <Th>Sugar</Th>
-                  <Th>Webinar</Th>
-                  <Th>Marked at</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map(l => {
-                  const sugar = SUGAR_BADGE[l.sugar_level] || { bg: '#F3F4F6', fg: '#4B5563' };
-                  return (
-                    <tr key={l.id} style={{ borderTop: '1px solid rgba(209,196,240,0.30)' }}>
-                      <Td>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                          <span style={{ fontWeight: 600, color: '#3B0764' }}>{l.full_name || '—'}</span>
-                          <SourceBadge source={l.source} />
-                        </div>
-                        <div style={{ fontSize: '0.72rem', color: 'rgba(91,33,182,0.55)' }}>{l.email || '—'}</div>
-                      </Td>
-                      <Td mono>{fmtPhone(l.whatsapp_number)}</Td>
-                      <Td>
-                        <span style={{ display: 'inline-block', padding: '2px 10px', borderRadius: 50, fontSize: '0.72rem', fontWeight: 700, background: sugar.bg, color: sugar.fg }}>
-                          {l.sugar_level || '—'}
-                        </span>
-                      </Td>
-                      <Td bold>{l.webinar_name || '—'}</Td>
-                      <Td muted>{fmtDate(l.last_note_at)}</Td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          <CallerLeadsTable leads={filtered} emptyText="No not-picked leads." />
         )}
       </div>
     </div>

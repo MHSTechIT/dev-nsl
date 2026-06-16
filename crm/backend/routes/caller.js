@@ -383,6 +383,10 @@ router.get('/leads', async (req, res) => {
           AND (
             l.webinar_id IS NULL
             OR l.webinar_id IN ${cfg.recentWebinars}
+            -- Pinned leads (admin "move to Assigned", reopened DNP/missed, or an
+            -- inbound call) surface in Assigned regardless of webinar age. The
+            -- matching Untouched query excludes pinned so they're never in both.
+            OR l.pinned_at IS NOT NULL
           )
         ORDER BY
           (l.last_note_outcome = 'follow_up' AND l.follow_up_at <= NOW()) DESC NULLS LAST,
@@ -437,6 +441,8 @@ router.get('/leads/untouched', async (req, res) => {
           )
           AND l.webinar_id IS NOT NULL
           AND l.webinar_id NOT IN ${cfg.recentWebinars}
+          -- Pinned leads belong in Assigned (see /leads), never Untouched.
+          AND l.pinned_at IS NULL
         ORDER BY l.assigned_at ASC NULLS LAST, l.created_at ASC`,
       [req.caller.id]
     );

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import Loading from '../components/Loading';
+import { ALL_WORKSPACES, useEnabledWorkspaces } from '../utils/workspaceFlags';
 
 const ROLES = [
   { value: 'junior_caller', label: 'Junior Caller' },
@@ -520,7 +521,12 @@ export default function UsersModule({
                   return (
                     <tr key={u.id} style={{ borderTop: '1px solid rgba(209,196,240,0.30)' }}>
                       <td style={tdStyle}>
-                        <span style={{ fontWeight: 600, color: '#3B0764' }}>{u.full_name}</span>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 9 }}>
+                          <span style={{ width: 30, height: 30, borderRadius: '50%', flexShrink: 0, overflow: 'hidden', background: 'rgba(91,33,182,0.10)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '0.78rem', color: '#5B21B6' }}>
+                            {u.avatar_url ? <img src={u.avatar_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : (u.full_name || '?').charAt(0).toUpperCase()}
+                          </span>
+                          <span style={{ fontWeight: 600, color: '#3B0764' }}>{u.full_name}</span>
+                        </span>
                       </td>
                       <td style={tdStyle}>
                         <WorkspaceCell user={u} />
@@ -817,6 +823,7 @@ const WORKSPACE_BADGE = {
   yt:    { label: 'YT',       bg: '#FEE2E2', fg: '#B91C1C' },
   meta2: { label: 'Meta 2.0', bg: '#E0E7FF', fg: '#3730A3' },
   metatemp: { label: 'Meta Temp', bg: '#FEF3C7', fg: '#92400E' },
+  tagmango: { label: 'TagMango', bg: '#FCE7F3', fg: '#9D174D' },
 };
 function WorkspaceCell({ user }) {
   const ws = user.workspace;
@@ -890,11 +897,22 @@ function UserFormModal({
 }) {
   const isEdit = !!existing;
   const [fullName, setFullName] = useState(existing?.full_name || '');
+  const [avatar, setAvatar]     = useState(existing?.avatar_url || ''); // base64 data URL
   const [email, setEmail]       = useState(existing?.email || '');
   const [phone, setPhone]       = useState(existing?.phone || '');
   const [role, setRole]         = useState(existing?.role || 'junior_caller');
   // Workspace tag — only meaningful for callers. '' = all workspaces (NULL).
   const [workspace, setWorkspace]       = useState(existing?.workspace || '');
+  /* Hide disabled workspaces (Settings → Workspace) from the assignment list.
+     Keep the existing user's current tag selectable even if since-disabled, so
+     editing them doesn't silently drop their workspace. */
+  const { isEnabled: isWorkspaceEnabled } = useEnabledWorkspaces(token);
+  const workspaceOptions = [
+    { value: '', label: 'All workspaces' },
+    ...ALL_WORKSPACES
+      .filter((w) => isWorkspaceEnabled(w.id) || w.id === existing?.workspace)
+      .map((w) => ({ value: w.id, label: w.label })),
+  ];
   const [department, setDepartment]     = useState(existing?.department || lockedDepartment || '');
   const [managerId, setManagerId]       = useState(existing?.manager_id || lockedManagerId || '');
   const [assistantManagerId, setAssistantManagerId] = useState(existing?.assistant_manager_id || '');
@@ -990,6 +1008,30 @@ function UserFormModal({
     }
   }
 
+  /* Read an image file, downscale it to <=256px on the long edge, and store it
+     as a small JPEG data URL (keeps the request body well under the API limit). */
+  function onPickPhoto(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ''; // allow re-picking the same file
+    if (!file) return;
+    if (!/^image\//.test(file.type)) { setError('Please choose an image file.'); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const MAX = 256;
+        const scale = Math.min(1, MAX / Math.max(img.width, img.height));
+        const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        setAvatar(canvas.toDataURL('image/jpeg', 0.8));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
   async function handleSubmit(e) {
     e.preventDefault();
     setError('');
@@ -1006,6 +1048,7 @@ function UserFormModal({
       const isCaller = role === 'junior_caller' || role === 'senior_caller';
       const body = {
         full_name: fullName.trim(),
+        avatar_url: avatar || (isEdit ? '' : undefined), // '' clears on edit; omit on create
         email:     email.trim(),
         phone:     phone.trim() || (isEdit ? '' : undefined),
         role,
@@ -1105,6 +1148,36 @@ function UserFormModal({
         </div>
 
         <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {/* Profile photo */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+            <div style={{
+              width: 72, height: 72, borderRadius: '50%', flexShrink: 0, overflow: 'hidden',
+              background: 'rgba(91,33,182,0.10)', border: '1px solid rgba(91,33,182,0.20)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}>
+              {avatar ? (
+                <img src={avatar} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              ) : (
+                <span style={{ fontWeight: 800, fontSize: '1.6rem', color: '#5B21B6' }}>
+                  {(fullName || '?').charAt(0).toUpperCase()}
+                </span>
+              )}
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <label style={fieldLabelStyle}>Profile Photo <span style={{ fontWeight: 500, color: 'rgba(91,33,182,0.45)' }}>(optional)</span></label>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '7px 14px', borderRadius: 9, border: '1px solid rgba(91,33,182,0.25)', background: '#fff', color: '#5B21B6', fontFamily: 'Outfit, sans-serif', fontWeight: 700, fontSize: '0.8rem', cursor: 'pointer' }}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                  {avatar ? 'Change' : 'Upload'}
+                  <input type="file" accept="image/*" onChange={onPickPhoto} style={{ display: 'none' }} />
+                </label>
+                {avatar && (
+                  <button type="button" onClick={() => setAvatar('')} style={{ padding: '7px 12px', borderRadius: 9, border: '1px solid rgba(220,38,38,0.30)', background: '#fff', color: '#DC2626', fontFamily: 'Outfit, sans-serif', fontWeight: 700, fontSize: '0.8rem', cursor: 'pointer' }}>Remove</button>
+                )}
+              </div>
+            </div>
+          </div>
+
           <div className="uf-grid">
             {/* Full name */}
             <div>
@@ -1192,13 +1265,7 @@ function UserFormModal({
                 <BrandSelect
                   value={workspace}
                   onChange={setWorkspace}
-                  options={[
-                    { value: '',      label: 'All workspaces' },
-                    { value: 'meta',  label: 'Meta' },
-                    { value: 'yt',    label: 'YT' },
-                    { value: 'meta2', label: 'Meta 2.0' },
-                    { value: 'metatemp', label: 'Meta Temp' },
-                  ]}
+                  options={workspaceOptions}
                 />
               </div>
             )}
