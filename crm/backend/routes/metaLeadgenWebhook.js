@@ -29,7 +29,12 @@ const router = express.Router();
 
 const VERIFY_TOKEN = (process.env.META_LEADGEN_VERIFY_TOKEN || '').trim();
 const APP_SECRET   = (process.env.META_APP_SECRET || '').trim();
-const SOURCE       = 'meta';   // temp: this webhook serves the Meta workspace only.
+
+/* Routing is by FORM, read LIVE from webinar_config (Timer & Controls → Meta
+   lead forms). A lead is ingested into the workspace whose current/next webinar
+   has that lead's form selected; a lead whose form isn't selected anywhere is
+   ignored. Changing the selection in Timer & Controls takes effect immediately —
+   no redeploy. */
 
 /* ── field_data mapping — mirrors routes/admin.js POST /leads/fetch-meta ── */
 const NAME_KEYS  = ['full_name', 'name', 'your_name', 'full name'];
@@ -44,6 +49,30 @@ function flattenFieldData(fd) {
   return out;
 }
 const pickKey = (m, keys) => { for (const k of keys) if (m[k]) return m[k]; return ''; };
+
+/* Parse a webinar_config form-id column into a string[]. The column may arrive
+   as a parsed JSONB array, a JSON-array string, or a bare id. */
+function parseFormIds(v) {
+  if (!v) return [];
+  if (Array.isArray(v)) return v.map(String);
+  try { const p = JSON.parse(v); return Array.isArray(p) ? p.map(String) : [String(p)]; }
+  catch { return [String(v)]; }
+}
+
+/* Resolve which workspace selected this form for its current/next webinar.
+   Read live from webinar_config so a change in Timer & Controls applies at once.
+   Returns the source ('metatemp' / 'meta' / …) or null when no webinar selected
+   the form (→ the lead is ignored). */
+async function resolveSourceForForm(formId) {
+  if (!formId) return null;
+  const fid = String(formId);
+  const { rows } = await pool.query('SELECT source, current_form_id, next_form_id FROM webinar_config');
+  for (const r of rows) {
+    const ids = [...parseFormIds(r.current_form_id), ...parseFormIds(r.next_form_id)];
+    if (ids.includes(fid)) return r.source;
+  }
+  return null;
+}
 
 /* ── GET: subscription verification handshake ── */
 router.get('/', (req, res) => {
@@ -96,13 +125,37 @@ router.post('/', async (req, res) => {
 });
 
 async function ingestLead({ leadgenId, formId, pageId }) {
-  // Dedup — already imported by webhook or the legacy fetch-meta poller?
+  // 1. Route by the form selected in Timer & Controls (live). If the form isn't
+  //    selected by any webinar, ignore the lead — and don't even spend a Graph
+  //    fetch on it (the webhook payload carries the form id).
+  let source = formId ? await resolveSourceForForm(formId) : null;
+  let lead = null;
+
+  if (!source) {
+    if (!formId) {
+      // Rare: webhook omitted form_id — fetch the lead to read it, then re-check.
+      const fetched = await fetchLeadById(leadgenId, pageId);
+      lead = fetched.lead;
+      formId = lead && lead.form_id ? String(lead.form_id) : null;
+      source = await resolveSourceForForm(formId);
+    }
+    if (!source) {
+      console.log(`[meta-leadgen] form ${formId || '?'} not selected in any webinar — ignoring lead ${leadgenId}`);
+      return;
+    }
+  }
+
+  // 2. Dedup within the resolved workspace.
   const { rows: dupe } = await pool.query(
-    'SELECT id FROM leads WHERE meta_lead_id = $1 AND source = $2 LIMIT 1', [leadgenId, SOURCE]);
+    'SELECT id FROM leads WHERE meta_lead_id = $1 AND source = $2 LIMIT 1', [leadgenId, source]);
   if (dupe.length) return;
 
-  const { lead, error } = await fetchLeadById(leadgenId, pageId);
-  if (!lead) { console.warn(`[meta-leadgen] could not fetch lead ${leadgenId}: ${error || ''}`); return; }
+  // 3. Fetch the full lead (unless we already did while reading its form id).
+  if (!lead) {
+    const fetched = await fetchLeadById(leadgenId, pageId);
+    lead = fetched.lead;
+    if (!lead) { console.warn(`[meta-leadgen] could not fetch lead ${leadgenId}: ${fetched.error || ''}`); return; }
+  }
 
   const map = flattenFieldData(lead.field_data);
   let full_name = pickKey(map, NAME_KEYS);
@@ -118,7 +171,7 @@ async function ingestLead({ leadgenId, formId, pageId }) {
   let webinar_id = null;
   try {
     const { rows } = await pool.query(
-      'SELECT id FROM webinars WHERE is_active = TRUE AND source = $1 LIMIT 1', [SOURCE]);
+      'SELECT id FROM webinars WHERE is_active = TRUE AND source = $1 LIMIT 1', [source]);
     webinar_id = rows[0]?.id ?? null;
   } catch { /* webinars table optional */ }
 
@@ -131,7 +184,7 @@ async function ingestLead({ leadgenId, formId, pageId }) {
        VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10)
        ON CONFLICT DO NOTHING
        RETURNING id`,
-      [full_name || '', phone, email, 2, webinar_id, SOURCE,
+      [full_name || '', phone, email, 2, webinar_id, source,
        JSON.stringify(map), leadgenId, formIdFinal, created_at]
     );
     leadId = rows[0]?.id || null;
@@ -144,7 +197,7 @@ async function ingestLead({ leadgenId, formId, pageId }) {
   // Same notification the funnel fires on a real registration → round-robin
   // assigner (leadCreatedListener → assignNewLead) routes it to a caller.
   pool.query(`SELECT pg_notify('lead.created', $1)`,
-    [JSON.stringify({ leadId, source: SOURCE, sugarLevel: null, webinarId: webinar_id })]
+    [JSON.stringify({ leadId, source: source, sugarLevel: null, webinarId: webinar_id })]
   ).catch(e => console.error('[meta-leadgen notify]', e.message));
 
   console.log(`[meta-leadgen] ingested ${leadgenId} → ${leadId} (${full_name || 'no name'} / ${phone || 'no phone'})`);
