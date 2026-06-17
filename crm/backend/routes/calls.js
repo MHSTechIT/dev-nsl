@@ -154,52 +154,77 @@ router.post('/leads/:lead_id/hangup', async (req, res) => {
   const cfg = workspaceConfig(req.caller.workspace);
 
   try {
+    // Gather ALL recent (last 15 min) call rows for this lead+caller — not
+    // just one. A single logical Tata call fragments into several rows with
+    // DIFFERENT id formats (the dialplan call_id "MUM3-T3-1781672769.368381",
+    // the short uuid "6a322b412980a", the originate ref_id). Tata's hangup
+    // only accepts the FULL dialplan call_id, which often lives in a sibling
+    // row's raw_payload — not in the row whose provider_call_id we happened to
+    // store. So we collect every candidate id across all rows and try each;
+    // the one matching the live leg actually drops the call, the rest no-op.
     const { rows } = await pool.query(
-      `SELECT c.id, c.provider_call_id, c.status,
+      `SELECT c.id, c.provider_call_id, c.status, c.raw_payload,
               u.tata_account_type, u.tata_smartflo_api_key
          FROM ${cfg.calls} c
          LEFT JOIN ${cfg.users} u ON u.id = c.caller_id
         WHERE c.lead_id = $1
           AND c.caller_id = $2
-          AND c.status NOT IN ('ended','missed','failed')
-        ORDER BY c.started_at DESC
-        LIMIT 1`,
+          AND c.started_at > NOW() - INTERVAL '15 minutes'
+        ORDER BY (c.status NOT IN ('ended','missed','failed')) DESC,
+                 c.started_at DESC
+        LIMIT 8`,
       [leadId, req.caller.id]
     );
     if (rows.length === 0) {
       return res.json({ success: true, no_active_call: true });
     }
-    const call = rows[0];
-    if (!call.provider_call_id) {
-      return res.json({ success: true, no_provider_id: true });
-    }
-    // Stub calls (test leads) never went to Tata — just mark the row ended.
-    if (String(call.provider_call_id).startsWith('stub-')) {
+
+    // Stub calls (test leads) never went to Tata — just mark the rows ended.
+    const allStub = rows.every(r => String(r.provider_call_id || '').startsWith('stub-'));
+    if (allStub) {
       await pool.query(
-        `UPDATE ${cfg.calls} SET status = 'ended', ended_at = COALESCE(ended_at, NOW()), updated_at = NOW() WHERE id = $1`,
-        [call.id]
+        `UPDATE ${cfg.calls} SET status = 'ended', ended_at = COALESCE(ended_at, NOW()), updated_at = NOW()
+          WHERE id = ANY($1::uuid[])`,
+        [rows.map(r => r.id)]
       );
-      return res.json({ success: true, call_id: call.id, stubbed: true });
+      return res.json({ success: true, stubbed: true, rows: rows.length });
     }
-    const result = await tata.hangup({
-      providerCallId: call.provider_call_id,
-      accountType:    call.tata_account_type || undefined,
-      perUserKey:     call.tata_smartflo_api_key || undefined,
-    });
-    if (result.ok) {
-      await pool.query(
-        `UPDATE ${cfg.calls}
-            SET status = 'ended', ended_at = COALESCE(ended_at, NOW()), updated_at = NOW()
-          WHERE id = $1`,
-        [call.id]
-      );
+
+    // Build the de-duped candidate id list: every row's stored
+    // provider_call_id PLUS the call_id / uuid Tata embedded in its webhook
+    // payload (that's where the hangup-accepted dialplan call_id usually is).
+    const candidates = new Set();
+    for (const r of rows) {
+      const pid = String(r.provider_call_id || '');
+      if (pid && !pid.startsWith('stub-')) candidates.add(pid);
+      const p = r.raw_payload || {};
+      if (p.call_id) candidates.add(String(p.call_id));
+      if (p.uuid)    candidates.add(String(p.uuid));
     }
-    res.json({
-      success: !!result.ok,
-      call_id: call.id,
-      endpoint: result.endpoint || null,
-      reason:   result.reason || null,
-    });
+    // Per-user Tata creds (same across these rows — take the first non-null).
+    const acct = rows.find(r => r.tata_account_type)?.tata_account_type || undefined;
+    const key  = rows.find(r => r.tata_smartflo_api_key)?.tata_smartflo_api_key || undefined;
+
+    let dropped = false;   // a REAL hangup landed (not an already-ended no-op)
+    const attempts = [];
+    for (const id of candidates) {
+      const result = await tata.hangup({ providerCallId: id, accountType: acct, perUserKey: key });
+      attempts.push({ id, ok: !!result.ok, reason: result.reason || null });
+      // A real drop = ok AND it wasn't the "already ended" short-circuit.
+      if (result.ok && result.reason !== 'already_ended') { dropped = true; break; }
+    }
+
+    // Mark every recent non-terminal row ended regardless — the leg is gone
+    // (either we just dropped it or it was already ended on Tata's side).
+    await pool.query(
+      `UPDATE ${cfg.calls}
+          SET status = 'ended', ended_at = COALESCE(ended_at, NOW()), updated_at = NOW()
+        WHERE id = ANY($1::uuid[])
+          AND status NOT IN ('ended','missed','failed')`,
+      [rows.map(r => r.id)]
+    );
+
+    res.json({ success: true, dropped, candidates: candidates.size, attempts });
   } catch (err) {
     console.error('[calls] lead hangup error:', err.message);
     res.json({ success: false, error: err.message });

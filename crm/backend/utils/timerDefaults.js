@@ -18,6 +18,7 @@ const BOUNDS = {
   extAlertNudgeCount:          [5,      1,     20],
   agentReasonNudgeIntervalMs:  [30000,  5000,  600000],
   agentReasonNudgeCount:       [5,      1,     20],
+  agentRetryCap:               [15,     1,     50],
   formReasonNudgeIntervalMs:   [30000,  5000,  600000],
   formReasonNudgeCount:        [5,      1,     20],
   formTimerLongCallThresholdMs:[180000, 60000, 1800000],
@@ -90,7 +91,7 @@ const BACKEND_KEYS = [
 const EDITABLE_KEYS = [
   'robotNudgeIntervalMs', 'autoPauseNudgeCount',
   'extAlertNudgeIntervalMs', 'extAlertNudgeCount',
-  'agentReasonNudgeIntervalMs', 'agentReasonNudgeCount',
+  'agentReasonNudgeIntervalMs', 'agentReasonNudgeCount', 'agentRetryCap',
   'formReasonNudgeIntervalMs', 'formReasonNudgeCount',
   'formTimerLongCallThresholdMs',
   'customBreakNudgeIntervalMs', 'customBreakNudgeCount',

@@ -45,6 +45,8 @@ export const TIMER_GROUPS = [
         help: "How often the robot re-asks on the agent reason card (the caller's own SmartFlow line didn't pick up)." },
       { key: 'agentReasonNudgeCount', label: 'Nudges before auto-pause', unit: 'count', default: 5, min: 1, max: 20,
         help: 'Ignored nudges on the agent reason card before the account auto-pauses.' },
+      { key: 'agentRetryCap', label: 'Retry attempts before blocking the caller', unit: 'count', default: 15, min: 1, max: 50,
+        help: 'How many times the agent reason card may retrigger the SmartFlow call — the "Attempt X of Y" counter. Once this many attempts are reached, the account is auto-paused (blocked) instead of retrying again. Default 15.' },
     ],
   },
   {
@@ -245,7 +247,7 @@ export const TIMER_ITEMS = Object.fromEntries(
 export const EDITABLE_KEYS = [
   'robotNudgeIntervalMs', 'autoPauseNudgeCount',
   'extAlertNudgeIntervalMs', 'extAlertNudgeCount',
-  'agentReasonNudgeIntervalMs', 'agentReasonNudgeCount',
+  'agentReasonNudgeIntervalMs', 'agentReasonNudgeCount', 'agentRetryCap',
   'formReasonNudgeIntervalMs', 'formReasonNudgeCount',
   'formTimerLongCallThresholdMs',
   'customBreakNudgeIntervalMs', 'customBreakNudgeCount',

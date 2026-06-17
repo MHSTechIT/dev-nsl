@@ -170,6 +170,10 @@ export default function CallerShell({ callerName: nameProp, callerRole: roleProp
      center robot. AssignedLeadsModule (callPageMode) pushes its corner-robot
      messages up here via onRobotMessage; CallModule renders them in its bubble. */
   const [callRobotMsg, setCallRobotMsg] = useState(null);
+  /* True while a call-note modal is open (a call is in progress) — suppresses
+     the Call page's "never pressed Start Call" idle auto-pause so a caller on
+     the phone isn't wrongly paused. Reported up by AssignedLeadsModule. */
+  const [callActive, setCallActive] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
   /* Hamburger toggle — when true, the tab bar collapses into a single
      three-line button. Defaults to COLLAPSED on every login / refresh so
@@ -749,7 +753,7 @@ export default function CallerShell({ callerName: nameProp, callerRole: roleProp
       {activePage === 'call' && (
         <>
           <CallModule
-            jwt={jwt} isActive={isActive} onStartAutoCall={requestAutoStart} robotMessage={callRobotMsg}
+            jwt={jwt} isActive={isActive} onStartAutoCall={requestAutoStart} robotMessage={callRobotMsg} callActive={callActive}
             /* Live status card data */
             assignedCount={leadCount != null ? leadCount : callerStats.assigned}
             tagCounts={callerStats.tags}
@@ -765,7 +769,7 @@ export default function CallerShell({ callerName: nameProp, callerRole: roleProp
               callPageMode (no leads table) — overlaying the Call page so the
               caller never leaves it. Its corner-robot lines are routed to the
               center robot via onRobotMessage (no separate bottom robot). */}
-          <AssignedLeadsModule callPageMode jwt={jwt} isActive={isActive} setMood={setMood} pendingAutoStart={pendingAutoStart} clearPendingAutoStart={clearPendingAutoStart} onCount={setLeadCount} onRobotMessage={setCallRobotMsg} onBreakInfo={setCallerBreak} />
+          <AssignedLeadsModule callPageMode jwt={jwt} isActive={isActive} setMood={setMood} pendingAutoStart={pendingAutoStart} clearPendingAutoStart={clearPendingAutoStart} onCount={setLeadCount} onRobotMessage={setCallRobotMsg} onBreakInfo={setCallerBreak} onCallActive={setCallActive} />
         </>
       )}
       {activePage === 'assigned'     && <AssignedLeadsModule  jwt={jwt} isActive={isActive} externalHighlightId={externalHighlightId} setMood={setMood} pendingAutoStart={pendingAutoStart} clearPendingAutoStart={clearPendingAutoStart} onCount={setLeadCount} />}

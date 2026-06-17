@@ -89,7 +89,7 @@ function fmtPhone(p) {
   return digits.startsWith('91') ? '+' + digits : '+91 ' + digits;
 }
 
-export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId, setMood, pendingAutoStart, clearPendingAutoStart, onCount, onRobotMessage, onBreakInfo, previewMode = false, callPageMode = false }) {
+export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId, setMood, pendingAutoStart, clearPendingAutoStart, onCount, onRobotMessage, onBreakInfo, onCallActive, previewMode = false, callPageMode = false }) {
   const t = useTimerSettings();
   const [leads, setLeads]         = useState([]);
   // Mirror of `leads` for callbacks that need the FRESHEST value (e.g.
@@ -348,11 +348,22 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
   const [otherMessage, setOtherMessage]   = useState('');
   const [otherMinutes, setOtherMinutes]   = useState(30);
   const breakTimerRef = useRef(null);
+  // Delays the post-break call start until the resume robot finishes speaking.
+  const resumeStartTimerRef = useRef(null);
+  useEffect(() => () => { if (resumeStartTimerRef.current) clearTimeout(resumeStartTimerRef.current); }, []);
 
   /* Bubble the current break state up to the shell (Call-page status card). */
   useEffect(() => {
     if (typeof onBreakInfo === 'function') onBreakInfo(breakInfo || null);
   }, [breakInfo]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* Tell the Call page when a call-note modal is open (a call is in progress)
+     so CallModule suspends its idle "never pressed Start Call" auto-pause —
+     a caller on the phone isn't idle. Cleared on unmount too. */
+  useEffect(() => {
+    if (typeof onCallActive === 'function') onCallActive(!!editLead);
+    return () => { if (typeof onCallActive === 'function') onCallActive(false); };
+  }, [editLead]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* Daily break budget — fetched from GET /api/caller/break-budget each time
      the break picker opens. Drives per-option greying (Tea ×2/day, Lunch ×1,
@@ -741,9 +752,16 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
       breakTimerRef.current = null;
     }
     try { localStorage.removeItem(breakStorageKey); } catch { /* sandbox */ }
-    setResumeRobotPulse(p => p + 1);   // flash the "enjoy panniya va" robot
+    setResumeRobotPulse(p => p + 1);   // robot speaks the resume line NOW
+    // Start the call flow ONLY AFTER the resume robot finishes speaking — the
+    // ext_check / first dial opens once the voice line (~resumeRobotPulseMs,
+    // matched to clip 42's length) completes, instead of on top of it.
     if (leads.length) {
-      startAutoMode();
+      if (resumeStartTimerRef.current) clearTimeout(resumeStartTimerRef.current);
+      resumeStartTimerRef.current = setTimeout(() => {
+        resumeStartTimerRef.current = null;
+        startAutoMode();
+      }, t.resumeRobotPulseMs || 7000);
     }
     // If no leads loaded yet (e.g., right after a tab restore), the modal
     // closes and the page's Start Auto-Call button takes over once leads
@@ -1027,6 +1045,15 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
     if (!pendingAutoStart) return;
     if (loading) return;
     if (!leads.length) return;
+    // Resuming from a break? End it (handles the late-return reason card on
+    // overrun) instead of a plain auto-start. On the Call page the break has
+    // no full-screen overlay/button, so its compact banner's Start Auto-Call
+    // routes the resume through here.
+    if (breakInfo) {
+      endBreakAndStartAutoCall();
+      if (typeof clearPendingAutoStart === 'function') clearPendingAutoStart();
+      return;
+    }
     // Don't override an already-running auto session.
     if (autoMode !== 'off') {
       if (typeof clearPendingAutoStart === 'function') clearPendingAutoStart();
@@ -1035,7 +1062,7 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
     startAutoMode();
     if (typeof clearPendingAutoStart === 'function') clearPendingAutoStart();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingAutoStart, loading, leads.length, autoMode]);
+  }, [pendingAutoStart, loading, leads.length, autoMode, breakInfo]);
 
   /* Drive the break-picker inactivity timer off the modal-step state.
      Entering 'choose' resets strikes + starts the 10-s window. Leaving
@@ -1319,6 +1346,11 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
             setModalStateFromChild(null);
             const remaining = leads.filter(x => x.id !== finishedLead.id);
             setLeads(remaining);
+            // Call just finished (note already persisted by the modal). Tell the
+            // status card to refetch NOW so the daily tag tiles + TOUCHED % (and
+            // its 100% trophy celebration) update at call-finish — letting the
+            // trophy play within the following cooldown instead of lagging a poll.
+            try { window.dispatchEvent(new Event('mhs:activity:changed')); } catch { /* no-op */ }
             // Capture the lead tag (HOT/WARM/COLD/JUNK) so the celebration
             // bubble can show the matching message. Stays in state until
             // the next call's save overwrites it.
@@ -1567,7 +1599,18 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
                 Skip wait
               </button>
               <button
-                onClick={() => { clearCooldownTimer(); setCooldownLeft(0); setBreakStep('choose'); }}
+                onClick={() => {
+                  // Opening the break picker must FULLY stop the auto-call: clear
+                  // the cooldown timer AND turn autoMode off, otherwise the
+                  // cooldown keeps firing advanceAutoCall() in the background
+                  // (dialing leads → retry-exhaustion → account auto-pause) and
+                  // the cooldown card + its robot stay mounted alongside the
+                  // break card (two robots at once).
+                  clearCooldownTimer();
+                  setCooldownLeft(0);
+                  setAutoMode('off');
+                  setBreakStep('choose');
+                }}
                 style={{
                   minWidth: 110, height: '2.6rem', padding: '0 22px', borderRadius: 50,
                   border: '1px solid rgba(255,255,255,0.50)',
@@ -1602,7 +1645,7 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
             alignItems: 'center', justifyContent: 'center',
             gap: 2, padding: '0 16px', fontFamily: 'Outfit, sans-serif',
           }}
-          onClick={() => setBreakStep(null)}
+          onClick={() => { setBreakStep(null); advanceAutoCall(); }}
         >
           {/* Robot guide — invites the break, or switches to the select-nudge
              line once an inactivity strike fires. Bubble text fades after
@@ -1958,8 +2001,12 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
       {/* ── Active break modal ──
          Big centered card that blocks the page until the caller presses
          Start Auto-Call. No End-break / Cancel — the only way out is to
-         resume calls. Survives reloads / logouts via localStorage. */}
-      {breakInfo && (() => {
+         resume calls. Survives reloads / logouts via localStorage.
+         On the Call page (callPageMode) this full-screen overlay is
+         SUPPRESSED — the break shows compactly in the left CallStatsPanel
+         banner instead, whose own Start Auto-Call button routes back here
+         through the pendingAutoStart flow. */}
+      {breakInfo && !callPageMode && (() => {
         const overrun = breakTimeLeft <= 0;
         const fmt = (s) => `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
         return (
@@ -2129,7 +2176,9 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
          On the Call page (callPageMode) the corner robot is suppressed and the
          line is routed to CallModule's center robot instead (see the effect
          that calls onRobotMessage above). */}
-      {!callPageMode && resumeRobotPulse > 0 && (
+      {/* Only when truly idle — never while a call modal, break card/picker or
+          cooldown is showing, so two robots can't animate at once. */}
+      {!callPageMode && resumeRobotPulse > 0 && !editLead && breakStep === null && !breakInfo && autoMode === 'off' && (
         <RobotGuide
           variant="corner"
           mood="happy"

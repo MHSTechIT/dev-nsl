@@ -59,15 +59,27 @@ async function resolveActiveLink(source) {
 
   if (webinarId) {
     try {
-      const { rows: cnt } = await pool.query(
-        'SELECT COUNT(*)::int AS c FROM leads WHERE webinar_id = $1', [webinarId]);
-      const leadCount = cnt[0]?.c || 0;
       const { rows: links } = await pool.query(
         "SELECT link_url, order_index FROM whatsapp_links WHERE webinar_id = $1 AND link_url <> '' ORDER BY order_index",
         [webinarId]);
       if (links.length) {
         const maxIdx = links[links.length - 1].order_index;
-        const idx = Math.min(getLinkIndex(leadCount), maxIdx);
+
+        // Whapi workspaces rotate by live community members, not lead count:
+        // serve the link at the explicit, scheduler-advanced wa_active_index.
+        const { rows: cfg } = await pool.query(
+          'SELECT whapi_channel_id FROM webinar_config WHERE source = $1', [source]);
+        let idx;
+        if (cfg[0]?.whapi_channel_id) {
+          const { rows: w } = await pool.query(
+            'SELECT wa_active_index FROM webinars WHERE id = $1', [webinarId]);
+          idx = Math.min(Math.max(1, w[0]?.wa_active_index || 1), maxIdx);
+        } else {
+          const { rows: cnt } = await pool.query(
+            'SELECT COUNT(*)::int AS c FROM leads WHERE webinar_id = $1', [webinarId]);
+          idx = Math.min(getLinkIndex(cnt[0]?.c || 0), maxIdx);
+        }
+
         const hit = links.find(l => l.order_index === idx) || links[0];
         if (hit?.link_url) return hit.link_url;
       }

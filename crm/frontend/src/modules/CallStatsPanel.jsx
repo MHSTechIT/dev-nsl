@@ -120,45 +120,52 @@ function StatBox({ label, value, icon }) {
   );
 }
 
-/* Trophy that fills with purple "water" up to `percent` (Material trophy
-   silhouette used as a clip; the fill rises from 0 → percent on mount, so it
-   reads like a loading fill). The % sits centered, switching to white once the
-   water covers the middle. */
-const TROPHY_PATH = 'M19 5h-2V3H7v2H5C3.9 5 3 5.9 3 7v1c0 2.55 1.92 4.63 4.39 4.94.63 1.5 1.98 2.63 3.61 2.96V19H7v2h10v-2h-4v-3.1c1.63-.33 2.98-1.46 3.61-2.96C19.08 12.63 21 10.55 21 8V7c0-1.1-.9-2-2-2zM5 8V7h2v3.82C5.84 10.4 5 9.3 5 8zm14 0c0 1.3-.84 2.4-2 2.82V7h2v1z';
+/* Outlined trophy that fills with purple "water" up to `percent` — a clean cup
+   with side handles, a stem and a two-tier base (matches the reference icon).
+   Only the BOWL fills; the % sits in the bowl, switching to white once covered. */
+const BOWL_PATH = 'M30 26 H70 V46 C70 64 62 72 50 72 C38 72 30 64 30 46 Z';
+const BOWL_TOP = 26, BOWL_BOT = 72;
 
-function TrophyFill({ percent = 0, size = 104 }) {
+function TrophyFill({ percent = 0, size = 190 }) {
   const target = Math.max(0, Math.min(100, percent));
   const [fillPct, setFillPct] = useState(0);
   useEffect(() => {
     const id = setTimeout(() => setFillPct(target), 90); // animate 0 → target on mount/change
     return () => clearTimeout(id);
   }, [target]);
-  const fillY = 24 * (1 - fillPct / 100);          // top of the water (viewBox units)
-  const overHalf = fillPct > 52;                    // water covers the centre → white %
+  const fillY = BOWL_BOT - (BOWL_BOT - BOWL_TOP) * (fillPct / 100); // water surface (viewBox units)
+  const overHalf = fillPct > 50;                                    // water covers the centre → white %
   return (
     <div style={{ position: 'relative', width: size, height: size }}>
-      <svg width={size} height={size} viewBox="0 0 24 24" style={{ filter: 'drop-shadow(0 6px 10px rgba(124,58,237,0.30))' }}>
+      <svg width={size} height={size} viewBox="0 0 100 120" style={{ filter: 'drop-shadow(0 6px 10px rgba(124,58,237,0.30))' }}>
         <defs>
-          <clipPath id="cs-trophy-clip"><path d={TROPHY_PATH} /></clipPath>
+          <clipPath id="cs-trophy-clip"><path d={BOWL_PATH} /></clipPath>
           <linearGradient id="cs-trophy-grad" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor="#A78BFA" />
             <stop offset="100%" stopColor="#6D28D9" />
           </linearGradient>
         </defs>
+        {/* bowl: empty tint + rising water */}
         <g clipPath="url(#cs-trophy-clip)">
-          {/* empty trophy */}
-          <rect x="0" y="0" width="24" height="24" fill="rgba(124,58,237,0.12)" />
-          {/* rising water */}
-          <rect x="0" y={fillY} width="24" height="24" fill="url(#cs-trophy-grad)" style={{ transition: 'y 1100ms cubic-bezier(.22,1,.36,1)' }} />
-          {/* water surface highlight */}
-          <rect x="0" y={fillY} width="24" height="0.5" fill="rgba(255,255,255,0.55)" style={{ transition: 'y 1100ms cubic-bezier(.22,1,.36,1)' }} />
+          <rect x="0" y="0" width="100" height="120" fill="rgba(124,58,237,0.12)" />
+          <rect x="0" y={fillY} width="100" height="120" fill="url(#cs-trophy-grad)" style={{ transition: 'y 1100ms cubic-bezier(.22,1,.36,1)' }} />
+          <rect x="0" y={fillY} width="100" height="2" fill="rgba(255,255,255,0.55)" style={{ transition: 'y 1100ms cubic-bezier(.22,1,.36,1)' }} />
         </g>
-        {/* outline for definition */}
-        <path d={TROPHY_PATH} fill="none" stroke="rgba(124,58,237,0.40)" strokeWidth="0.5" />
+        {/* outline — rim, bowl, handles, stem, two-tier base */}
+        <g fill="none" stroke="#7C3AED" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M26 26 H74" />
+          <path d={BOWL_PATH} />
+          <path d="M30 29 H20 Q13 29 13 36 V43 Q13 50 20 50 H30" />
+          <path d="M70 29 H80 Q87 29 87 36 V43 Q87 50 80 50 H70" />
+          <path d="M50 72 V84" />
+          <path d="M42 84 H58 V94 H42 Z" />
+          <path d="M33 94 H67 V106 H33 Z" />
+        </g>
       </svg>
       <span style={{
         position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
-        fontSize: '1.1rem', fontWeight: 800,
+        transform: 'translateY(-18%)',   // sit inside the bowl, above the stem/base
+        fontSize: Math.round(size * 0.15), fontWeight: 800,
         color: overHalf ? '#fff' : '#5B21B6',
         textShadow: overHalf ? '0 1px 3px rgba(0,0,0,0.30)' : 'none',
         transition: 'color 400ms',
@@ -170,13 +177,44 @@ function TrophyFill({ percent = 0, size = 104 }) {
 }
 
 export default function CallStatsPanel({
+  jwt,
   assignedLeads,
   target = '001',
   touchedPercent = 70,
   counts = {},
   status = { kind: 'active' },
+  onStartAutoCall,
 }) {
-  touchedPercent = 100; // TEMP TEST: force 100% to preview the celebration — REMOVE after testing
+  /* Daily target progress drives BOTH the TARGET box (the goal number) and the
+     TOUCHED trophy (% fill → animates at 100%). Polled from the caller endpoint;
+     replaces the separate target cup that used to sit on the Call page. */
+  const [dt, setDt] = useState(null);   // { target, attempts_today, done }
+  useEffect(() => {
+    if (!jwt) return undefined;
+    let cancelled = false;
+    async function load() {
+      try {
+        const r = await fetch('/api/caller/daily-target', { headers: { Authorization: `Bearer ${jwt}` } });
+        if (!r.ok) return;
+        const d = await r.json();
+        if (!cancelled) setDt(d);
+      } catch { /* keep last value */ }
+    }
+    load();
+    const id = setInterval(load, 15000);
+    // Refetch the instant a call completes (note saved → mhs:activity:changed)
+    // so the TOUCHED % updates right when the call finishes — that's what makes
+    // the 100% trophy celebration fire after the call ends, within the
+    // following 5-second cooldown, instead of lagging up to a poll interval.
+    const onActivity = () => load();
+    window.addEventListener('mhs:activity:changed', onActivity);
+    return () => { cancelled = true; clearInterval(id); window.removeEventListener('mhs:activity:changed', onActivity); };
+  }, [jwt]);
+  const tgtNum = dt && dt.target ? dt.target : 0;
+  const effectiveTarget = tgtNum > 0 ? String(tgtNum).padStart(3, '0') : target;
+  // Override touchedPercent with real progress (attempts / target). 0 when no
+  // target is set, so the trophy just sits empty rather than celebrating.
+  touchedPercent = tgtNum > 0 ? Math.min(100, Math.round(((dt.attempts_today || 0) / tgtNum) * 100)) : 0;
   // 1-second tick — only runs while on a break, to animate the countdown.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -298,13 +336,34 @@ export default function CallStatsPanel({
           <span style={{ fontSize: '0.84rem', fontWeight: 800, letterSpacing: '0.03em', color: INK }}>{banner.title}</span>
           <span style={{ fontSize: '0.82rem', fontWeight: 700, color: 'rgba(59,7,100,0.62)' }}>{banner.sub}</span>
         </span>
+        {/* Resume button — only while on break. Routes through onStartAutoCall
+            (→ pendingAutoStart) which ends the break + restarts auto-call.
+            Replaces the old full-screen break overlay's button. */}
+        {status?.kind === 'break' && typeof onStartAutoCall === 'function' && (
+          <button
+            type="button"
+            onClick={onStartAutoCall}
+            style={{
+              position: 'relative', marginLeft: 'auto', flexShrink: 0,
+              display: 'inline-flex', alignItems: 'center', gap: 7,
+              height: '2.3rem', padding: '0 16px', borderRadius: 50, border: 'none',
+              background: '#059669', color: '#fff',
+              fontFamily: 'Outfit, sans-serif', fontWeight: 800, fontSize: '0.82rem',
+              cursor: 'pointer', boxShadow: '0 6px 16px rgba(5,150,105,0.35)',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            Start Auto-Call
+          </button>
+        )}
       </div>
 
       {/* Two columns: stacked stat boxes | touched ring */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <StatBox label="ASSIGNED LEADS" value={fmtCount(assignedLeads)} icon={ICON_ASSIGNED} />
-          <StatBox label="TARGET" value={target} icon={ICON_TARGET} />
+          <StatBox label="TARGET" value={effectiveTarget} icon={ICON_TARGET} />
         </div>
         <div
           style={{
@@ -389,17 +448,12 @@ export default function CallStatsPanel({
         ))}
       </div>
 
-      {/* 100% trophy celebration — portaled to <body> so the blur covers the
-          whole screen and the trophy can travel from the card to centre. */}
+      {/* 100% trophy celebration — portaled to <body> so the trophy can travel
+          from the card to centre. NO backdrop blur/dim and pointerEvents:none so
+          the celebration never disturbs or blocks the cards behind it; it just
+          flies, plays once, and auto-dismisses. */}
       {celebrate && createPortal(
-        <div style={{ position: 'fixed', inset: 0, zIndex: 99999, pointerEvents: 'auto' }} onClick={dismissCelebrate}>
-          {/* blurred backdrop, fades in as the trophy flies */}
-          <div style={{
-            position: 'absolute', inset: 0,
-            backdropFilter: 'blur(9px)', WebkitBackdropFilter: 'blur(9px)',
-            background: 'rgba(91,33,182,0.14)',
-            opacity: show ? 1 : 0, transition: 'opacity 600ms ease',
-          }} />
+        <div style={{ position: 'fixed', inset: 0, zIndex: 99999, pointerEvents: 'none' }}>
           {/* flying + growing trophy — fades in at start, fades out at end */}
           <div style={{
             position: 'fixed', ...flyStyle,

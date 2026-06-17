@@ -223,6 +223,10 @@ function countTerminalSignals(call) {
 
 export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhaseChange, restoreState, onStateChange }) {
   const t = useTimerSettings();
+  // Admin-tunable (Timer page → Agent reason card): how many SmartFlow retrigger
+  // attempts the agent reason card allows before the account is blocked
+  // (auto-paused). Falls back to the hard default if the setting is missing.
+  const agentRetryCap = Math.max(1, Number(t.agentRetryCap) || AGENT_RETRY_CAP);
   const [fullName, setFullName]                   = useState(lead.full_name || '');
   const [phoneNumber]                             = useState(lead.whatsapp_number || '');
   const [confirmedRange, setConfirmedRange]       = useState('');
@@ -372,7 +376,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
   const _VALID_PHASES = new Set([
     'idle','ext_check','agent_ringing_1','agent_ringing_2','agent_reason_card',
     'customer_ringing','customer_on_call','recall_ringing',
-    'form_window','form_reason_card','dnp_alert','dnp_choice','auto_paused',
+    'form_window','form_reason_card','dnp_alert','auto_paused',
   ]);
   const [callPhase, setCallPhase] = useState(() => {
     const p = restoreState?.phase;
@@ -1335,7 +1339,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
     agentAttemptsRef.current = attempts;
     setAgentAttempts(attempts);
 
-    if (attempts >= AGENT_RETRY_CAP) {
+    if (attempts >= agentRetryCap) {
       setCallPhase('auto_paused');
       saveAutoPaused();
       return;
@@ -1423,13 +1427,9 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
         await postStartCall();
         setCutCount(1);
       } else {
-        // Second DNP press: show the 4-option choice card instead of
-        // immediately saving 'not_picked'. The caller picks one of
-        // Switch Off / Out of Service / No Ring / DNP — the first three
-        // route to triggerDnpJunk() (saves not_interested + JUNK tag +
-        // subtag, lands in Completed Calls); DNP routes to the original
-        // triggerDnp() (saves not_picked, lands in Do Not Picked).
-        setCallPhase('dnp_choice');
+        // Second DNP press: move the lead straight to Do Not Picked
+        // (saves outcome=not_picked) — no intermediate choice card.
+        triggerDnp();
       }
     } catch (e) {
       setRecallToast(e?.message || 'DNP failed');
@@ -1516,17 +1516,16 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
      so the caller fills the form and submits. Without this, abandoned
      calls leave the lead at `last_note_outcome = NULL` indefinitely. */
   function handleCloseClick() {
-    // Customer never connected (idle / ext_check / agent_ringing /
-    // customer_ringing pre-pickup) → no work to save, just close.
-    // customerAnsweredOnce is sticky: flips true on the first
-    // customer.answered and stays true for the lifetime of this modal.
-    if (!customerAnsweredOnce) {
+    // Truly idle — no call in progress AND the customer never connected → there
+    // is nothing in flight to save, so just close.
+    if (!customerAnsweredOnce && callPhase === 'idle') {
       onClose?.();
       return;
     }
-    // Customer WAS on the call (or already in the form). Show a single
-    // confirmation: OK → save as incomplete + stop the auto-call queue.
-    // Cancel → do nothing, modal stays exactly where it is.
+    // Otherwise a call is triggering / ringing (agent_ringing, customer_ringing,
+    // recall_ringing, ext_check) OR the customer already connected. Either way,
+    // confirm before bailing: OK → hang up the leg, save the partial form as
+    // incomplete, and stop the auto-call queue. Cancel → modal stays put.
     setCloseConfirm({ saving: false });
   }
 
@@ -1689,7 +1688,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
           full_name: (fullName || lead.full_name || '').trim() || null,
           outcome:   'auto_paused',
           note:      buildNoteWithDelays(
-            `Auto-paused after ${AGENT_RETRY_CAP} SmartFlow misses by caller.`,
+            `Auto-paused after ${agentRetryCap} SmartFlow misses by caller.`,
             delayReasons,
             agentReasons,
           ),
@@ -1841,10 +1840,17 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || 'Failed to save.');
 
-      fetch(`/api/caller/leads/${lead.id}/hangup`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${jwt}` },
-      }).catch(() => {});
+      // Cut the live Tata call BEFORE auto-advancing. Awaited (not
+      // fire-and-forget) so the current leg is dropped before the parent
+      // kicks off the next auto-dial — otherwise the new originate can race
+      // the hangup and the old call is left up. Non-fatal: the note is
+      // already saved, so a hangup hiccup must not block completion.
+      try {
+        await fetch(`/api/caller/leads/${lead.id}/hangup`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${jwt}` },
+        });
+      } catch (_) { /* Tata may have already ended the leg */ }
 
       callOnSaved(derivedOutcome, { autoAdvance: true });
     } catch (e) {
@@ -1855,7 +1861,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
   }
 
   /* ── Render ────────────────────────────────────────────────────────── */
-  const overlayPhase = ['ext_check', 'agent_reason_card', 'form_reason_card', 'dnp_alert', 'dnp_choice', 'auto_paused']
+  const overlayPhase = ['ext_check', 'agent_reason_card', 'form_reason_card', 'dnp_alert', 'auto_paused']
     .includes(callPhase) ? callPhase : null;
 
   return (
@@ -2296,7 +2302,7 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
           onDelayReasonSubmit={submitDelayReason}
           totalWindow={FORM_WINDOW_SECS}
           agentAttempts={agentAttempts}
-          retryCap={AGENT_RETRY_CAP}
+          retryCap={agentRetryCap}
           agentBubbleText={agentNudgeCount >= 1 ? AGENT_REASON_NUDGE : AGENT_REASON_PRIMARY}
           formBubbleText={formNudgeCount >= 1 ? FORM_REASON_NUDGE : FORM_REASON_PRIMARY}
           agentBubblePulse={agentNudgeCount}
@@ -2919,66 +2925,6 @@ function CenteredOverlay({
         >
           Submit Reason
         </button>
-      </div>
-    );
-  }
-
-  if (phase === 'dnp_choice') {
-    /* Second-DNP choice card. Renders four pill buttons stacked in a
-       2x2 grid: the three JUNK reasons (Switch Off / Out of Service /
-       No Ring → outcome=not_interested + JUNK + subtag, lands in
-       Completed Calls) and the legacy DNP button (outcome=not_picked,
-       lands in Do Not Picked). No timer / nudge here yet — the caller
-       has clicked DNP twice, so they're actively engaged. */
-    return wrap(
-      <div style={{ ...cardStyle, padding: '28px 26px' }}>
-        <h3 style={{ margin: 0, fontWeight: 800, fontSize: '1.05rem', color: '#3B0764', textAlign: 'center' }}>
-          Why didn't the customer pick up?
-        </h3>
-        <p style={{ margin: '8px 0 22px', fontSize: '0.84rem', color: 'rgba(91,33,182,0.65)', textAlign: 'center' }}>
-          The first three move the lead to <b>Completed</b> with a <b>JUNK</b> tag.
-          DNP moves it to the <b>Do Not Picked</b> bucket.
-        </p>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-          {dnpJunkSubtags.map(opt => (
-            <button
-              key={opt.value}
-              type="button"
-              onClick={() => onDnpChoose && onDnpChoose(opt.value)}
-              style={{
-                padding: '14px 12px', borderRadius: 10,
-                border: '1px solid rgba(245,158,11,0.45)',
-                background: 'linear-gradient(135deg, #FEF3C7, #FDE68A)',
-                color: '#78350F',
-                fontFamily: 'Outfit, sans-serif', fontWeight: 800, fontSize: '0.88rem',
-                cursor: 'pointer',
-                boxShadow: '0 4px 14px rgba(245,158,11,0.20)',
-                transition: 'transform 120ms, box-shadow 120ms',
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-1px)'; e.currentTarget.style.boxShadow = '0 6px 18px rgba(245,158,11,0.30)'; }}
-              onMouseLeave={(e) => { e.currentTarget.style.transform = 'translateY(0)';   e.currentTarget.style.boxShadow = '0 4px 14px rgba(245,158,11,0.20)'; }}
-            >
-              {opt.label}
-            </button>
-          ))}
-          <button
-            type="button"
-            onClick={() => onDnpChoose && onDnpChoose('dnp')}
-            style={{
-              padding: '14px 12px', borderRadius: 10,
-              border: 'none',
-              background: '#DC2626', color: '#fff',
-              fontFamily: 'Outfit, sans-serif', fontWeight: 800, fontSize: '0.88rem',
-              cursor: 'pointer',
-              boxShadow: '0 4px 16px rgba(220,38,38,0.35)',
-              transition: 'transform 120ms',
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-1px)'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.transform = 'translateY(0)'; }}
-          >
-            DNP
-          </button>
-        </div>
       </div>
     );
   }

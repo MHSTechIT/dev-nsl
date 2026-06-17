@@ -3,7 +3,6 @@ import Lottie from 'lottie-react';
 import useRobotNudge from '../hooks/useRobotNudge';
 import { useTimerSettings } from '../context/TimerSettingsContext';
 import CallStatsPanel from './CallStatsPanel';
-import CallerTargetCup from './CallerTargetCup';
 
 // Use the SAME robot the corner MascotBot uses (robot-idle.json) — the
 // happy variant + heart-eye overlay didn't land the eyes inside the
@@ -115,7 +114,7 @@ function SpeechBubble({ children, fading = false, fadeMs, inMs, floatMs }) {
    button delegates to CallerShell's `onStartAutoCall` handler which
    navigates to Assigned Leads and kicks off the auto-call sequence. */
 
-export default function CallModule({ jwt, onStartAutoCall, isActive, robotMessage, assignedCount, tagCounts, callStatus }) {
+export default function CallModule({ jwt, onStartAutoCall, isActive, robotMessage, assignedCount, tagCounts, callStatus, callActive = false }) {
   const t = useTimerSettings();
   // When the account is paused, the Call page suppresses the fullscreen
   // overlay robot (CallerShell) and shows the paused line through THIS
@@ -242,7 +241,10 @@ export default function CallModule({ jwt, onStartAutoCall, isActive, robotMessag
   }, [jwt]);
 
   const { count: idleNudgeCount } = useRobotNudge({
-    active: isActive === true,
+    // Suspend the "never pressed Start Call" idle watchdog while a call is in
+    // progress — the caller is on the phone, not idle. useRobotNudge clears its
+    // count when active flips false, so it restarts fresh after each call.
+    active: isActive === true && !callActive,
     intervalMs: t.robotNudgeIntervalMs,
     maxRepeats: t.autoPauseNudgeCount,
     storageKey: nudgeStorageKey,
@@ -322,11 +324,6 @@ export default function CallModule({ jwt, onStartAutoCall, isActive, robotMessag
         gap: 'min(7vw, 110px)',
       }}
     >
-      {/* Daily target progress cup — top-right of the Call page */}
-      <div style={{ position: 'absolute', top: 8, right: 8, zIndex: 5 }}>
-        <CallerTargetCup jwt={jwt} />
-      </div>
-
       <style>{`
         @keyframes cm-bubble-in {
           from { opacity: 0; transform: translateY(-6px) scale(0.96); }
@@ -389,7 +386,7 @@ export default function CallModule({ jwt, onStartAutoCall, isActive, robotMessag
 
       {/* Left: caller status / stats card — live assigned count, call tag
           counts, and the caller's current status (break countdown / blocked). */}
-      <CallStatsPanel assignedLeads={assignedCount} counts={tagCounts} status={callStatus} />
+      <CallStatsPanel jwt={jwt} assignedLeads={assignedCount} counts={tagCounts} status={callStatus} onStartAutoCall={onStartAutoCall} />
 
       {/* Right: vertical stack — bubble, robot, button. */}
       <div

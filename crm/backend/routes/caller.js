@@ -208,12 +208,18 @@ router.get('/break-budget', async (req, res) => {
 /* ── GET /api/caller/stats ──
    Live numbers for the Call-page status card:
      • assigned — active assigned leads (same definition as GET /leads)
-     • tags     — counts of this caller's leads by qualification tag
-                  (HOT/WARM/COLD/JUNK) + FOLLOW-UP (follow_up) + DNP (not_picked).
+     • tags     — counts of leads this caller TAGGED TODAY (IST) by qualification
+                  tag (HOT/WARM/COLD/JUNK) + FOLLOW-UP (follow_up) + DNP
+                  (not_picked). The "today" window is the IST calendar day, so the
+                  tiles naturally reset to 0 at 12:00 AM IST every night.
    Scoped to the caller's recent webinars, so it reflects the current batch. */
 router.get('/stats', async (req, res) => {
   const cfg = workspaceConfig(req.caller.workspace);
   try {
+    // Reused IST "noted today" predicate — last_note_at falls on the current
+    // Asia/Kolkata calendar day. Crossing midnight IST flips every tile to 0.
+    const TODAY_IST = `(l.last_note_at AT TIME ZONE 'Asia/Kolkata')::date
+                       = (NOW() AT TIME ZONE 'Asia/Kolkata')::date`;
     const { rows } = await pool.query(
       `SELECT
          COUNT(*) FILTER (
@@ -221,12 +227,12 @@ router.get('/stats', async (req, res) => {
              AND (l.last_note_outcome IS NULL
                   OR (l.last_note_outcome = 'follow_up' AND l.follow_up_at <= NOW()))
          )::int AS assigned,
-         COUNT(*) FILTER (WHERE l.lead_tag = 'HOT')::int  AS hot,
-         COUNT(*) FILTER (WHERE l.lead_tag = 'WARM')::int AS warm,
-         COUNT(*) FILTER (WHERE l.lead_tag = 'COLD')::int AS cold,
-         COUNT(*) FILTER (WHERE l.lead_tag = 'JUNK')::int AS junk,
-         COUNT(*) FILTER (WHERE l.last_note_outcome = 'follow_up')::int   AS followup,
-         COUNT(*) FILTER (WHERE l.last_note_outcome = 'not_picked')::int  AS dnp
+         COUNT(*) FILTER (WHERE l.lead_tag = 'HOT'  AND ${TODAY_IST})::int AS hot,
+         COUNT(*) FILTER (WHERE l.lead_tag = 'WARM' AND ${TODAY_IST})::int AS warm,
+         COUNT(*) FILTER (WHERE l.lead_tag = 'COLD' AND ${TODAY_IST})::int AS cold,
+         COUNT(*) FILTER (WHERE l.lead_tag = 'JUNK' AND ${TODAY_IST})::int AS junk,
+         COUNT(*) FILTER (WHERE l.last_note_outcome = 'follow_up'  AND ${TODAY_IST})::int AS followup,
+         COUNT(*) FILTER (WHERE l.last_note_outcome = 'not_picked' AND ${TODAY_IST})::int AS dnp
        FROM leads l
        WHERE l.assigned_user_id = $1
          AND (l.webinar_id IS NULL OR l.webinar_id IN ${cfg.recentWebinars})`,
@@ -377,16 +383,16 @@ router.get('/leads', async (req, res) => {
         WHERE l.assigned_user_id = $1
           AND l.next_batch_parked = FALSE
           AND (
-            l.last_note_outcome IS NULL
+            -- Untouched-new leads stay scoped to the recent (current + previous)
+            -- webinar window (plus pinned: admin "move to Assigned", reopened
+            -- DNP/missed, inbound call). The matching Untouched query excludes
+            -- pinned so they're never in both.
+            (l.last_note_outcome IS NULL
+              AND (l.webinar_id IS NULL OR l.webinar_id IN ${cfg.recentWebinars} OR l.pinned_at IS NOT NULL))
+            -- A DUE follow-up always returns to Assigned regardless of webinar
+            -- age — the caller scheduled it, so it must come back even after the
+            -- webinar has ended / aged out of the recent window.
             OR (l.last_note_outcome = 'follow_up' AND l.follow_up_at <= NOW())
-          )
-          AND (
-            l.webinar_id IS NULL
-            OR l.webinar_id IN ${cfg.recentWebinars}
-            -- Pinned leads (admin "move to Assigned", reopened DNP/missed, or an
-            -- inbound call) surface in Assigned regardless of webinar age. The
-            -- matching Untouched query excludes pinned so they're never in both.
-            OR l.pinned_at IS NOT NULL
           )
         ORDER BY
           (l.last_note_outcome = 'follow_up' AND l.follow_up_at <= NOW()) DESC NULLS LAST,
@@ -462,10 +468,10 @@ router.get('/leads/untouched', async (req, res) => {
       `${cfg.leadSelect}
         WHERE l.assigned_user_id = $1
           AND l.next_batch_parked = FALSE
-          AND (
-            l.last_note_outcome IS NULL
-            OR (l.last_note_outcome = 'follow_up' AND l.follow_up_at <= NOW())
-          )
+          -- Only untouched-NEW leads on old webinars live here. Due follow-ups on
+          -- old webinars now return to Assigned (see /leads), so they're excluded
+          -- to avoid double-listing.
+          AND l.last_note_outcome IS NULL
           AND l.webinar_id IS NOT NULL
           AND l.webinar_id NOT IN ${cfg.recentWebinars}
           -- Pinned leads belong in Assigned (see /leads), never Untouched.

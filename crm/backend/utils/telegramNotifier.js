@@ -213,6 +213,40 @@ async function notifyEmptyQueue(caller, minutesEmpty) {
   }
 }
 
+/* ──────────────────────────────────────────────────────────────────────
+   Public: system alert that member-based WhatsApp link rotation is FROZEN
+   for a workspace because Whapi couldn't read the community member count
+   (admin number not in the group, channel disconnected, etc.). Per product
+   decision the link does NOT rotate until this is fixed, so we ping the
+   operators. Sent to every manager recipient (or all recipients if none are
+   tagged as managers). Fire-and-forget.
+   ────────────────────────────────────────────────────────────────────── */
+async function notifyLinkRotationFrozen(source, webinarName, reason) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT DISTINCT telegram_chat_id, target_type FROM telegram_alert_recipients
+        WHERE telegram_chat_id IS NOT NULL AND telegram_chat_id <> ''`
+    );
+    if (rows.length === 0) return;
+    const managers = rows.filter(r => r.target_type === 'manager');
+    const targets = (managers.length ? managers : rows);
+
+    const text = [
+      `🔗 <b>WhatsApp link rotation FROZEN</b>`,
+      ``,
+      `Workspace: <b>${escapeHtml(source)}</b>${webinarName ? ` — ${escapeHtml(webinarName)}` : ''}`,
+      `The community member count couldn't be read from Whapi, so the link will NOT rotate to the next group.`,
+      `Reason: <code>${escapeHtml(reason || 'unknown')}</code>`,
+      ``,
+      `Fix the Whapi connection (make sure the admin number is still in the community and the channel is connected), then rotation resumes automatically.`,
+    ].join('\n');
+
+    await Promise.all(targets.map(r => sendTelegram(r.telegram_chat_id, text)));
+  } catch (err) {
+    console.error('[telegramNotifier] notifyLinkRotationFrozen error:', err.message);
+  }
+}
+
 /* Tiny HTML-escaper for Telegram's `parse_mode: HTML`. Keep this in sync
    with any new tag we use (b, i, code, etc.). */
 function escapeHtml(s) {
@@ -228,6 +262,7 @@ module.exports = {
   answerCallback,
   notifyAutoPause,
   notifyEmptyQueue,
+  notifyLinkRotationFrozen,
   escapeHtml,
   prettyReason,
 };

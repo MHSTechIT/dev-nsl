@@ -22,21 +22,35 @@ function getLinkIndex(leadCount) {
   return Math.max(1, Math.ceil(leadCount / 950));
 }
 
-/* ── Editable Link Row ── */
-function LinkRow({ label, value, onChange, bg, isActive, readOnly }) {
+/* ── Editable Link Row ──
+   copyOnly=true → a read-only "Previous Link" row: the input can't be edited,
+   and the trailing button copies the link instead of toggling edit mode.
+   memberInfo (optional) → { count, threshold } rendered as a small pill, e.g.
+   "734 / 950 members", for the live Whapi member readout on the current link. */
+function LinkRow({ label, value, onChange, bg, isActive, copyOnly, memberInfo }) {
   const [editing, setEditing] = useState(false);
+  const [copied, setCopied]   = useState(false);
   const inputRef = useRef(null);
 
   useEffect(() => {
     if (editing && inputRef.current) inputRef.current.focus();
   }, [editing]);
 
+  function copy() {
+    if (!value) return;
+    navigator.clipboard?.writeText(value)
+      .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); })
+      .catch(() => {});
+  }
+
+  const editable = !copyOnly && editing;
+
   return (
     <div style={{ marginBottom: 16 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
         <label style={{
           fontFamily: 'Outfit, sans-serif', fontSize: '0.75rem', fontWeight: 700,
-          color: '#4A1A94',
+          color: copyOnly ? 'rgba(91,33,182,0.55)' : '#4A1A94',
         }}>
           {label}
         </label>
@@ -52,13 +66,25 @@ function LinkRow({ label, value, onChange, bg, isActive, readOnly }) {
             Active
           </span>
         )}
+        {memberInfo && (
+          <span style={{
+            marginLeft: 'auto',
+            display: 'inline-flex', alignItems: 'center', gap: 4,
+            padding: '1px 9px', borderRadius: 20,
+            background: 'rgba(91,33,182,0.07)', border: '1px solid rgba(91,33,182,0.18)',
+            fontFamily: 'Outfit, sans-serif', fontSize: '0.64rem', fontWeight: 700,
+            color: '#5B21B6',
+          }}>
+            {memberInfo.count} / {memberInfo.threshold} members
+          </span>
+        )}
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <div style={{
           flex: 1, position: 'relative',
-          background: bg || 'rgba(237,234,248,0.30)',
+          background: bg || (copyOnly ? 'rgba(91,33,182,0.04)' : 'rgba(237,234,248,0.30)'),
           borderRadius: 10,
-          border: editing
+          border: editable
             ? '1.5px solid rgba(91,33,182,0.50)'
             : isActive
               ? '1.5px solid rgba(5,150,105,0.35)'
@@ -69,8 +95,8 @@ function LinkRow({ label, value, onChange, bg, isActive, readOnly }) {
             ref={inputRef}
             type="url"
             value={value}
-            onChange={e => onChange(e.target.value)}
-            readOnly={!editing && !readOnly}
+            onChange={e => onChange && onChange(e.target.value)}
+            readOnly={!editable}
             placeholder="https://chat.whatsapp.com/..."
             style={{
               width: '100%', height: '2.6rem',
@@ -78,44 +104,73 @@ function LinkRow({ label, value, onChange, bg, isActive, readOnly }) {
               borderRadius: 10, border: 'none',
               background: 'transparent',
               fontFamily: 'Outfit, sans-serif', fontSize: '0.82rem',
-              color: '#3B0764', fontWeight: 500,
+              color: copyOnly ? 'rgba(59,7,100,0.75)' : '#3B0764', fontWeight: 500,
               outline: 'none', boxSizing: 'border-box',
-              cursor: editing ? 'text' : 'default',
+              cursor: editable ? 'text' : 'default',
             }}
           />
         </div>
-        <button
-          onClick={() => setEditing(!editing)}
-          title={editing ? 'Done' : 'Edit'}
-          style={{
-            width: 36, height: 36, borderRadius: 10,
-            border: '1px solid rgba(139,92,246,0.20)',
-            background: editing ? 'rgba(91,33,182,0.08)' : 'rgba(237,234,248,0.50)',
-            cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-            flexShrink: 0, transition: 'all 200ms',
-          }}
-        >
-          {editing ? (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5B21B6" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="20 6 9 17 4 12"/>
-            </svg>
-          ) : (
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5B21B6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>
-              <path d="m15 5 4 4"/>
-            </svg>
-          )}
-        </button>
+        {copyOnly ? (
+          <button
+            onClick={copy}
+            title={copied ? 'Copied!' : 'Copy link'}
+            style={{
+              width: 36, height: 36, borderRadius: 10,
+              border: '1px solid rgba(139,92,246,0.20)',
+              background: 'rgba(237,234,248,0.50)',
+              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexShrink: 0, transition: 'all 200ms',
+            }}
+          >
+            {copied ? (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#059669" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5B21B6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            )}
+          </button>
+        ) : (
+          <button
+            onClick={() => setEditing(!editing)}
+            title={editing ? 'Done' : 'Edit'}
+            style={{
+              width: 36, height: 36, borderRadius: 10,
+              border: '1px solid rgba(139,92,246,0.20)',
+              background: editing ? 'rgba(91,33,182,0.08)' : 'rgba(237,234,248,0.50)',
+              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexShrink: 0, transition: 'all 200ms',
+            }}
+          >
+            {editing ? (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5B21B6" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="20 6 9 17 4 12"/>
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5B21B6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>
+                <path d="m15 5 4 4"/>
+              </svg>
+            )}
+          </button>
+        )}
       </div>
     </div>
   );
 }
 
 /* ── Webinar Column Card ── */
-function WebinarCard({ type, webinarDate, webinarId, webinarName, links, setLinks, leadCount, saving, onSave, toast, source, onCreateTemplate }) {
+function WebinarCard({ type, webinarDate, webinarId, webinarName, links, setLinks, leadCount, saving, onSave, toast, source, onCreateTemplate, isWhapi = false, activeIndex = 1, memberThreshold = 950 }) {
   const isCurrent = type === 'current';
   const isPrevious = type === 'previous';
-  const activeLinkIndex = isCurrent ? Math.min(getLinkIndex(leadCount), links.length || 1) : 0;
+  // Whapi workspaces rotate by live community members — the active link is the
+  // explicit, scheduler-advanced index from the backend. Others use lead count.
+  const activeLinkIndex = isCurrent
+    ? (isWhapi
+        ? Math.min(Math.max(1, activeIndex), links.length || 1)
+        : Math.min(getLinkIndex(leadCount), links.length || 1))
+    : 0;
+  const activeMemberCount = isWhapi && isCurrent
+    ? (links[activeLinkIndex - 1]?.member_count || 0)
+    : 0;
 
   function updateLink(index, url) {
     setLinks(prev => prev.map((l, i) => i === index ? { ...l, link_url: url } : l));
@@ -193,11 +248,11 @@ function WebinarCard({ type, webinarDate, webinarId, webinarName, links, setLink
               <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
             </svg>
             <span style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', fontWeight: 600, color: '#059669' }}>
-              {leadCount} Leads
+              {isWhapi ? `${activeMemberCount} members in current group` : `${leadCount} Leads`}
             </span>
           </div>
           <span style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.72rem', fontWeight: 600, color: 'rgba(5,150,105,0.65)' }}>
-            Active: Link {activeLinkIndex} (rotates every 950)
+            Active: Link {activeLinkIndex} (rotates at {isWhapi ? `${memberThreshold} members` : '950 leads'})
           </span>
         </div>
       )}
@@ -218,35 +273,56 @@ function WebinarCard({ type, webinarDate, webinarId, webinarName, links, setLink
           </div>
         ) : (
           <>
-            {links.map((link, i) => (
-              <div key={i} style={{ position: 'relative' }}>
-                <LinkRow
-                  label={isCurrent && i === 0 ? 'Current Link' : `${isCurrent ? 'Upcoming' : ''} Link ${i + 1}`}
-                  value={link.link_url}
-                  onChange={url => updateLink(i, url)}
-                  bg={isCurrent && i === activeLinkIndex - 1 ? 'rgba(5,150,105,0.06)' : undefined}
-                  isActive={isCurrent && i === activeLinkIndex - 1}
-                />
-                {links.length > 1 && (
-                  <button
-                    onClick={() => removeLink(i)}
-                    title="Remove link"
-                    style={{
-                      position: 'absolute', top: 0, right: 0,
-                      width: 20, height: 20, borderRadius: '50%',
-                      border: '1px solid rgba(220,38,38,0.30)',
-                      background: 'rgba(254,242,242,0.80)',
-                      cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      transition: 'all 200ms',
-                    }}
-                  >
-                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#DC2626" strokeWidth="3" strokeLinecap="round">
-                      <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                    </svg>
-                  </button>
-                )}
-              </div>
-            ))}
+            {links.map((link, i) => {
+              const order = i + 1;
+              // Whapi current card: links below the active index are spent
+              // communities shown read-only ("Previous Link", copy-only); the
+              // active index is the live "Current Link"; above it are upcoming.
+              const isActiveRow   = isCurrent && order === activeLinkIndex;
+              const isPreviousRow = isWhapi && isCurrent && order < activeLinkIndex;
+              const isUpcomingRow = isWhapi && isCurrent && order > activeLinkIndex;
+              let label;
+              if (isPreviousRow)      label = order === activeLinkIndex - 1 ? 'Previous Link' : `Previous Link ${order}`;
+              else if (isActiveRow)   label = 'Current Link';
+              else if (isCurrent)     label = `Upcoming Link ${order}`;
+              else                    label = `Link ${order}`;
+              // Removable only for editable upcoming rows (never the active or a
+              // previous read-only link). Non-Whapi keeps the old behaviour.
+              const removable = isWhapi
+                ? isUpcomingRow && links.length > 1
+                : links.length > 1;
+              return (
+                <div key={i} style={{ position: 'relative' }}>
+                  <LinkRow
+                    label={label}
+                    value={link.link_url}
+                    onChange={url => updateLink(i, url)}
+                    bg={isActiveRow ? 'rgba(5,150,105,0.06)' : undefined}
+                    isActive={isActiveRow}
+                    copyOnly={isPreviousRow}
+                    memberInfo={isWhapi && isActiveRow ? { count: link.member_count || 0, threshold: memberThreshold } : null}
+                  />
+                  {removable && (
+                    <button
+                      onClick={() => removeLink(i)}
+                      title="Remove link"
+                      style={{
+                        position: 'absolute', top: 0, right: 0,
+                        width: 20, height: 20, borderRadius: '50%',
+                        border: '1px solid rgba(220,38,38,0.30)',
+                        background: 'rgba(254,242,242,0.80)',
+                        cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        transition: 'all 200ms',
+                      }}
+                    >
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#DC2626" strokeWidth="3" strokeLinecap="round">
+                        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+                      </svg>
+                    </button>
+                  )}
+                </div>
+              );
+            })}
 
             {/* Add link button */}
             <button
@@ -277,10 +353,14 @@ function WebinarCard({ type, webinarDate, webinarId, webinarName, links, setLink
                 fontFamily: 'Outfit, sans-serif', fontSize: '0.70rem', fontWeight: 500,
                 color: 'rgba(91,33,182,0.55)', lineHeight: 1.5, marginBottom: 12,
               }}>
-                Links auto-rotate every 950 leads:
-                {links.map((_, i) => (
-                  <span key={i}> Link {i + 1} = {i * 950}–{(i + 1) * 950} leads{i < links.length - 1 ? ',' : '+'}</span>
-                ))}
+                {isWhapi ? (
+                  <>Links auto-rotate when the current community reaches {memberThreshold} live members (counted via Whapi). When it fills, the next link becomes current and this one moves to <b>Previous Link</b> (read-only).</>
+                ) : (
+                  <>Links auto-rotate every 950 leads:
+                  {links.map((_, i) => (
+                    <span key={i}> Link {i + 1} = {i * 950}–{(i + 1) * 950} leads{i < links.length - 1 ? ',' : '+'}</span>
+                  ))}</>
+                )}
               </div>
             )}
           </>
@@ -372,6 +452,7 @@ export default function WhatsAppLinksEditor({ token, source = 'meta' }) {
 
   // Current webinar state
   const [curLinks, setCurLinks]     = useState([{ link_url: '', order_index: 1 }]);
+  const [curActiveIndex, setCurActiveIndex] = useState(1); // Whapi member-rotation pointer
   const [savingCur, setSavingCur]   = useState(false);
   const [toastCur, setToastCur]     = useState(null);
 
@@ -448,6 +529,7 @@ export default function WhatsAppLinksEditor({ token, source = 'meta' }) {
         .then(r => r.json())
         .then(d => {
           const links = d.links || [];
+          setCurActiveIndex(d.active_index || 1);
           if (links.length > 0) {
             setCurLinks(links);
           } else {
@@ -613,6 +695,8 @@ export default function WhatsAppLinksEditor({ token, source = 'meta' }) {
           onSave={() => handleSave(activeWebinar?.id, curLinks, setSavingCur, setToastCur)}
           toast={toastCur}
           source={source}
+          isWhapi={isMetaTempLike(source)}
+          activeIndex={curActiveIndex}
           onCreateTemplate={() => { setEditingTpl(null); setTplOpen(true); }}
         />
 

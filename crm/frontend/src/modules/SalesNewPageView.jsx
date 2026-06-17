@@ -4,6 +4,7 @@ import Loading from '../components/Loading';
 import DateTimePicker from '../admin/DateTimePicker';
 import CallerLeadsMoveDrawer from '../admin/CallerLeadsMoveDrawer';
 import CallerActivityDrawer from '../admin/CallerActivityDrawer';
+import { leadsToExportCsv } from '../utils/leadsExportCsv';
 import CallLogDrawer from '../admin/CallLogDrawer';
 
 /* ── "Caller 360" combined report ────────────────────────────────────────────
@@ -109,7 +110,7 @@ const GROUPS = [
     { id: 'answered', label: 'Answered',         get: (r) => num(r.answered) },
     { id: 'anstalk',  label: 'Ans Talk (h.m.s)', get: (r) => secToHms(r.answered_dur_sec) },
   ]},
-  { id: 'interested', label: 'INTERESTED', color: '#8B5CF6', cols: [
+  { id: 'interested', label: 'INTERESTED', color: '#8B5CF6', collapsible: true, cols: [
     { id: 'interested', label: 'Interested', get: (r) => num(r.interested) },
     { id: 'hot',  label: 'Hot',  get: (r) => num(r.hot) },
     { id: 'warm', label: 'Warm', get: (r) => num(r.warm) },
@@ -428,14 +429,34 @@ export default function SalesNewPageView({ token, source = 'all' }) {
   const inlineCols = 3 + GROUPS.reduce((s, g) => s + (isOpen(g) ? g.cols.length : 1), 0);
   const ALL_COLS = GROUPS.flatMap((g) => g.cols); // CSV always exports every column
 
-  function exportCsv() {
-    const header = ['Caller', 'Extension', 'Batch', ...ALL_COLS.map((c) => c.label)];
-    const body = visibleRows.map((r) => [
-      r.name, r.tata_extension || '', r.batch || '',
-      ...ALL_COLS.map((c) => { const v = c.get(r); return v == null ? '' : v; }),
-    ]);
-    const csv = [header, ...body].map((row) => row.map(toCsvCell).join(',')).join('\n');
-    downloadCsv(csv, `caller-report_${range.from}_to_${range.to}.csv`);
+  const [exporting, setExporting] = useState(false);
+  /* Export the LEADS (not the caller summary) in the standard
+     LeadOpportunity (crm.lead) layout, scoped to the dashboard filters:
+     selected webinar + the visible salespeople (after TL / salesperson /
+     status filters). */
+  async function exportCsv() {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const params = new URLSearchParams({ from: range.from, to: range.to });
+      if (webinarId) params.set('webinar_id', webinarId);
+      const callerIds = visibleRows.map((r) => r.caller_id).filter(Boolean);
+      if (callerIds.length) params.set('caller_ids', callerIds.join(','));
+      if (tlFilter) params.set('tl_id', tlFilter);
+      // Export only Completed calls, Not Picked, and Next Batch leads (for the
+      // in-scope callers / selected webinar). Backend ORs these buckets.
+      params.set('categories', 'completed,not_picked,next_batch');
+      const r = await fetch(`/api/admin/sales-performance/leads-export?${params}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      downloadCsv(leadsToExportCsv(d.leads || []), `leads_${range.from}_to_${range.to}.csv`);
+    } catch (e) {
+      alert('Export failed: ' + (e.message || e));
+    } finally {
+      setExporting(false);
+    }
   }
 
   /* ── shared cell styles ─────────────────────────────────────────────────── */
@@ -863,7 +884,7 @@ export default function SalesNewPageView({ token, source = 'all' }) {
                   <th style={{ ...thBase, position: 'sticky', top: 28, zIndex: 3, background: '#F3F0FD', color: INK, textAlign: 'left', minWidth: WORKSPACE_W, width: WORKSPACE_W }}>Workspace</th>
                   {GROUPS.map((g) => isOpen(g)
                     ? g.cols.map((c) => <th key={c.id} style={labelTh}>{c.label}</th>)
-                    : <th key={g.id} style={labelTh}>—</th>
+                    : <th key={g.id} style={labelTh}>{g.cols[0].label}</th>
                   )}
                 </tr>
               </thead>
@@ -920,7 +941,7 @@ export default function SalesNewPageView({ token, source = 'all' }) {
                             if (c.pct) { const p = c.get(r); return <td key={c.id} style={{ ...tdBase, fontWeight: 800, color: convColor(p) }}>{p == null ? '—' : `${p}%`}</td>; }
                             return <td key={c.id} style={{ ...tdBase, ...(c.bold ? { fontWeight: 700 } : {}) }}>{c.get(r)}</td>;
                           })
-                        : <td key={g.id} style={tdBase}>—</td>
+                        : <td key={g.id} style={{ ...tdBase, fontWeight: 700 }}>{g.cols[0].get(r)}</td>
                       )}
                     </tr>
                   );
@@ -939,7 +960,7 @@ export default function SalesNewPageView({ token, source = 'all' }) {
                           if (c.pct) { const p = c.get(data.totals); return <td key={c.id} style={{ ...footTd, color: convColor(p) }}>{p == null ? '—' : `${p}%`}</td>; }
                           return <td key={c.id} style={footTd}>{c.get(data.totals)}</td>;
                         })
-                      : <td key={g.id} style={footTd}>—</td>
+                      : <td key={g.id} style={footTd}>{g.cols[0].get(data.totals)}</td>
                     )}
                   </tr>
                 </tfoot>

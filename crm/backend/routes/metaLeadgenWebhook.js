@@ -48,7 +48,16 @@ function flattenFieldData(fd) {
   }
   return out;
 }
-const pickKey = (m, keys) => { for (const k of keys) if (m[k]) return m[k]; return ''; };
+/* Space/underscore-insensitive lookup — a Meta field named "phone number"
+   (space) must still match the 'phone_number' key, else the phone comes back
+   empty and every such lead collides on the empty-string dedup. */
+const normKey = (s) => String(s).toLowerCase().replace(/[\s_]+/g, '');
+function pickKey(m, keys) {
+  const nmap = {};
+  for (const k in m) nmap[normKey(k)] = m[k];
+  for (const k of keys) { const v = nmap[normKey(k)]; if (v) return v; }
+  return '';
+}
 
 /* Parse a webinar_config form-id column into a string[]. The column may arrive
    as a parsed JSONB array, a JSON-array string, or a bare id. */

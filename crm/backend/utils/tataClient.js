@@ -176,22 +176,31 @@ async function hangup({ providerCallId, accountType, perUserKey }) {
 
   const url = `${BASE_URL.replace(/\/$/, '')}/v1/call/hangup`;
 
-  // Diagnosis from the previous round:
-  //   /v1/call/hangup returned 422 "Invalid request body" — endpoint and auth
-  //   are correct, body schema is wrong. Iterate through the field-shape
-  //   variants Tata is known to accept across plans. First non-422 wins.
+  // Diagnosis (probed live against this account, 2026-06-17):
+  //   POST /v1/call/hangup with { call_id } → 422 "Invalid Call ID" for an
+  //   already-ended call (the FIELD is accepted; the value just no longer
+  //   maps to a live call). { uuid }/{ ref_id } → 422 "Invalid request body"
+  //   (the field itself is wrong). So `call_id` is the ONLY field Tata's
+  //   hangup accepts here — lead with it.
+  //
+  // The id Tata sends in webhooks (and that we store as provider_call_id)
+  // looks like "DR6-D6-1781660841.351748" — a dialplan-prefixed telephony
+  // uuid. Tata's hangup may want either the full string or the bare uuid
+  // ("1781660841.351748"), so try both. The remaining legacy/uuid shapes are
+  // kept as last-resort fallbacks for older plans.
+  // `call_id` (JSON) is the proven shape for this account. We try the full id
+  // and the bare telephony uuid, then keep `uuid` as a single legacy fallback
+  // for older plans. The endpoint calls this per candidate id, so we keep the
+  // variant list tight to avoid a request storm.
+  const bareUuid = String(providerCallId).replace(/^[A-Za-z0-9]+-[A-Za-z0-9]+-/, '');
   const bodyVariants = [
-    { uuid: providerCallId },                       // most common live-call shape
-    { ref_id: providerCallId },                     // newer originate-ref shape
-    { call_id: providerCallId },                    // legacy
-    { call_id: providerCallId, action: 'hangup' },
-    { request_id: providerCallId },
-    { id: providerCallId },
-    { uuid: providerCallId, action: 'disconnect' },
+    { call_id: providerCallId },                    // proven field, full id
+    ...(bareUuid !== providerCallId ? [{ call_id: bareUuid }] : []), // bare telephony uuid
+    { uuid: providerCallId },                        // legacy fallback (older plans)
   ];
 
-  // Some Tata variants want form-urlencoded; we try both content types.
-  const contentTypes = ['application/json', 'application/x-www-form-urlencoded'];
+  // JSON is the accepted content type (urlencoded added nothing in testing).
+  const contentTypes = ['application/json'];
 
   // Tata returns the SAME 422 for two very different conditions:
   //   1) body schema is wrong (try the next variant)
@@ -206,11 +215,23 @@ async function hangup({ providerCallId, accountType, perUserKey }) {
     if (status !== 422) return false;
     const d = data && typeof data === 'object' ? data : {};
     const msg = JSON.stringify(d).toLowerCase();
+    // Tata's "this call no longer exists" fingerprints, seen across plans:
+    //   - "invalid call id"  → call_id field accepted but the call is gone
+    //   - both "call id field is required" AND "ref id field is required"
+    //     (older schema's way of saying neither matched a live call)
+    if (msg.includes('invalid call id')) return true;
     return msg.includes('call id field is required')
         && msg.includes('ref id field is required');
   }
 
   const attempts = [];
+  // "Invalid Call ID" is ambiguous: it can mean either (a) the call already
+  // ended, or (b) this id format isn't the one Tata wants for a still-live
+  // call. We must NOT short-circuit on it mid-loop, or we'd skip the bare-uuid
+  // call_id variant and fail to cut a live call. Instead we remember that we
+  // saw a "call gone" response and only conclude already_ended AFTER every
+  // call_id-shaped variant has been tried and none succeeded.
+  let sawCallGone = null;
   for (const ct of contentTypes) {
     for (const body of bodyVariants) {
       const encoded = ct === 'application/json'
@@ -238,16 +259,20 @@ async function hangup({ providerCallId, accountType, perUserKey }) {
         }
 
         if (looksLikeAlreadyEnded(res.status, data)) {
-          // Call is no longer active on Tata's side — hangup is a no-op.
-          // Treat as success so the caller doesn't retry, and skip the
-          // remaining 13 variants (they'll all return the same 422).
-          console.log('[tata.hangup] call already ended on provider', providerCallId);
-          return { ok: true, endpoint: url, contentType: ct, body, raw: data, reason: 'already_ended', attempts };
+          sawCallGone = { contentType: ct, body, data };
         }
       } catch (e) {
         attempts.push({ contentType: ct, body, err: e.message });
       }
     }
+  }
+  // Every variant failed. If at least one call_id-shaped attempt came back
+  // "call gone", the call is simply no longer active on Tata's side — a
+  // hangup is a harmless no-op, so report success (the row gets marked ended
+  // either way and the caller shouldn't retry).
+  if (sawCallGone) {
+    console.log('[tata.hangup] call already ended on provider', providerCallId);
+    return { ok: true, endpoint: url, ...sawCallGone, reason: 'already_ended', attempts };
   }
   console.error('[tata.hangup] all body variants failed for call', providerCallId, '\n',
                 JSON.stringify(attempts, null, 2));

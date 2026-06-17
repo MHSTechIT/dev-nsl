@@ -122,7 +122,7 @@ export default function CompletedLeadsModule({ jwt, onCount, previewMode = false
   useEffect(() => { if (typeof onCount === 'function') onCount(leads.length); }, [leads.length, onCount]);
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState('');
-  const [filter, setFilter]   = useState('all');     // all | hot | warm | cold | junk | second_call
+  const [filterSet, setFilterSet] = useState(() => new Set()); // multi-select chips; empty = show all
   const [search, setSearch]   = useState('');
   const [expandedId, setExpandedId] = useState(null);
   const [editLead, setEditLead] = useState(null); // tap a row → open its note
@@ -190,13 +190,23 @@ export default function CompletedLeadsModule({ jwt, onCount, previewMode = false
     return l.last_note_interested === 'yes';
   }
 
+  // Does a lead match ONE filter chip?
+  function leadMatchesFilter(l, f) {
+    if (f === 'hot' || f === 'warm' || f === 'cold' || f === 'junk') return classifyLead(l) === f;
+    if (f === 'second_call') return isSecondCall(l);
+    if (f === 'follow_up')   return l.last_note_outcome === 'follow_up';
+    if (f === 'dnp')         return l.last_note_outcome === 'not_picked';
+    return true;
+  }
+  // Toggle a chip in/out of the multi-select set.
+  function toggleFilter(v) {
+    setFilterSet(prev => { const n = new Set(prev); n.has(v) ? n.delete(v) : n.add(v); return n; });
+  }
+
   const filtered = leads.filter(l => {
-    if (filter === 'hot' || filter === 'warm' || filter === 'cold' || filter === 'junk') {
-      if (classifyLead(l) !== filter) return false;
-    }
-    if (filter === 'second_call' && !isSecondCall(l)) return false;
-    if (filter === 'follow_up' && l.last_note_outcome !== 'follow_up') return false;
-    if (filter === 'dnp' && l.last_note_outcome !== 'not_picked') return false;
+    // Chips combine with OR — a lead shows if it matches ANY active chip.
+    // Empty set = no chip filter (show everything).
+    if (filterSet.size > 0 && ![...filterSet].some(f => leadMatchesFilter(l, f))) return false;
     if (search.trim()) {
       const q = search.trim().toLowerCase();
       const blob = `${l.full_name || ''} ${l.email || ''} ${l.whatsapp_number || ''}`.toLowerCase();
@@ -253,11 +263,11 @@ export default function CompletedLeadsModule({ jwt, onCount, previewMode = false
           { value: 'second_call', label: '2nd Call',  count: stats.secondCall, accent: '#5B21B6', tint: 'rgba(91,33,182,0.10)' },
           { value: 'dnp',         label: 'DNP',       count: stats.dnp,        accent: '#9333EA', tint: 'rgba(147,51,234,0.12)' },
         ].map(f => {
-          const active = filter === f.value;
+          const active = filterSet.has(f.value);
           return (
             <button
               key={f.value}
-              onClick={() => setFilter(active ? 'all' : f.value)}
+              onClick={() => toggleFilter(f.value)}
               className="bg-white rounded-card shadow-card"
               style={{
                 padding: 14, display: 'flex', alignItems: 'center', gap: 12,

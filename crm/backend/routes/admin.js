@@ -15,6 +15,7 @@ const callerSse = require('../utils/callerSse');
 const activityLogger = require('../utils/activityLogger');
 const { syncLeadsToSheet } = require('../utils/leadsSheetSync');
 const { rotateLink }       = require('../utils/linkRotation');
+const { mirrorActiveLink } = require('../utils/whapiLinkRotation');
 const { nextWebinarName, nextUpcomingWebinarName } = require('../utils/webinarName');
 const {
   fetchLandingViewsByDay,
@@ -629,7 +630,16 @@ function flattenFieldData(fd) {
   }
   return out;
 }
-const pickKey = (map, keys) => { for (const k of keys) if (map[k]) return map[k]; return ''; };
+/* Space/underscore-insensitive lookup so a Meta field named "phone number"
+   (space) matches the 'phone_number' key — otherwise the phone is empty and
+   every such lead collides on the empty-string dedup. */
+const normKey = (s) => String(s).toLowerCase().replace(/[\s_]+/g, '');
+const pickKey = (map, keys) => {
+  const nmap = {};
+  for (const k in map) nmap[normKey(k)] = map[k];
+  for (const k of keys) { const v = nmap[normKey(k)]; if (v) return v; }
+  return '';
+};
 
 router.post('/leads/fetch-meta', async (req, res) => {
   const source = getSource(req);
@@ -1019,15 +1029,20 @@ router.get('/wa-links', async (req, res) => {
 
   try {
     // Inner join on webinars enforces the webinar belongs to this source.
+    // member_count / member_count_at power the live "N / 950 members" readout
+    // and active_index marks the current link for Whapi member-based rotation.
     const { rows } = await pool.query(
-      `SELECT wl.id, wl.webinar_id, wl.link_url, wl.order_index
+      `SELECT wl.id, wl.webinar_id, wl.link_url, wl.order_index,
+              wl.member_count, wl.member_count_at,
+              w.wa_active_index
          FROM whatsapp_links wl
          JOIN webinars w ON w.id = wl.webinar_id
         WHERE wl.webinar_id = $1 AND w.source = $2
         ORDER BY wl.order_index`,
       [webinar_id, source]
     );
-    res.json({ links: rows });
+    const activeIndex = rows[0]?.wa_active_index || 1;
+    res.json({ links: rows, active_index: activeIndex });
   } catch (err) {
     // Table may not exist yet
     if (err.message && err.message.includes('does not exist')) {
@@ -1059,23 +1074,60 @@ router.put('/wa-links', async (req, res) => {
 
     await client.query('BEGIN');
 
+    // Snapshot existing member counts so an admin save doesn't reset the live
+    // "N / 950 members" readout to 0 for links whose URL is unchanged.
+    const { rows: prevLinks } = await client.query(
+      'SELECT link_url, member_count, member_count_at, whapi_group_id FROM whatsapp_links WHERE webinar_id = $1',
+      [webinar_id]
+    );
+    const prevByUrl = {};
+    for (const p of prevLinks) prevByUrl[(p.link_url || '').trim()] = p;
+
     // Delete existing links for this webinar
     await client.query('DELETE FROM whatsapp_links WHERE webinar_id = $1', [webinar_id]);
 
-    // Insert new links
+    // Insert new links, carrying over member counts for unchanged URLs.
+    let inserted = 0;
     for (const link of links) {
       if (!link.link_url) continue;
+      const url  = link.link_url.trim();
+      const prev = prevByUrl[url];
       await client.query(
-        'INSERT INTO whatsapp_links (webinar_id, link_url, order_index, source) VALUES ($1, $2, $3, $4)',
-        [webinar_id, link.link_url.trim(), link.order_index || 1, source]
+        `INSERT INTO whatsapp_links
+           (webinar_id, link_url, order_index, source, member_count, member_count_at, whapi_group_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [webinar_id, url, link.order_index || 1, source,
+         prev?.member_count || 0, prev?.member_count_at || null, prev?.whapi_group_id || null]
       );
+      inserted++;
     }
+
+    // Keep the rotation pointer within the new link range.
+    await client.query(
+      'UPDATE webinars SET wa_active_index = LEAST(GREATEST(wa_active_index, 1), GREATEST($2, 1)) WHERE id = $1',
+      [webinar_id, inserted]
+    );
 
     await client.query('COMMIT');
 
-    // If this is the active webinar, rotate the link immediately
+    // Re-point the served link immediately for the active webinar.
     if (wOwn[0].is_active) {
-      await rotateLink(webinar_id);
+      // Whapi workspaces rotate by community members, not leads — mirror the
+      // link at the current pointer instead of recomputing from lead count.
+      const { rows: cfgRows } = await pool.query(
+        'SELECT whapi_channel_id FROM webinar_config WHERE source = $1', [source]);
+      if (cfgRows[0]?.whapi_channel_id) {
+        const { rows: cur } = await pool.query(
+          `SELECT wl.link_url
+             FROM whatsapp_links wl JOIN webinars w ON w.id = wl.webinar_id
+            WHERE wl.webinar_id = $1 AND wl.order_index = w.wa_active_index AND wl.link_url <> ''
+            LIMIT 1`,
+          [webinar_id]
+        );
+        if (cur[0]?.link_url) await mirrorActiveLink(source, cur[0].link_url);
+      } else {
+        await rotateLink(webinar_id);
+      }
     }
 
     res.json({ success: true });
@@ -1896,16 +1948,27 @@ router.get('/lead-share-config', async (req, res) => {
   if (!webinar_id) return res.status(400).json({ error: 'webinar_id required' });
 
   try {
-    // All callers eligible to be in the rotation (junior + senior caller
-    // roles). Soft-deleted callers (deleted_at IS NOT NULL) are excluded
+    // Callers eligible to be in THIS webinar's rotation (junior + senior
+    // caller roles). Soft-deleted callers (deleted_at IS NOT NULL) are excluded
     // so they don't appear in the Leads Logic rotation list — the entire
     // point of soft-delete is that they're gone from active workflows.
+    //
+    // Workspace scoping: a caller only appears for a webinar whose source
+    // matches the caller's workspace tag, OR the caller is untagged
+    // (workspace IS NULL) and therefore serves every workspace. This mirrors
+    // exactly the eligibility filter in utils/leadAssigner.js, so the Leads
+    // Logic queue shows precisely the callers who can actually receive these
+    // leads — e.g. the Meta Temp dashboard lists only Meta-Temp + all-workspace
+    // callers, not callers tagged to other workspaces.
     const callersQuery = pool.query(
       `SELECT id, full_name, email, role, is_active
          FROM crm_users
         WHERE role IN ('junior_caller','senior_caller')
           AND deleted_at IS NULL
-        ORDER BY created_at ASC`
+          AND (workspace IS NULL
+               OR workspace = (SELECT source FROM webinars WHERE id = $1))
+        ORDER BY created_at ASC`,
+      [webinar_id]
     );
     // Existing config rows for this webinar
     const configQuery = pool.query(
@@ -2681,12 +2744,15 @@ router.get('/sales-performance/leads-export', async (req, res) => {
   const validCats = new Set([
     'assigned', 'hot', 'warm', 'touched', 'untouched', 'follow_up',
     'total_calls', 'incoming', 'outgoing', 'connected',
+    'completed', 'not_picked', 'next_batch',
   ]);
   const requested = String(req.query.categories || '')
     .split(',').map(s => s.trim()).filter(c => validCats.has(c));
-  if (requested.length === 0) {
-    return res.status(400).json({ error: 'no valid categories' });
-  }
+  // Dashboard filters (optional): restrict to the visible salespeople and/or a
+  // selected team leader, so the export matches exactly what's on screen.
+  const callerIds = String(req.query.caller_ids || '')
+    .split(',').map(s => s.trim()).filter(s => /^[0-9a-f-]{36}$/i.test(s));
+  const tlId = /^[0-9a-f-]{36}$/i.test(req.query.tl_id || '') ? req.query.tl_id : null;
 
   // Build the per-category boolean expression. Each one tags the lead row
   // with `1` if it matches the bucket, `0` if not. The outer SELECT then
@@ -2701,11 +2767,29 @@ router.get('/sales-performance/leads-export', async (req, res) => {
       base AS (
         SELECT l.*,
                u.full_name AS assigned_to_name,
-               u.role      AS assigned_to_role
+               u.role      AS assigned_to_role,
+               wb.name     AS webinar_name,
+               n.patient_age          AS note_age,
+               n.location             AS note_location,
+               n.working_professional AS note_occupation,
+               n.webinar_attended     AS note_webinar_attended,
+               n.available_for_webinar AS note_available,
+               n.note                 AS note_text
           FROM leads l
-          LEFT JOIN crm_users u ON u.id = l.assigned_user_id
+          LEFT JOIN crm_users u  ON u.id  = l.assigned_user_id
+          LEFT JOIN webinars  wb ON wb.id = l.webinar_id
+          LEFT JOIN LATERAL (
+            SELECT patient_age, location, working_professional,
+                   webinar_attended, available_for_webinar, note
+              FROM lead_call_notes ncn
+             WHERE ncn.lead_id = l.id
+             ORDER BY created_at DESC
+             LIMIT 1
+          ) n ON TRUE
          WHERE l.assigned_user_id IS NOT NULL
            AND ($3::text IS NULL OR l.webinar_id::text = $3::text)
+           AND ($4::uuid[] IS NULL OR l.assigned_user_id = ANY($4::uuid[]))
+           AND ($5::uuid  IS NULL OR u.team_leader_id    = $5::uuid)
       ),
       tagged AS (
         SELECT b.*,
@@ -2715,6 +2799,9 @@ router.get('/sales-performance/leads-export', async (req, res) => {
                (b.last_note_at IS NOT NULL AND b.last_note_at >= w.d_start AND b.last_note_at <= w.d_end AND b.assigned_at >= w.d_start AND b.assigned_at <= w.d_end)::int AS c_touched,
                (b.last_note_at IS NULL AND b.assigned_at < NOW() - INTERVAL '24 hours')::int AS c_untouched,
                (b.last_note_outcome = 'follow_up')::int AS c_follow_up,
+               (b.last_note_outcome = 'completed')::int AS c_completed,
+               (b.last_note_outcome IN ('not_picked','auto_paused'))::int AS c_not_picked,
+               (b.next_batch_parked = TRUE)::int AS c_next_batch,
                (EXISTS (SELECT 1 FROM calls c WHERE c.lead_id = b.id AND c.started_at >= w.d_start AND c.started_at <= w.d_end))::int AS c_total_calls,
                (EXISTS (SELECT 1 FROM calls c WHERE c.lead_id = b.id AND c.direction = 'inbound'  AND c.started_at >= w.d_start AND c.started_at <= w.d_end))::int AS c_incoming,
                (EXISTS (SELECT 1 FROM calls c WHERE c.lead_id = b.id AND c.direction = 'outbound' AND c.started_at >= w.d_start AND c.started_at <= w.d_end))::int AS c_outgoing,
@@ -2723,16 +2810,21 @@ router.get('/sales-performance/leads-export', async (req, res) => {
       )
       SELECT id, full_name, whatsapp_number, email, language_pref, sugar_level,
              diabetes_duration, lead_score, lead_tag, last_note_outcome,
+             next_batch_parked,
              assigned_to_name, assigned_to_role,
+             webinar_name, age_group, occupation, source, utm_source, created_at,
+             note_age, note_location, note_occupation, note_webinar_attended,
+             note_available, note_text,
              assigned_at, last_note_at, completed_at,
              c_assigned, c_hot, c_warm, c_touched, c_untouched, c_follow_up,
+             c_completed, c_not_picked, c_next_batch,
              c_total_calls, c_incoming, c_outgoing, c_connected
         FROM tagged
-       WHERE ${requested.map(c => `c_${c} = 1`).join(' OR ')}
+       WHERE ${requested.length ? `(${requested.map(c => `c_${c} = 1`).join(' OR ')})` : 'TRUE'}
        ORDER BY assigned_at DESC NULLS LAST
        LIMIT 50000
       `,
-      [dayStart, dayEnd, webinarId]
+      [dayStart, dayEnd, webinarId, callerIds.length ? callerIds : null, tlId]
     );
 
     res.json({ leads: rows });

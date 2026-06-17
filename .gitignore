@@ -48,3 +48,6 @@ Thumbs.db
 # ── Local-only / backup folders (NOT part of the codebase) ─────────
 nsl - original - Copy/
 .dev-logs/
+
+# ── Exported leads reports (contain customer PII — never commit) ────
+reports/

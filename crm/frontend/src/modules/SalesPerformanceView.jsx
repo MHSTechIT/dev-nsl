@@ -875,32 +875,52 @@ const EXPORT_COLUMNS = [
   { id: 'connected',   header: 'Connected'   },
 ];
 
-function leadsToCsv(leads, selectedIds) {
-  /* Fixed lead-level columns + a Matched column that lists the buckets
-     each lead fell into. We include only the bucket flags the admin
-     actually selected, so the matched-categories column reflects their
-     filter choices. */
+/* Maps each lead to the standard LeadOpportunity (crm.lead) export layout. */
+const CSV_STATUS = {
+  completed: 'Completed', follow_up: 'Follow Up', not_interested: 'Not Interested',
+  not_picked: 'Not Picked', auto_paused: 'Not Picked', incomplete: 'Incomplete',
+};
+const CSV_SUGAR = {
+  '250+': 'Above 250', '150-250': '150 - 250', '200-250': '200 - 250',
+  '100-200': '100 - 200', 'no_diabetes': 'No Diabetes',
+};
+const csvYesNo = (v) => {
+  if (v == null || v === '') return '';
+  const s = String(v).toLowerCase();
+  if (s === 'yes' || v === true || s === 'true') return 'Yes';
+  if (s === 'no'  || v === false || s === 'false') return 'No';
+  return v;
+};
+const csvCreated = (ts) => ts ? new Date(ts).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) : '';
+
+function leadsToCsv(leads) {
   const header = [
-    'Lead_ID', 'Full_Name', 'WhatsApp', 'Email', 'Language',
-    'Sugar_Level', 'Diabetes_Duration', 'Lead_Score', 'Lead_Tag',
-    'Last_Outcome', 'Assigned_To', 'Assigned_To_Role',
-    'Assigned_At', 'Last_Note_At', 'Completed_At',
-    'Matched_Categories',
+    'Opportunity', 'Call Status', 'Email', 'Salesperson', 'Batch Code', 'Age',
+    'Gender', 'Lead Source', 'Location', 'Sugar Level', 'Whatsapp No.',
+    'Webinar Attended', 'Remarks', 'Occupation', 'Occupation Remarks',
+    'Language', 'Created on', 'Available for Webinar', 'Phone',
   ];
-  const fmtTs = ts => ts ? new Date(ts).toISOString() : '';
-  const body = leads.map(l => {
-    const matched = EXPORT_COLUMNS
-      .filter(c => selectedIds.has(c.id) && l[`c_${c.id}`] === 1)
-      .map(c => c.header)
-      .join('|');
-    return [
-      l.id, l.full_name, l.whatsapp_number, l.email, l.language_pref,
-      l.sugar_level, l.diabetes_duration, l.lead_score, l.lead_tag,
-      l.last_note_outcome, l.assigned_to_name, l.assigned_to_role,
-      fmtTs(l.assigned_at), fmtTs(l.last_note_at), fmtTs(l.completed_at),
-      matched,
-    ];
-  });
+  const body = leads.map(l => [
+    l.full_name,
+    l.last_note_outcome ? (CSV_STATUS[l.last_note_outcome] || l.last_note_outcome) : 'New',
+    l.email,
+    l.assigned_to_name,
+    l.webinar_name,
+    l.note_age || l.age_group,
+    '',                                       // Gender — not captured in the CRM
+    l.utm_source || l.source,
+    l.note_location,
+    CSV_SUGAR[l.sugar_level] || l.sugar_level,
+    l.whatsapp_number,
+    csvYesNo(l.note_webinar_attended),
+    l.note_text,
+    l.note_occupation || l.occupation,
+    '',                                       // Occupation Remarks — not captured
+    l.language_pref,
+    csvCreated(l.created_at),
+    csvYesNo(l.note_available),
+    l.whatsapp_number,
+  ]);
   return [header, ...body].map(row => row.map(v => {
     const s = String(v ?? '');
     return s.includes(',') || s.includes('"') || s.includes('\n')
@@ -1076,13 +1096,18 @@ export default function SalesPerformanceView({ token, actionsSlotEl }) {
         categories: Array.from(exportSelected).join(','),
       });
       if (webinarId) params.set('webinar_id', webinarId);
+      // Match the dashboard filters: restrict to the salespeople currently
+      // visible (after the TL / salesperson / status filters) + the TL filter.
+      const callerIds = visibleRows.map(r => r.caller_id);
+      if (callerIds.length) params.set('caller_ids', callerIds.join(','));
+      if (tlFilter) params.set('tl_id', tlFilter);
       const r = await fetch(`/api/admin/sales-performance/leads-export?${params}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-      const csv = leadsToCsv(d.leads || [], exportSelected);
-      downloadCsv(csv, `sales-leads-${range.from}_to_${range.to}.csv`);
+      const csv = leadsToCsv(d.leads || []);
+      downloadCsv(csv, `leads-${range.from}_to_${range.to}.csv`);
       setExportOpen(false);
     } catch (err) {
       setExportError(err.message || 'Export failed');

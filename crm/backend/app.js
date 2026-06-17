@@ -132,6 +132,20 @@ _webinarTableMigration.then(() =>
   `)
 ).catch(err => console.error('[Migration] whatsapp_links table error:', err.message));
 
+// Auto-migrate: Whapi member-count link rotation.
+// member_count / member_count_at — last live participant count polled from Whapi
+//   for the community behind each link. whapi_group_id — resolved group id (cache).
+// webinars.wa_active_index — explicit, monotonically-advancing pointer to the
+//   CURRENT link's order_index for Whapi-driven workspaces (members, not leads).
+_webinarTableMigration.then(() =>
+  pool.query(`
+    ALTER TABLE whatsapp_links ADD COLUMN IF NOT EXISTS member_count    INT DEFAULT 0;
+    ALTER TABLE whatsapp_links ADD COLUMN IF NOT EXISTS member_count_at TIMESTAMPTZ;
+    ALTER TABLE whatsapp_links ADD COLUMN IF NOT EXISTS whapi_group_id  TEXT;
+    ALTER TABLE webinars       ADD COLUMN IF NOT EXISTS wa_active_index INT NOT NULL DEFAULT 1;
+  `)
+).catch(err => console.error('[Migration] whapi member-rotation columns error:', err.message));
+
 // Auto-migrate: create crm_users table (CRM staff directory)
 const _crmUsersMigration = pool.query(`
   CREATE TABLE IF NOT EXISTS crm_users (

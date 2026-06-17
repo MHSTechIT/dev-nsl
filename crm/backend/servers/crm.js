@@ -38,6 +38,8 @@ const schedulerManager                          = require('../utils/schedulerMan
 const { mergeTimerSettings }                    = require('../utils/timerDefaults');
 const leadsAlertScheduler                       = require('../utils/leadsAlertScheduler');
 const { startLinkSwapScheduler }                = require('../utils/linkSwapScheduler');
+const { startWhapiMemberScheduler }             = require('../utils/whapiMemberScheduler');
+const { startMetaLeadSyncScheduler }            = require('../utils/metaLeadSyncScheduler');
 const emptyQueueAlertScheduler                  = require('../utils/emptyQueueAlertScheduler');
 const dnpReassignScheduler                      = require('../utils/dnpReassignScheduler');
 
@@ -65,7 +67,7 @@ app.listen(PORT, () => {
   console.log(`[crm] running on port ${PORT}`);
 
   if (DISABLE_SCHEDULERS) {
-    console.log('[crm] DISABLE_SCHEDULERS=true → skipping linkSwap, tataInboundSync, leadsAlert, emptyQueueAlert, dnpReassign, sheetsSync, staleCallReaper, activitySpanReaper, dailyReconciliation');
+    console.log('[crm] DISABLE_SCHEDULERS=true → skipping linkSwap, whapiMemberRotation, metaLeadSync, tataInboundSync, leadsAlert, emptyQueueAlert, dnpReassign, sheetsSync, staleCallReaper, activitySpanReaper, dailyReconciliation');
   } else {
     // All schedulers — race-prone if run in more than one process, so CRM owns
     // every one and the funnel services start none.
@@ -89,6 +91,18 @@ app.listen(PORT, () => {
     // kept off the caller Timer Settings page and run on fixed intervals.
     leadsAlertScheduler.startScheduler();
     startLinkSwapScheduler();
+
+    // Member-count WhatsApp link rotation for Whapi workspaces (Meta Temp /
+    // TagMango): advance the link when the current community hits 950 live
+    // members (counted via the Whapi admin number). Freezes + alerts if Whapi
+    // can't read the count. meta/yt/meta2 keep lead-count rotation above.
+    startWhapiMemberScheduler();
+
+    // Reconciliation sweep behind the Meta lead-gen webhook: every 5 min, pull
+    // any leads the webhook missed (Render cold start, deploy, dropped retry)
+    // for each workspace's selected forms. Dedups on meta_lead_id so it never
+    // double-inserts. Light load; crash-safe (errors-as-values + overlap guard).
+    startMetaLeadSyncScheduler();
 
     // Delayed manager alert when a caller's Assigned queue stays empty past the
     // admin-configured delay (TL & Assistant Timer sub-page). Fixed 60s tick;

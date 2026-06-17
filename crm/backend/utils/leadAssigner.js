@@ -87,26 +87,52 @@ async function assignNewLead(leadId, sugarLevel, webinarId) {
       return null;
     }
 
-    // 2. Ensure a state row exists (no-op if it already does)
+    // 2. Per-webinar assignment lock. We keep the round_robin_state row purely
+    //    as a mutex (SELECT … FOR UPDATE) so concurrent inserts serialize and
+    //    the least-loaded count below always sees committed assignments — no
+    //    double-assign, no two leads racing onto the same caller.
     await client.query(`
       INSERT INTO round_robin_state (webinar_id, last_position)
       VALUES ($1, -1)
       ON CONFLICT (webinar_id) DO NOTHING
     `, [webinarId]);
-
-    // 3. Lock and read current cursor
-    const { rows: locked } = await client.query(
+    await client.query(
       'SELECT last_position FROM round_robin_state WHERE webinar_id = $1 FOR UPDATE',
       [webinarId]
     );
-    const lastPos = locked[0]?.last_position ?? -1;
-    const nextIdx = (lastPos + 1) % eligible.length;
-    const callerId = eligible[nextIdx].caller_id;
 
-    // 4. Advance cursor
+    // 3. Least-loaded assignment. Among the eligible callers, pick the one with
+    //    the FEWEST leads already assigned in THIS webinar (tie-break = rotation
+    //    position, so the first eligible caller wins an initial tie). This stays
+    //    fair even when the eligible set is filtered per-lead (sugar_level /
+    //    workspace) or the roster / tags / enabled-state change over time —
+    //    cases a single positional cursor cannot keep balanced (and which the
+    //    config-save cursor-reset actively skewed toward position 0). It also
+    //    self-corrects an existing imbalance: each new lead flows to whoever is
+    //    currently behind, until the eligible callers level out.
+    const eligibleIds = eligible.map(e => e.caller_id);
+    const { rows: cnt } = await client.query(
+      `SELECT assigned_user_id::text AS id, COUNT(*)::int AS c
+         FROM leads
+        WHERE webinar_id = $1 AND assigned_user_id = ANY($2::uuid[])
+        GROUP BY assigned_user_id`,
+      [webinarId, eligibleIds]
+    );
+    const countMap = {};
+    for (const r of cnt) countMap[r.id] = r.c;
+    let callerId  = eligible[0].caller_id;
+    let chosenIdx = 0;
+    let best      = Infinity;
+    eligible.forEach((e, i) => {
+      const c = countMap[e.caller_id] || 0;
+      if (c < best) { best = c; callerId = e.caller_id; chosenIdx = i; }
+    });
+
+    // 4. Keep last_position pointed at the chosen caller (observability only;
+    //    selection above is least-loaded, not cursor-based).
     await client.query(
       'UPDATE round_robin_state SET last_position = $1, updated_at = NOW() WHERE webinar_id = $2',
-      [nextIdx, webinarId]
+      [chosenIdx, webinarId]
     );
 
     // 5. Assign the lead + write audit log

@@ -202,6 +202,22 @@ export default function SalesLeadsTable({ token, source = 'all' }) {
     return webinars.filter(w => !w.webinar_at || new Date(w.webinar_at).getTime() <= now);
   }, [webinars]);
 
+  /* Dynamic form-field columns — same idea as the Marketing leads page. Builds
+     the union of every lead's field_data keys (across ALL sources) so Meta-Temp
+     / form leads show their actual answers instead of blank standard columns.
+     When any lead carries field_data we switch to this dynamic layout; the
+     Assigned To column is appended at the end. */
+  const prettyLabel = (k) => String(k).replace(/[_-]+/g, ' ').replace(/\?+$/, '').trim().replace(/\b\w/g, c => c.toUpperCase());
+  const fieldKeys = useMemo(() => {
+    const keys = []; const seen = new Set();
+    for (const l of leads) {
+      const fd = l.field_data;
+      if (fd && typeof fd === 'object') for (const k of Object.keys(fd)) if (!seen.has(k)) { seen.add(k); keys.push(k); }
+    }
+    return keys;
+  }, [leads]);
+  const dynamicMode = fieldKeys.length > 0;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       {/* Filter toolbar — single row with date pills, custom inputs, webinar dropdown, Export CSV */}
@@ -328,6 +344,44 @@ export default function SalesLeadsTable({ token, source = 'all' }) {
                 ? 'Once people register, they will land here.'
                 : 'Try clearing the search, date range, or webinar filter.'}
             </div>
+          </div>
+        ) : dynamicMode ? (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: 'Outfit, sans-serif' }}>
+              <thead>
+                <tr style={{ background: 'rgba(237,234,248,0.50)', textAlign: 'left' }}>
+                  <th style={thStyle}>Name</th>
+                  {fieldKeys.map(k => <th key={k} style={thStyle}>{prettyLabel(k)}</th>)}
+                  <th style={thStyle}>Webinar</th>
+                  <th style={thStyle}>Registered</th>
+                  <th style={thStyle}>Assigned To</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pageRows.map(l => (
+                  <tr key={l.id} style={{ borderTop: '1px solid rgba(209,196,240,0.30)' }}>
+                    <td style={tdStyle}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <span style={{ fontWeight: 600, color: '#3B0764' }}>{l.full_name || '—'}</span>
+                        <SourceBadge source={l.source} />
+                      </div>
+                      <div style={{ fontSize: '0.72rem', color: 'rgba(91,33,182,0.55)' }}>{fmtPhone(l.whatsapp_number)}</div>
+                    </td>
+                    {fieldKeys.map(k => {
+                      const v = l.field_data && l.field_data[k];
+                      return <td key={k} style={tdStyle}>{(v != null && v !== '') ? <span style={pillStyle('#EDE9FE', '#5B21B6')}>{String(v)}</span> : <span style={dashStyle}>—</span>}</td>;
+                    })}
+                    <td style={{ ...tdStyle, fontWeight: 600, fontSize: '0.82rem' }}>{webinarNameById[String(l.webinar_id)] || '—'}</td>
+                    <td style={{ ...tdStyle, fontSize: '0.78rem', color: 'rgba(91,33,182,0.65)' }}>{fmtDate(l.created_at)}</td>
+                    <td style={tdStyle}>
+                      {l.assigned_to_name
+                        ? <span style={{ fontWeight: 600, color: '#3B0764', fontSize: '0.84rem' }}>{l.assigned_to_name}</span>
+                        : <span style={{ display: 'inline-block', padding: '3px 10px', borderRadius: 50, fontSize: '0.72rem', fontWeight: 700, background: 'rgba(107,114,128,0.12)', color: '#6B7280' }}>Unassigned</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         ) : (
           <div style={{ overflowX: 'auto' }}>
