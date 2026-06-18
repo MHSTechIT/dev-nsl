@@ -158,13 +158,18 @@ export default function LeadsTable({ token, source = 'meta' }) {
   useEffect(() => { setPage(1); }, [activeFilter, dateFrom, dateTo, webinarFilter]);
 
   // ── Duplicate detection ──
-  // Group by phone number, keep oldest (first registered) as original, rest are duplicates
+  // Group by phone number, keep oldest (first registered) as original, rest are
+  // duplicates. A lead with NO valid phone is never a duplicate — otherwise every
+  // empty/missing number collides into one bucket and inflates the count (e.g.
+  // leads whose Meta "phone number" field failed to map). Normalise to the last
+  // 10 digits so "+91 98…" and "98…" match the same person.
   const duplicateIds = (() => {
     const phoneMap = {};
     // Sort by created_at ascending so oldest comes first
     const byDate = [...leads].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
     for (const l of byDate) {
-      const phone = l.whatsapp_number;
+      const phone = String(l.whatsapp_number || '').replace(/\D/g, '').slice(-10);
+      if (phone.length < 10) continue;   // no real phone → not a duplicate
       if (!phoneMap[phone]) phoneMap[phone] = [];
       phoneMap[phone].push(l.id);
     }
