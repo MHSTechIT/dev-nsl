@@ -15,6 +15,7 @@ const router  = express.Router();
 const pool    = require('../db');
 const { adminAuth } = require('../middleware/adminAuth');
 const { whapi, gate, resolveChannel } = require('../utils/whapiPartner');
+const { getGroupAdminStatus } = require('../utils/whapiMembers');
 
 router.use(adminAuth);
 
@@ -40,6 +41,27 @@ router.get('/selected', async (req, res) => {
   } catch (err) {
     console.error('[whapi] get selected error:', err.message);
     res.status(500).json({ error: 'failed_to_read_selected_channel' });
+  }
+});
+
+/* GET whether THIS workspace's pinned Whapi number is an admin of the
+   community behind a given invite link. Live (queries Whapi on each call) so
+   the admin badge is accurate even when the rotation scheduler is off.
+   Query: ?link=<invite url>&source=<workspace>. */
+router.get('/link-admin', async (req, res) => {
+  const source = getSource(req);
+  const link   = (req.query.link || '').toString().trim();
+  if (!link) return res.status(400).json({ error: 'link_required' });
+  try {
+    const { rows } = await pool.query(
+      'SELECT whapi_channel_id FROM webinar_config WHERE source = $1', [source]
+    );
+    const channelId = rows[0]?.whapi_channel_id;
+    if (!channelId) return res.json({ error: 'no_channel', message: 'No Whapi channel pinned for this workspace.' });
+    const status = await getGroupAdminStatus(channelId, link);
+    res.json(status);   // { connected, isMember, isAdmin, role, groupName, count }
+  } catch (err) {
+    fail(res, err);
   }
 });
 

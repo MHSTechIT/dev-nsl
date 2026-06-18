@@ -213,6 +213,25 @@ if (_dailyTargetMigration && typeof _dailyTargetMigration.catch === 'function') 
   _dailyTargetMigration.catch(err => console.error('[Migration] caller_daily_target error:', err.message));
 }
 
+// Auto-migrate: template_sends — one row per (template, webinar cycle) so the
+// template auto-send scheduler sends each Saved Template at most once per
+// webinar. webinar_key = the current_webinar_datetime ISO; status sent|skipped.
+const _templateSendsMigration = pool.query(`
+  CREATE TABLE IF NOT EXISTS template_sends (
+    id          BIGSERIAL PRIMARY KEY,
+    template_id TEXT        NOT NULL,
+    webinar_key TEXT        NOT NULL,
+    source      TEXT,
+    status      TEXT        NOT NULL DEFAULT 'sent',
+    detail      TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (template_id, webinar_key)
+  );
+`);
+if (_templateSendsMigration && typeof _templateSendsMigration.catch === 'function') {
+  _templateSendsMigration.catch(err => console.error('[Migration] template_sends error:', err.message));
+}
+
 // Auto-migrate: create workspace_flags table (Settings → Workspace on/off map)
 const _workspaceFlagsMigration = pool.query(`
   CREATE TABLE IF NOT EXISTS workspace_flags (

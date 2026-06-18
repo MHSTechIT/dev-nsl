@@ -1,9 +1,25 @@
 import { useState, useRef } from 'react';
 import BrandSelect from '../components/BrandSelect';
 
-const HOURS = Array.from({ length: 24 }, (_, i) => ({ value: String(i).padStart(2, '0'), label: String(i).padStart(2, '0') }));
+// 12-hour clock: hours 1–12 + an AM/PM selector. send_time is stored as
+// "h:mm AM/PM" (e.g. "5:30 PM"); the scheduler parses 12h fine.
+const HOURS = Array.from({ length: 12 }, (_, i) => ({ value: String(i + 1), label: String(i + 1) }));
 const MINUTES = Array.from({ length: 60 }, (_, i) => ({ value: String(i).padStart(2, '0'), label: String(i).padStart(2, '0') }));
+const AMPM_OPTS = [{ value: 'AM', label: 'AM' }, { value: 'PM', label: 'PM' }];
 const MAX_UPLOAD_MB = 25;
+
+/* Parse a send_time (12h "5:30 PM" OR legacy 24h "17:30") → { h12, mm, ap }. */
+function parse12(t) {
+  if (!t) return { h12: '', mm: '', ap: 'AM' };
+  let m = String(t).match(/(\d{1,2}):(\d{2})\s*([AaPp])\.?[Mm]/);
+  if (m) return { h12: String(Number(m[1])), mm: m[2], ap: m[3].toUpperCase() + 'M' };
+  m = String(t).match(/(\d{1,2}):(\d{2})/);
+  if (m) {
+    let h = Number(m[1]); const ap = h >= 12 ? 'PM' : 'AM'; let h12 = h % 12; if (h12 === 0) h12 = 12;
+    return { h12: String(h12), mm: m[2], ap };
+  }
+  return { h12: '', mm: '', ap: 'AM' };
+}
 
 /* Create-template popup for the Meta Temp WhatsApp Links card. Builds a
    scheduled WhatsApp message template (name, time, day-relative-to-webinar,
@@ -45,9 +61,11 @@ export default function TemplateModal({ token, source, onClose, onSaved, existin
   const fileRef = useRef(null);
 
   const isMedia = type !== 'text';
-  const [hh, mm] = (time || '').split(':');
-  const setHour = (h) => setTime(`${h}:${mm || '00'}`);
-  const setMin  = (m) => setTime(`${hh || '00'}:${m}`);
+  const { h12, mm, ap } = parse12(time);
+  const build = (h, m, a) => (h && m) ? `${h}:${m} ${a}` : '';
+  const setHour = (h) => setTime(build(h, mm || '00', ap));
+  const setMin  = (m) => setTime(build(h12 || '12', m, ap));
+  const setAmpm = (a) => setTime(build(h12 || '12', mm || '00', a));
 
   async function handleFile(e) {
     const f = e.target.files && e.target.files[0];
@@ -165,14 +183,17 @@ export default function TemplateModal({ token, source, onClose, onSaved, existin
 
         {/* Row 2: time | day | type | upload */}
         <div style={{ display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
-          {/* Branded time picker (HH : MM) */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 5, width: 130 }}>
+          {/* Branded 12-hour time picker (h : mm AM/PM) */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5, width: 190 }}>
             <div style={{ flex: 1 }}>
-              <BrandSelect compact value={hh || ''} onChange={setHour} options={HOURS} placeholder="HH" />
+              <BrandSelect compact value={h12 || ''} onChange={setHour} options={HOURS} placeholder="HH" />
             </div>
             <span style={{ fontWeight: 800, color: PURPLE, fontSize: '0.8rem' }}>:</span>
             <div style={{ flex: 1 }}>
               <BrandSelect compact value={mm || ''} onChange={setMin} options={MINUTES} placeholder="MM" />
+            </div>
+            <div style={{ flex: 1 }}>
+              <BrandSelect compact value={ap} onChange={setAmpm} options={AMPM_OPTS} placeholder="AM" />
             </div>
           </div>
           <div style={{ width: 150 }}>

@@ -27,7 +27,7 @@ function getLinkIndex(leadCount) {
    and the trailing button copies the link instead of toggling edit mode.
    memberInfo (optional) → { count, threshold } rendered as a small pill, e.g.
    "734 / 950 members", for the live Whapi member readout on the current link. */
-function LinkRow({ label, value, onChange, bg, isActive, copyOnly, memberInfo }) {
+function LinkRow({ label, value, onChange, bg, isActive, copyOnly, memberInfo, checkAdmin, token, source }) {
   const [editing, setEditing] = useState(false);
   const [copied, setCopied]   = useState(false);
   const inputRef = useRef(null);
@@ -44,6 +44,36 @@ function LinkRow({ label, value, onChange, bg, isActive, copyOnly, memberInfo })
   }
 
   const editable = !copyOnly && editing;
+
+  // Per-link "is the Whapi number in / admin of THIS group?" check. Runs for
+  // the current AND every upcoming link, so pasting an upcoming link tells you
+  // right away whether the Whapi number can rotate into it. Debounced so it
+  // doesn't fire on every keystroke; only for complete chat.whatsapp.com links.
+  const isInvite = /chat\.whatsapp\.com\/(?:invite\/)?[A-Za-z0-9_-]{6,}/.test(value || '');
+  const [adminStatus, setAdminStatus] = useState(null);
+  useEffect(() => {
+    if (!checkAdmin || !token || !isInvite) { setAdminStatus(null); return undefined; }
+    let cancelled = false;
+    const id = setTimeout(() => {
+      setAdminStatus(null);
+      fetch(`/api/admin/whapi/link-admin?source=${source}&link=${encodeURIComponent(value)}`,
+            { headers: { Authorization: `Bearer ${token}` } })
+        .then(r => r.json())
+        .then(d => { if (!cancelled) setAdminStatus(d || { error: 'unknown' }); })
+        .catch(() => { if (!cancelled) setAdminStatus({ error: 'network' }); });
+    }, 600);
+    return () => { cancelled = true; clearTimeout(id); };
+  }, [checkAdmin, token, source, value, isInvite]);
+
+  const adminBadge = (() => {
+    if (!checkAdmin || !isInvite) return null;
+    if (adminStatus === null) return { txt: 'Checking…', fg: '#6B7280', bg: 'rgba(107,114,128,0.10)', bd: 'rgba(107,114,128,0.30)' };
+    if (adminStatus.error || adminStatus.error === '') return { txt: 'Admin check failed', fg: '#B45309', bg: 'rgba(245,158,11,0.10)', bd: 'rgba(245,158,11,0.35)' };
+    if (adminStatus.connected === false) return { txt: 'Channel not connected', fg: '#6B7280', bg: 'rgba(107,114,128,0.10)', bd: 'rgba(107,114,128,0.30)' };
+    if (!adminStatus.isMember) return { txt: '✗ Number not in this group', fg: '#B91C1C', bg: 'rgba(220,38,38,0.10)', bd: 'rgba(220,38,38,0.35)' };
+    if (adminStatus.isAdmin) return { txt: `✓ Whapi number is admin${adminStatus.role === 'creator' ? ' (owner)' : ''}`, fg: '#047857', bg: 'rgba(5,150,105,0.10)', bd: 'rgba(5,150,105,0.40)' };
+    return { txt: '⚠ In group, NOT admin', fg: '#B45309', bg: 'rgba(245,158,11,0.12)', bd: 'rgba(245,158,11,0.40)' };
+  })();
 
   return (
     <div style={{ marginBottom: 16 }}>
@@ -79,6 +109,21 @@ function LinkRow({ label, value, onChange, bg, isActive, copyOnly, memberInfo })
           </span>
         )}
       </div>
+      {/* Whapi-number admin status for THIS link's community — sits with the
+          link it describes, not in the separate summary box. */}
+      {adminBadge && (
+        <div style={{ marginBottom: 8 }}>
+          <span style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6,
+            padding: '4px 12px', borderRadius: 50,
+            fontFamily: 'Outfit, sans-serif', fontSize: '0.72rem', fontWeight: 700,
+            color: adminBadge.fg, background: adminBadge.bg,
+            border: `1px solid ${adminBadge.bd}`,
+          }}>
+            {adminBadge.txt}
+          </span>
+        </div>
+      )}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <div style={{
           flex: 1, position: 'relative',
@@ -158,7 +203,7 @@ function LinkRow({ label, value, onChange, bg, isActive, copyOnly, memberInfo })
 }
 
 /* ── Webinar Column Card ── */
-function WebinarCard({ type, webinarDate, webinarId, webinarName, links, setLinks, leadCount, saving, onSave, toast, source, onCreateTemplate, isWhapi = false, activeIndex = 1, memberThreshold = 950 }) {
+function WebinarCard({ type, webinarDate, webinarId, webinarName, links, setLinks, leadCount, saving, onSave, toast, source, onCreateTemplate, isWhapi = false, activeIndex = 1, memberThreshold = 950, token }) {
   const isCurrent = type === 'current';
   const isPrevious = type === 'previous';
   // Whapi workspaces rotate by live community members — the active link is the
@@ -183,6 +228,78 @@ function WebinarCard({ type, webinarDate, webinarId, webinarName, links, setLink
   function removeLink(index) {
     setLinks(prev => prev.filter((_, i) => i !== index).map((l, i) => ({ ...l, order_index: i + 1 })));
   }
+
+  // Render one link row (LinkRow + its remove button). Shared by the main card
+  // (previous + current rows) and the separate Upcoming Links card.
+  const renderLinkNode = (link, i) => {
+    const order = i + 1;
+    const isActiveRow   = isCurrent && order === activeLinkIndex;
+    const isPreviousRow = isWhapi && isCurrent && order < activeLinkIndex;
+    const isUpcomingRow = isWhapi && isCurrent && order > activeLinkIndex;
+    let label;
+    if (isPreviousRow)      label = order === activeLinkIndex - 1 ? 'Previous Link' : `Previous Link ${order}`;
+    else if (isActiveRow)   label = 'Current Link';
+    else if (isCurrent)     label = `Upcoming Link ${order}`;
+    else                    label = `Link ${order}`;
+    const removable = isWhapi ? isUpcomingRow && links.length > 1 : links.length > 1;
+    return (
+      <div key={i} style={{ position: 'relative' }}>
+        <LinkRow
+          label={label}
+          value={link.link_url}
+          onChange={url => updateLink(i, url)}
+          bg={isActiveRow ? 'rgba(5,150,105,0.06)' : undefined}
+          isActive={isActiveRow}
+          copyOnly={isPreviousRow}
+          memberInfo={isWhapi && isActiveRow ? { count: link.member_count || 0, threshold: memberThreshold } : null}
+          checkAdmin={isWhapi && (isActiveRow || isUpcomingRow)}
+          token={token}
+          source={source}
+        />
+        {removable && (
+          <button
+            onClick={() => removeLink(i)}
+            title="Remove link"
+            style={{
+              position: 'absolute', top: 0, right: 0,
+              width: 20, height: 20, borderRadius: '50%',
+              border: '1px solid rgba(220,38,38,0.30)',
+              background: 'rgba(254,242,242,0.80)',
+              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              transition: 'all 200ms',
+            }}
+          >
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#DC2626" strokeWidth="3" strokeLinecap="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        )}
+      </div>
+    );
+  };
+
+  // The dashed "+ Add Link" button (shared between layouts).
+  const addLinkButton = (
+    <button
+      onClick={addLink}
+      style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+        width: '100%', height: '2.4rem', borderRadius: 10,
+        border: '1.5px dashed rgba(139,92,246,0.30)',
+        background: 'rgba(237,234,248,0.25)',
+        fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', fontWeight: 600,
+        color: '#5B21B6', cursor: 'pointer',
+        transition: 'all 200ms',
+      }}
+      onMouseEnter={e => e.currentTarget.style.background = 'rgba(237,234,248,0.50)'}
+      onMouseLeave={e => e.currentTarget.style.background = 'rgba(237,234,248,0.25)'}
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+        <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+      </svg>
+      Add Link
+    </button>
+  );
 
   return (
     <div className="wa-card" style={{
@@ -232,12 +349,14 @@ function WebinarCard({ type, webinarDate, webinarId, webinarName, links, setLink
         </div>
       </div>
 
-      {/* Lead count + rotation info (current only) */}
+      {/* Lead count + rotation info (current only). Rendered as a seamless
+          header strip (no separate border/background) with just a bottom
+          divider, so the summary, the member pills, the admin badge and the
+          link all read as ONE card instead of nested boxes. */}
       {isCurrent && webinarId && (
         <div style={{
-          margin: '14px 20px 0', padding: '10px 14px',
-          background: 'rgba(5,150,105,0.04)', borderRadius: 10,
-          border: '1px solid rgba(5,150,105,0.15)',
+          margin: '12px 20px 0', padding: '0 0 12px',
+          borderBottom: '1px solid rgba(5,150,105,0.15)',
           display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8,
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -273,77 +392,45 @@ function WebinarCard({ type, webinarDate, webinarId, webinarName, links, setLink
           </div>
         ) : (
           <>
-            {links.map((link, i) => {
-              const order = i + 1;
-              // Whapi current card: links below the active index are spent
-              // communities shown read-only ("Previous Link", copy-only); the
-              // active index is the live "Current Link"; above it are upcoming.
-              const isActiveRow   = isCurrent && order === activeLinkIndex;
-              const isPreviousRow = isWhapi && isCurrent && order < activeLinkIndex;
-              const isUpcomingRow = isWhapi && isCurrent && order > activeLinkIndex;
-              let label;
-              if (isPreviousRow)      label = order === activeLinkIndex - 1 ? 'Previous Link' : `Previous Link ${order}`;
-              else if (isActiveRow)   label = 'Current Link';
-              else if (isCurrent)     label = `Upcoming Link ${order}`;
-              else                    label = `Link ${order}`;
-              // Removable only for editable upcoming rows (never the active or a
-              // previous read-only link). Non-Whapi keeps the old behaviour.
-              const removable = isWhapi
-                ? isUpcomingRow && links.length > 1
-                : links.length > 1;
+            {(() => {
+              // On the Whapi current card, upcoming links move to their OWN
+              // card below — only the previous + current rows stay here. Every
+              // other card keeps the single-list layout.
+              const splitUpcoming = isWhapi && isCurrent;
+              const isUpcoming = (i) => splitUpcoming && (i + 1) > activeLinkIndex;
+              const mainIdx     = links.map((_, i) => i).filter(i => !isUpcoming(i));
+              const upcomingIdx = links.map((_, i) => i).filter(isUpcoming);
               return (
-                <div key={i} style={{ position: 'relative' }}>
-                  <LinkRow
-                    label={label}
-                    value={link.link_url}
-                    onChange={url => updateLink(i, url)}
-                    bg={isActiveRow ? 'rgba(5,150,105,0.06)' : undefined}
-                    isActive={isActiveRow}
-                    copyOnly={isPreviousRow}
-                    memberInfo={isWhapi && isActiveRow ? { count: link.member_count || 0, threshold: memberThreshold } : null}
-                  />
-                  {removable && (
-                    <button
-                      onClick={() => removeLink(i)}
-                      title="Remove link"
-                      style={{
-                        position: 'absolute', top: 0, right: 0,
-                        width: 20, height: 20, borderRadius: '50%',
-                        border: '1px solid rgba(220,38,38,0.30)',
-                        background: 'rgba(254,242,242,0.80)',
-                        cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        transition: 'all 200ms',
-                      }}
-                    >
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#DC2626" strokeWidth="3" strokeLinecap="round">
-                        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                      </svg>
-                    </button>
-                  )}
-                </div>
-              );
-            })}
+                <>
+                  {mainIdx.map(i => renderLinkNode(links[i], i))}
 
-            {/* Add link button */}
-            <button
-              onClick={addLink}
-              style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                width: '100%', height: '2.4rem', borderRadius: 10,
-                border: '1.5px dashed rgba(139,92,246,0.30)',
-                background: 'rgba(237,234,248,0.25)',
-                fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', fontWeight: 600,
-                color: '#5B21B6', cursor: 'pointer', marginBottom: 16,
-                transition: 'all 200ms',
-              }}
-              onMouseEnter={e => e.target.style.background = 'rgba(237,234,248,0.50)'}
-              onMouseLeave={e => e.target.style.background = 'rgba(237,234,248,0.25)'}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-              </svg>
-              Add Link
-            </button>
+                  {!splitUpcoming && (
+                    <div style={{ marginBottom: 16 }}>{addLinkButton}</div>
+                  )}
+
+                  {/* Separate Upcoming Links card (Whapi current only) */}
+                  {splitUpcoming && (
+                    <div style={{
+                      marginTop: 4, marginBottom: 16, padding: '14px 16px',
+                      borderRadius: 14, border: '1px solid rgba(139,92,246,0.25)',
+                      background: 'rgba(237,234,248,0.20)',
+                      display: 'flex', flexDirection: 'column', gap: 12,
+                    }}>
+                      <div style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.8rem', fontWeight: 800, color: '#5B21B6' }}>
+                        Upcoming Links
+                      </div>
+                      {upcomingIdx.length === 0 && (
+                        <div style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.74rem', color: 'rgba(91,33,182,0.55)' }}>
+                          No upcoming links yet — add one so rotation has somewhere to go next.
+                        </div>
+                      )}
+                      {upcomingIdx.map(i => renderLinkNode(links[i], i))}
+                      {addLinkButton}
+                    </div>
+                  )}
+                </>
+              );
+            })()}
 
             {/* Rotation info */}
             {links.length > 1 && (
@@ -633,11 +720,13 @@ export default function WhatsAppLinksEditor({ token, source = 'meta' }) {
             <input
               type="text"
               value={permLink}
-              onChange={(e) => setPermLink(e.target.value)}
+              readOnly
+              title="This branded domain is fixed — copy it to share"
               placeholder="https://join.yourdomain.com"
               style={{
                 flex: 1, border: 'none', outline: 'none', background: 'transparent',
                 fontFamily: 'Outfit, sans-serif', fontSize: '0.92rem', color: '#3B0764',
+                cursor: 'default',
               }}
             />
             <button
@@ -649,12 +738,6 @@ export default function WhatsAppLinksEditor({ token, source = 'meta' }) {
               ) : (
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
               )}
-            </button>
-            <button
-              type="button" onClick={savePermLink} disabled={savingPerm} title="Save link"
-              style={{ border: 'none', background: '#5B21B6', color: '#fff', width: 38, height: 38, borderRadius: 10, cursor: savingPerm ? 'wait' : 'pointer', opacity: savingPerm ? 0.6 : 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 2px 10px rgba(91,33,182,0.3)' }}
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
             </button>
           </div>
           {permToast && (
@@ -697,6 +780,7 @@ export default function WhatsAppLinksEditor({ token, source = 'meta' }) {
           source={source}
           isWhapi={isMetaTempLike(source)}
           activeIndex={curActiveIndex}
+          token={token}
           onCreateTemplate={() => { setEditingTpl(null); setTplOpen(true); }}
         />
 
@@ -813,6 +897,22 @@ export default function WhatsAppLinksEditor({ token, source = 'meta' }) {
                     </span>
                   )}
                 </div>
+
+                {/* Row 3: actual media preview. Videos use preload="metadata"
+                    so the heavy file isn't fully downloaded just to list it. */}
+                {t.media_url && (
+                  <div style={{ marginTop: 2 }}>
+                    {t.msg_type === 'video' ? (
+                      <video src={t.media_url} controls preload="metadata"
+                        style={{ maxWidth: 260, maxHeight: 170, borderRadius: 8, background: '#000' }} />
+                    ) : t.msg_type === 'audio' ? (
+                      <audio src={t.media_url} controls style={{ height: 36, maxWidth: 280 }} />
+                    ) : (
+                      <img src={t.media_url} alt={t.name} loading="lazy"
+                        style={{ maxWidth: 200, maxHeight: 150, borderRadius: 8, objectFit: 'cover', border: '1px solid rgba(91,33,182,0.12)' }} />
+                    )}
+                  </div>
+                )}
               </div>
             ))}
           </div>

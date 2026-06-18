@@ -337,8 +337,20 @@ async function fetchAllPromotePages() {
  * — expected, skipped quietly. Returns [{ id, name, status, page_name }].
  */
 async function fetchPageLeadgenForms(pageId, pageName) {
-  const token = getTokenForPage(pageId);  // per-page override (META_PAGE_TOKEN_<id>) → default
-  if (!token || !pageId) return [];
+  const baseToken = getTokenForPage(pageId);  // per-page override (META_PAGE_TOKEN_<id>) → default
+  if (!baseToken || !pageId) return [];
+
+  // The /leadgen_forms edge MUST be called with a PAGE access token. A System
+  // User (or user) token gets "(#190) must be called with a Page Access Token",
+  // so derive the page token from it first. A page token already IS its own
+  // page's token, so derivation returns it; if derivation fails (e.g. the base
+  // token is a page token for a DIFFERENT page) we fall back to the base token.
+  let token = baseToken;
+  try {
+    const r = await fetch(`https://graph.facebook.com/${API_VERSION}/${pageId}?fields=access_token&access_token=${baseToken}`);
+    const j = await r.json();
+    if (r.ok && j.access_token) token = j.access_token;
+  } catch { /* fall back to baseToken */ }
 
   const first = new URL(`https://graph.facebook.com/${API_VERSION}/${pageId}/leadgen_forms`);
   first.searchParams.set('fields', 'id,name,status');

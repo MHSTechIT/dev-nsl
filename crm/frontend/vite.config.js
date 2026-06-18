@@ -22,6 +22,12 @@ export default defineConfig({
           });
         },
       },
+      // Template media (images / videos / voice notes) are served by the backend
+      // from /uploads/templates — proxy it so the Saved Templates previews load.
+      '/uploads': {
+        target: 'http://localhost:3003',
+        changeOrigin: true,
+      },
     },
   },
   build: {

@@ -35,7 +35,7 @@ function fromLocalDatetimeValue(localVal) {
    or TagMango memberships (TagMango). Defined at MODULE scope — not inside
    TimerConfig — so it does NOT remount on every parent re-render; otherwise the
    panel would snap shut after each pick. `scope` = 'current' | 'next'. */
-function MetaFormSelect({ scope, value, onChange, options = [], isTagmango = false }) {
+function MetaFormSelect({ scope, value, onChange, options = [], isTagmango = false, onRefresh, refreshing = false }) {
   const noun  = isTagmango ? 'TagMango membership' : 'Meta lead forms';
   const label = `${noun} (${scope === 'next' ? 'next' : 'current'} webinar)`;
   return (
@@ -52,6 +52,8 @@ function MetaFormSelect({ scope, value, onChange, options = [], isTagmango = fal
         searchable
         searchPlaceholder={isTagmango ? 'Search memberships…' : 'Search forms…'}
         placeholder={isTagmango ? 'Select membership…' : 'Select forms…'}
+        onRefresh={onRefresh}
+        refreshing={refreshing}
       />
     </div>
   );
@@ -143,6 +145,7 @@ export default function TimerConfig({ token, source = 'meta' }) {
   const [nextFormIds, setNextFormIds]       = useState([]);
   const [forms, setForms]                   = useState([]);
   const [memberships, setMemberships]       = useState([]); // TagMango "mangos"
+  const [formsRefreshing, setFormsRefreshing] = useState(false); // force-reload spinner
   // Meta Temp extras: actual webinar date/time + webinar (Zoom) link, per webinar.
   const [currentWebinarDT, setCurrentWebinarDT]     = useState('');
   const [currentWebinarLink, setCurrentWebinarLink] = useState('');
@@ -182,6 +185,20 @@ export default function TimerConfig({ token, source = 'meta' }) {
         .catch(() => setForms([]));
     }
   }, [showForms, isTagmango, token]);
+
+  /* Force-reload the form/membership list, bypassing the backend's 30-min cache
+     (?refresh=true) so a just-created Meta form shows immediately. */
+  function refreshForms() {
+    setFormsRefreshing(true);
+    const finish = () => setFormsRefreshing(false);
+    if (isTagmango) {
+      fetch('/api/admin/tagmango-memberships', { headers: { Authorization: `Bearer ${token}` } })
+        .then(r => r.json()).then(d => setMemberships(d.memberships || [])).catch(() => {}).finally(finish);
+    } else {
+      fetch('/api/admin/meta-leadgen-forms?refresh=true', { headers: { Authorization: `Bearer ${token}` } })
+        .then(r => r.json()).then(d => setForms(d.forms || [])).catch(() => {}).finally(finish);
+    }
+  }
 
   /* Only ACTIVE Meta forms are offered for linking. */
   const activeForms = forms.filter(f => String(f.status || '').toUpperCase() === 'ACTIVE');
@@ -377,7 +394,7 @@ export default function TimerConfig({ token, source = 'meta' }) {
         )}
       </div>
       {showForms && (
-        <MetaFormSelect scope="current" value={currentFormIds} onChange={setCurrentFormIds} options={linkOptions} isTagmango={isTagmango} />
+        <MetaFormSelect scope="current" value={currentFormIds} onChange={setCurrentFormIds} options={linkOptions} isTagmango={isTagmango} onRefresh={refreshForms} refreshing={formsRefreshing} />
       )}
     </div>
   );
@@ -423,7 +440,7 @@ export default function TimerConfig({ token, source = 'meta' }) {
         )}
       </div>
       {showForms && (
-        <MetaFormSelect scope="next" value={nextFormIds} onChange={setNextFormIds} options={linkOptions} isTagmango={isTagmango} />
+        <MetaFormSelect scope="next" value={nextFormIds} onChange={setNextFormIds} options={linkOptions} isTagmango={isTagmango} onRefresh={refreshForms} refreshing={formsRefreshing} />
       )}
     </div>
   );
@@ -522,7 +539,7 @@ export default function TimerConfig({ token, source = 'meta' }) {
               </div>
 
               {showForms && (
-                <MetaFormSelect scope="current" value={currentFormIds} onChange={setCurrentFormIds} options={linkOptions} isTagmango={isTagmango} />
+                <MetaFormSelect scope="current" value={currentFormIds} onChange={setCurrentFormIds} options={linkOptions} isTagmango={isTagmango} onRefresh={refreshForms} refreshing={formsRefreshing} />
               )}
               <div style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid rgba(209,196,240,0.45)' }}>
                 <p className="font-sans text-xs text-purple-400 mb-2" style={{ fontWeight: 600 }}>Webinar Date &amp; Time</p>
@@ -639,7 +656,7 @@ export default function TimerConfig({ token, source = 'meta' }) {
             </div>
 
             {showForms && (
-              <MetaFormSelect scope="next" value={nextFormIds} onChange={setNextFormIds} options={linkOptions} isTagmango={isTagmango} />
+              <MetaFormSelect scope="next" value={nextFormIds} onChange={setNextFormIds} options={linkOptions} isTagmango={isTagmango} onRefresh={refreshForms} refreshing={formsRefreshing} />
             )}
             <div style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid rgba(209,196,240,0.45)' }}>
               <p className="font-sans text-xs text-purple-400 mb-2" style={{ fontWeight: 600 }}>Webinar Date &amp; Time</p>
@@ -687,7 +704,7 @@ const bsInputStyle = {
 /* Brand-styled single-select dropdown — matches the CRM's BrandSelect
    (option panel portaled to <body> so it never gets clipped). Replaces the
    native <select> so the Meta-form list matches the rest of the UI. */
-function BrandSelect({ value, onChange, options = [], disabled = false, searchable = false, searchPlaceholder = 'Search…', multiple = false, placeholder = 'Select…' }) {
+function BrandSelect({ value, onChange, options = [], disabled = false, searchable = false, searchPlaceholder = 'Search…', multiple = false, placeholder = 'Select…', onRefresh, refreshing = false }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [pos, setPos]   = useState({ top: 0, left: 0, width: 0, maxH: 280 });
@@ -844,19 +861,42 @@ function BrandSelect({ value, onChange, options = [], disabled = false, searchab
         >
           {searchable && (
             <div style={{ padding: 8, borderBottom: '1px solid rgba(139,92,246,0.12)', flexShrink: 0 }}>
-              <input
-                autoFocus
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder={searchPlaceholder}
-                style={{
-                  width: '100%', height: 34, padding: '0 10px', borderRadius: 8,
-                  border: '1px solid rgba(139,92,246,0.25)', outline: 'none',
-                  fontFamily: 'Outfit, sans-serif', fontSize: '0.84rem', color: '#3B0764',
-                  boxSizing: 'border-box',
-                }}
-              />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input
+                  autoFocus
+                  type="text"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder={searchPlaceholder}
+                  style={{
+                    flex: 1, height: 34, padding: '0 10px', borderRadius: 8,
+                    border: '1px solid rgba(139,92,246,0.25)', outline: 'none',
+                    fontFamily: 'Outfit, sans-serif', fontSize: '0.84rem', color: '#3B0764',
+                    boxSizing: 'border-box',
+                  }}
+                />
+                {onRefresh && (
+                  <button
+                    type="button"
+                    onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); if (!refreshing) onRefresh(); }}
+                    title="Refresh forms (fetch any newly-created forms now)"
+                    disabled={refreshing}
+                    style={{
+                      flexShrink: 0, width: 34, height: 34, borderRadius: 8,
+                      border: '1px solid rgba(139,92,246,0.25)', background: '#fff',
+                      cursor: refreshing ? 'wait' : 'pointer',
+                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: '#5B21B6',
+                    }}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
+                      style={{ animation: refreshing ? 'mfspin 0.8s linear infinite' : 'none' }}>
+                      <path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
+                    </svg>
+                  </button>
+                )}
+              </div>
+              <style>{`@keyframes mfspin { to { transform: rotate(360deg); } }`}</style>
               <div style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.7rem', color: 'rgba(91,33,182,0.55)', padding: '6px 2px 0', fontWeight: 600 }}>
                 {q ? `${filtered.length} of ${realOptions.length}` : realOptions.length} form{realOptions.length === 1 ? '' : 's'}
               </div>

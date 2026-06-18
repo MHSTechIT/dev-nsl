@@ -62,4 +62,70 @@ async function getMemberCount(channelId, inviteUrl) {
   return { count: Number(count), groupId, groupName: g.name || preview.name || null };
 }
 
-module.exports = { inviteCodeOf, getMemberCount };
+/* Reduce any WhatsApp id ("919240XXXXXX", "919240XXXXXX:12@s.whatsapp.net",
+   "919240XXXXXX@c.us") to its bare digits so self ↔ participant ids compare. */
+function digitsId(x) {
+  return String(x || '').split(/[:@]/)[0].replace(/\D/g, '');
+}
+
+/* Is the Whapi number an ADMIN of the community behind this invite link?
+   Reuses the same invite→group resolution as getMemberCount, then:
+     1. reads the channel's OWN number from Gate /health (user.id) — null when
+        the channel isn't logged in (can't determine → connected:false),
+     2. fetches /groups/<id> participants and matches self by bare digits,
+     3. reports the matched participant's rank (creator/admin → isAdmin).
+
+   Returns { connected, isMember, isAdmin, role, groupName, count }.
+   Never throws for the "expected" states (not connected / not a member) — it
+   encodes them in the result so the UI can render a clear badge. Only genuine
+   bad-link / channel-gone errors throw. */
+async function getGroupAdminStatus(channelId, inviteUrl) {
+  const code = inviteCodeOf(inviteUrl);
+  if (!code) { const e = new Error('not_a_whatsapp_invite'); e.code = 'BAD_LINK'; throw e; }
+
+  const ch = await resolveChannel(channelId);          // throws if channel gone
+
+  // Self number — only present once the channel is logged into WhatsApp.
+  let selfDigits = '';
+  try {
+    const health = await gate('GET', ch, '/health?wakeup=true');
+    selfDigits = digitsId(health?.user?.id);
+  } catch { /* health unreachable → treat as not connected below */ }
+  if (!selfDigits) {
+    return { connected: false, isMember: false, isAdmin: false, role: null, groupName: null, count: null };
+  }
+
+  // Resolve invite → group id (public preview, membership not required).
+  const preview = await gate('GET', ch, `/groups/link/${encodeURIComponent(code)}`);
+  const groupId = preview.id;
+  if (!groupId) { const e = new Error('group_not_resolved'); e.code = 'NO_GROUP'; throw e; }
+
+  // Authoritative fetch — 404 means this number isn't in the group.
+  let g;
+  try {
+    g = await gate('GET', ch, `/groups/${encodeURIComponent(groupId)}`);
+  } catch (err) {
+    if (err.status === 404) {
+      return { connected: true, isMember: false, isAdmin: false, role: null,
+               groupName: preview.name || null, count: null };
+    }
+    throw err;
+  }
+
+  const parts = Array.isArray(g.participants) ? g.participants : [];
+  const me = parts.find(p => digitsId(p.id) === selfDigits);
+  const role = me ? (me.rank || me.role || 'member') : null;     // creator | admin | member | null
+  const isAdmin = ['creator', 'admin', 'superadmin'].includes(String(role).toLowerCase());
+  const count = g.participants_count ?? g.participantsCount ?? parts.length ?? null;
+
+  return {
+    connected: true,
+    isMember: !!me,
+    isAdmin,
+    role,
+    groupName: g.name || preview.name || null,
+    count: count == null ? null : Number(count),
+  };
+}
+
+module.exports = { inviteCodeOf, getMemberCount, getGroupAdminStatus };

@@ -2494,10 +2494,12 @@ router.put('/workspace-flags', async (req, res) => {
    Meta Temp Timer & Controls form dropdowns. Returns { configured, forms:
    [{ id, name, page_name?, status? }] }. Empty (not an error) when Meta
    isn't configured, so the dropdown can show a graceful "none" state. */
-router.get('/meta-leadgen-forms', async (_req, res) => {
+router.get('/meta-leadgen-forms', async (req, res) => {
   if (!metaConfigured()) return res.json({ configured: false, forms: [] });
   try {
-    const forms = await fetchAllLeadgenForms();
+    // ?refresh=true bypasses the 30-min cache so a just-created form shows now.
+    const force = req.query.refresh === 'true' || req.query.force === 'true';
+    const forms = await fetchAllLeadgenForms(force);
     res.json({ configured: true, forms: forms || [] });
   } catch (err) {
     console.error('meta-leadgen-forms error:', err.message);

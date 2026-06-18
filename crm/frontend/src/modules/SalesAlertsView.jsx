@@ -347,12 +347,12 @@ function AlertRow({ row, teamLeaders, testing, onChange, onTest, onRemove }) {
       {/* Field grid — Telegram User ID + Scope dropdown + Label, all
           three with a label on top in the WhatsAppLinksEditor style. */}
       <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'minmax(180px, 1fr) minmax(220px, 1.2fr) minmax(160px, 1fr) auto',
+        display: 'flex',
+        flexWrap: 'wrap',
         gap: 12,
-        alignItems: 'end',
+        alignItems: 'flex-end',
       }}>
-        <Field label="Telegram User ID">
+        <Field label="Telegram User ID" style={{ flex: '1 1 160px' }}>
           <input
             value={row.telegram_chat_id || ''}
             onChange={(e) => onChange({ telegram_chat_id: e.target.value })}
@@ -361,7 +361,7 @@ function AlertRow({ row, teamLeaders, testing, onChange, onTest, onRemove }) {
           />
         </Field>
 
-        <Field label="Recipient role">
+        <Field label="Recipient role" style={{ flex: '1 1 200px' }}>
           <RoleDropdown
             value={dropdownValue}
             teamLeaders={teamLeaders}
@@ -369,7 +369,7 @@ function AlertRow({ row, teamLeaders, testing, onChange, onTest, onRemove }) {
           />
         </Field>
 
-        <Field label="Label (optional)">
+        <Field label="Label (optional)" style={{ flex: '1 1 160px' }}>
           <input
             value={row.label || ''}
             onChange={(e) => onChange({ label: e.target.value })}
@@ -381,7 +381,7 @@ function AlertRow({ row, teamLeaders, testing, onChange, onTest, onRemove }) {
         <button
           onClick={onTest}
           disabled={testing || isDirty}
-          style={testBtn(testing || isDirty)}
+          style={{ ...testBtn(testing || isDirty), flex: '0 0 auto' }}
           title={isDirty ? 'Save the row first, then test' : 'Send a test message to this chat'}
         >
           {testing ? (
@@ -634,9 +634,9 @@ function BadgeIcon() {
 }
 
 /* ── Small bits ────────────────────────────────────────────────────── */
-function Field({ label, children }) {
+function Field({ label, children, style }) {
   return (
-    <label style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0, ...style }}>
       <span style={{
         fontFamily: FONT, fontSize: '0.7rem', fontWeight: 700,
         color: '#4A1A94', textTransform: 'uppercase', letterSpacing: 0.4,

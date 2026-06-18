@@ -104,6 +104,67 @@ function WebinarSelect({ value, onChange, webinars }) {
   );
 }
 
+/* Generic styled dropdown (same look as WebinarSelect) — used for the Form
+   filter. `options` is [{ value, label }] including the "all" entry. */
+function OptionDropdown({ value, onChange, options, placeholder = 'All', minWidth = 180 }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    function handleClick(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, []);
+  const selected = options.find(o => o.value === value);
+  return (
+    <div ref={ref} style={{ position: 'relative', minWidth }}>
+      <button
+        onClick={() => setOpen(!open)}
+        style={{
+          width: '100%', height: '2.1rem', borderRadius: 10,
+          border: '1px solid rgba(139,92,246,0.25)', background: '#fff',
+          padding: '0 32px 0 12px', fontFamily: 'Outfit, sans-serif',
+          fontSize: '0.82rem', fontWeight: 600, color: '#3B0764',
+          cursor: 'pointer', outline: 'none', textAlign: 'left', position: 'relative',
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}
+      >
+        {selected ? selected.label : placeholder}
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#5B21B6" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+          style={{ position: 'absolute', right: 10, top: '50%', transform: `translateY(-50%) rotate(${open ? 180 : 0}deg)`, transition: 'transform 200ms' }}>
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </button>
+      {open && (
+        <div style={{
+          position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0,
+          background: '#fff', borderRadius: 12, border: '1px solid rgba(139,92,246,0.20)',
+          boxShadow: '0 8px 24px rgba(91,33,182,0.15)', zIndex: 50,
+          padding: '4px 0', maxHeight: 240, overflowY: 'auto',
+        }}>
+          {options.map(opt => (
+            <button
+              key={opt.value}
+              onClick={() => { onChange(opt.value); setOpen(false); }}
+              style={{
+                width: '100%', border: 'none', background: value === opt.value ? 'rgba(91,33,182,0.08)' : 'transparent',
+                padding: '8px 14px', fontFamily: 'Outfit, sans-serif', fontSize: '0.80rem',
+                fontWeight: value === opt.value ? 700 : 500,
+                color: value === opt.value ? '#5B21B6' : '#3B0764',
+                cursor: 'pointer', textAlign: 'left', transition: 'background 100ms',
+                whiteSpace: 'normal',
+              }}
+              onMouseEnter={e => { if (value !== opt.value) e.currentTarget.style.background = 'rgba(91,33,182,0.05)'; }}
+              onMouseLeave={e => { if (value !== opt.value) e.currentTarget.style.background = 'transparent'; }}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function LeadsTable({ token, source = 'meta' }) {
   const [leads, setLeads]           = useState([]);
   const [total, setTotal]           = useState(0);
@@ -116,6 +177,7 @@ export default function LeadsTable({ token, source = 'meta' }) {
   const [syncToast, setSyncToast]   = useState(null);
   const [webinars, setWebinars]     = useState([]);
   const [webinarFilter, setWebinarFilter] = useState('');
+  const [formFilter, setFormFilter]       = useState('');   // filter leads by meta_form_id
 
   // Pagination
   const [page, setPage] = useState(1);
@@ -148,6 +210,20 @@ export default function LeadsTable({ token, source = 'meta' }) {
       .catch(() => {});
   }, [token, source]);
 
+  // Map Meta lead-form id → human name, so the "Form" column can show which
+  // form each lead came from instead of the raw numeric form id.
+  const [formNameById, setFormNameById] = useState({});
+  useEffect(() => {
+    fetch('/api/admin/meta-leadgen-forms', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(d => {
+        const map = {};
+        for (const f of (d.forms || [])) if (f && f.id) map[String(f.id)] = f.name || String(f.id);
+        setFormNameById(map);
+      })
+      .catch(() => {});
+  }, [token]);
+
   function handleSort(key) {
     if (sortKey === key) setSortAsc(a => !a);
     else { setSortKey(key); setSortAsc(true); }
@@ -155,7 +231,20 @@ export default function LeadsTable({ token, source = 'meta' }) {
   }
 
   // Reset page when filters change
-  useEffect(() => { setPage(1); }, [activeFilter, dateFrom, dateTo, webinarFilter]);
+  useEffect(() => { setPage(1); }, [activeFilter, dateFrom, dateTo, webinarFilter, formFilter]);
+
+  // Form-filter options — the distinct Meta forms actually present in the loaded
+  // leads, labelled by name (falling back to the id), plus the "All Forms" entry.
+  const formOptions = (() => {
+    const present = new Map();
+    for (const l of leads) {
+      const fid = l.meta_form_id ? String(l.meta_form_id) : '';
+      if (fid && !present.has(fid)) present.set(fid, formNameById[fid] || fid);
+    }
+    const opts = [...present.entries()].map(([value, label]) => ({ value, label }));
+    opts.sort((a, b) => String(a.label).localeCompare(String(b.label)));
+    return [{ value: '', label: 'All Forms' }, ...opts];
+  })();
 
   // ── Duplicate detection ──
   // Group by phone number, keep oldest (first registered) as original, rest are
@@ -209,6 +298,7 @@ export default function LeadsTable({ token, source = 'meta' }) {
   const filtered = leads.filter(l => {
     // Webinar filter — match by webinar_id
     if (webinarFilter && String(l.webinar_id) !== String(webinarFilter)) return false;
+    if (formFilter && String(l.meta_form_id) !== String(formFilter)) return false;
     if (dateFrom || dateTo) {
       const created = new Date(l.created_at);
       // DateTimePicker emits "YYYY-MM-DDTHH:mm:ss" (exact moment); the
@@ -354,6 +444,7 @@ export default function LeadsTable({ token, source = 'meta' }) {
 
   const dateFiltered = leads.filter(l => {
     if (webinarFilter && String(l.webinar_id) !== String(webinarFilter)) return false;
+    if (formFilter && String(l.meta_form_id) !== String(formFilter)) return false;
     if (dateFrom) {
       const from = dateFrom.includes('T') ? new Date(dateFrom) : new Date(dateFrom + 'T00:00:00+05:30');
       if (new Date(l.created_at) < from) return false;
@@ -364,8 +455,6 @@ export default function LeadsTable({ token, source = 'meta' }) {
     }
     return true;
   });
-  const waClicked    = dateFiltered.filter(l => l.wa_clicked === true).length;
-  const waNotClicked = dateFiltered.filter(l => !l.wa_clicked).length;
 
   // Columns mirror the funnel form fields the admin actually cares about.
   // Meta-funnel-only columns (Medication / Do you know Tamil? / Occupation)
@@ -377,6 +466,7 @@ export default function LeadsTable({ token, source = 'meta' }) {
   const cols = dynamicMode
     ? [
         ...fieldKeys.map(k => ({ key: `fd:${k}`, label: prettyLabel(k) })),
+        { key: 'meta_form_id', label: 'Form' },
         { key: 'created_at', label: 'Registered' },
         { key: 'wa_clicked', label: 'WhatsApp' },
       ]
@@ -406,6 +496,12 @@ export default function LeadsTable({ token, source = 'meta' }) {
       return l.wa_clicked
         ? <span className="inline-flex items-center px-2 py-0.5 rounded-pill text-xs font-semibold bg-green-100 text-green-700">Clicked</span>
         : <span className="inline-flex items-center px-2 py-0.5 rounded-pill text-xs font-medium bg-gray-100 text-gray-400">Not yet</span>;
+    }
+    if (c.key === 'meta_form_id') {
+      const fid = l.meta_form_id ? String(l.meta_form_id) : '';
+      if (!fid) return <span className="text-gray-300">—</span>;
+      const fname = formNameById[fid] || fid;   // fall back to id until the catalog loads
+      return <span className="inline-flex items-center px-2 py-0.5 rounded-pill text-xs font-semibold bg-purple-100 text-purple-700" title={fname}>{fname}</span>;
     }
     const v = cellValue(l, c.key);
     const shown = (v !== '' && v != null) ? String(v) : null;
@@ -651,48 +747,48 @@ export default function LeadsTable({ token, source = 'meta' }) {
         )}
       </div>
 
-      {/* Webinar session filter */}
-      {webinars.length > 0 && (
+      {/* Webinar session + Form filters */}
+      {(webinars.length > 0 || formOptions.length > 1) && (
         <div style={{
           display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
           background: 'rgba(237,234,248,0.50)', borderRadius: 14,
           border: '1px solid rgba(139,92,246,0.15)',
           padding: '10px 14px', marginBottom: 14,
         }}>
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="rgba(91,33,182,0.55)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-            <path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/><path d="m9 16 2 2 4-4"/>
-          </svg>
-          <span style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', fontWeight: 600, color: 'rgba(91,33,182,0.65)', whiteSpace: 'nowrap' }}>Webinar</span>
-          <WebinarSelect value={webinarFilter} onChange={setWebinarFilter} webinars={webinars} />
-          {webinarFilter && (
-            <button onClick={() => setWebinarFilter('')}
-              style={{ height: '2.1rem', padding: '0 12px', borderRadius: 10, border: '1px solid rgba(239,68,68,0.30)', background: 'rgba(254,242,242,0.80)', fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', fontWeight: 600, color: '#DC2626', cursor: 'pointer', whiteSpace: 'nowrap' }}>
-              ✕ Clear
-            </button>
+          {webinars.length > 0 && (
+            <>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="rgba(91,33,182,0.55)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                <path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/><path d="m9 16 2 2 4-4"/>
+              </svg>
+              <span style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', fontWeight: 600, color: 'rgba(91,33,182,0.65)', whiteSpace: 'nowrap' }}>Webinar</span>
+              <WebinarSelect value={webinarFilter} onChange={setWebinarFilter} webinars={webinars} />
+              {webinarFilter && (
+                <button onClick={() => setWebinarFilter('')}
+                  style={{ height: '2.1rem', padding: '0 12px', borderRadius: 10, border: '1px solid rgba(239,68,68,0.30)', background: 'rgba(254,242,242,0.80)', fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', fontWeight: 600, color: '#DC2626', cursor: 'pointer', whiteSpace: 'nowrap' }}>
+                  ✕ Clear
+                </button>
+              )}
+            </>
+          )}
+
+          {/* Form filter — only when the loaded leads come from ≥1 known form */}
+          {formOptions.length > 1 && (
+            <>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="rgba(91,33,182,0.55)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/>
+              </svg>
+              <span style={{ fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', fontWeight: 600, color: 'rgba(91,33,182,0.65)', whiteSpace: 'nowrap' }}>Form</span>
+              <OptionDropdown value={formFilter} onChange={setFormFilter} options={formOptions} placeholder="All Forms" minWidth={200} />
+              {formFilter && (
+                <button onClick={() => setFormFilter('')}
+                  style={{ height: '2.1rem', padding: '0 12px', borderRadius: 10, border: '1px solid rgba(239,68,68,0.30)', background: 'rgba(254,242,242,0.80)', fontFamily: 'Outfit, sans-serif', fontSize: '0.78rem', fontWeight: 600, color: '#DC2626', cursor: 'pointer', whiteSpace: 'nowrap' }}>
+                  ✕ Clear
+                </button>
+              )}
+            </>
           )}
         </div>
       )}
-
-      {/* Stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
-        {[
-          { label: 'Total Leads',       value: dateFiltered.length,                                          filterId: 'all',        color: 'text-purple-700 bg-purple-50', ring: 'ring-purple-400' },
-          { label: 'High Sugar (250+)', value: dateFiltered.filter(l => l.sugar_level === '250+').length,   filterId: 'high_sugar', color: 'text-red-700 bg-red-50',       ring: 'ring-red-400' },
-          { label: 'WA Clicked',        value: waClicked,                                                   filterId: 'wa_clicked', color: 'text-green-700 bg-green-50',    ring: 'ring-green-400' },
-          { label: 'WA Not Clicked',    value: waNotClicked,                                                filterId: 'wa_not',     color: 'text-gray-600 bg-gray-50',      ring: 'ring-gray-400' },
-        ].map((s, i) => {
-          const isActive = activeFilter === s.filterId;
-          return (
-            <button key={i} onClick={() => setActiveFilter(isActive ? 'all' : s.filterId)}
-              className={`rounded-card px-4 py-3 text-left border transition-all duration-150 w-full ${s.color} border-current/10 ${isActive ? `ring-2 ${s.ring} scale-[1.03] shadow-md` : 'hover:scale-[1.02] hover:shadow-sm'}`}
-              style={{ cursor: 'pointer' }}>
-              <p className="font-sans font-bold text-2xl">{s.value}</p>
-              <p className="font-sans text-xs mt-0.5 opacity-80">{s.label}</p>
-              {isActive && <p className="font-sans text-[10px] font-semibold mt-1 opacity-60 uppercase tracking-wide">● Filtered</p>}
-            </button>
-          );
-        })}
-      </div>
 
       {/* Table */}
       <div className="overflow-x-auto rounded-card border border-purple-100">

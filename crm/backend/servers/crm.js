@@ -39,6 +39,7 @@ const { mergeTimerSettings }                    = require('../utils/timerDefault
 const leadsAlertScheduler                       = require('../utils/leadsAlertScheduler');
 const { startLinkSwapScheduler }                = require('../utils/linkSwapScheduler');
 const { startWhapiMemberScheduler }             = require('../utils/whapiMemberScheduler');
+const { startTemplateSendScheduler }            = require('../utils/templateSendScheduler');
 const { startMetaLeadSyncScheduler }            = require('../utils/metaLeadSyncScheduler');
 const emptyQueueAlertScheduler                  = require('../utils/emptyQueueAlertScheduler');
 const dnpReassignScheduler                      = require('../utils/dnpReassignScheduler');
@@ -67,7 +68,7 @@ app.listen(PORT, () => {
   console.log(`[crm] running on port ${PORT}`);
 
   if (DISABLE_SCHEDULERS) {
-    console.log('[crm] DISABLE_SCHEDULERS=true → skipping linkSwap, whapiMemberRotation, tataInboundSync, leadsAlert, emptyQueueAlert, dnpReassign, sheetsSync, staleCallReaper, activitySpanReaper, dailyReconciliation (metaLeadSync still runs — idempotent)');
+    console.log('[crm] DISABLE_SCHEDULERS=true → skipping linkSwap, whapiMemberRotation, templateSend, tataInboundSync, leadsAlert, emptyQueueAlert, dnpReassign, sheetsSync, staleCallReaper, activitySpanReaper, dailyReconciliation (metaLeadSync still runs — idempotent)');
   } else {
     // All schedulers — race-prone if run in more than one process, so CRM owns
     // every one and the funnel services start none.
@@ -97,6 +98,11 @@ app.listen(PORT, () => {
     // members (counted via the Whapi admin number). Freezes + alerts if Whapi
     // can't read the count. meta/yt/meta2 keep lead-count rotation above.
     startWhapiMemberScheduler();
+
+    // Auto-send Saved Templates to the WhatsApp community group on the schedule
+    // derived from current_webinar_datetime (e.g. "3 Days To Go", "8 Hours To
+    // Go"). One send per template per webinar cycle (template_sends UNIQUE).
+    startTemplateSendScheduler();
 
     // Delayed manager alert when a caller's Assigned queue stays empty past the
     // admin-configured delay (TL & Assistant Timer sub-page). Fixed 60s tick;
