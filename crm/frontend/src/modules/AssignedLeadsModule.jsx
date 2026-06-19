@@ -115,6 +115,9 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
   const [advanceLeft, setAdvanceLeft] = useState(0);   // 5 → 0
   const [advanceToast, setAdvanceToast] = useState('');
   const advanceTimerRef = useRef(null);
+  // The lead queued to dial when the between-calls countdown reaches 0. Held in
+  // a ref so the interval choice-card ("Continue now") can dial it immediately.
+  const pendingNextLeadRef = useRef(null);
   function clearAdvanceTimer() {
     if (advanceTimerRef.current) { clearInterval(advanceTimerRef.current); advanceTimerRef.current = null; }
   }
@@ -1377,7 +1380,12 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
             // outcome:'incomplete' + autoAdvance:false meaning "stop
             // the auto-call right now". Honour that BEFORE both
             // queue paths below.
-            if (outcome === 'incomplete' && meta?.autoAdvance === false) {
+            if ((outcome === 'incomplete' || outcome === 'auto_paused') && meta?.autoAdvance === false) {
+              // 'incomplete' = caller hit X mid-call. 'auto_paused' = the agent
+              // reason card / SmartFlow cap blocked the account (is_active=FALSE).
+              // Either way STOP the auto-call loop — do not open the next lead.
+              // For auto_paused the blocked overlay (driven by the caller.paused
+              // SSE) then takes over the screen.
               setAutoMode('off');
               clearAdvanceTimer();
               setAdvanceLeft(0);
@@ -1398,6 +1406,7 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
                 return;
               }
               const nextLead = remaining[0];
+              pendingNextLeadRef.current = nextLead;
               clearAdvanceTimer();
               const deadline = Date.now() + t.autoAdvanceCountdownMs;
               const tick = () => {
@@ -1415,23 +1424,43 @@ export default function AssignedLeadsModule({ jwt, isActive, externalHighlightId
         />
       )}
 
-      {/* Always-on auto-advance: 5-sec countdown badge (top-right) */}
+      {/* Between-calls interval choice card — during the auto-advance gap the
+          caller can dial now, take a break, or stop the auto-call queue. */}
       {advanceLeft > 0 && (
         <div style={{
           position: 'fixed', top: 18, right: 18, zIndex: 9600,
-          background: 'rgba(91,33,182,0.95)', color: '#fff',
-          padding: '10px 16px', borderRadius: 50,
-          fontFamily: 'Outfit,sans-serif', fontWeight: 700, fontSize: '0.86rem',
-          boxShadow: '0 8px 24px rgba(91,33,182,0.40)',
-          display: 'flex', alignItems: 'center', gap: 8,
+          background: '#fff', color: '#3B0764',
+          padding: '14px 16px', borderRadius: 16, width: 230,
+          fontFamily: 'Outfit,sans-serif',
+          boxShadow: '0 12px 32px rgba(15,0,40,0.28)',
+          border: '1px solid rgba(139,92,246,0.20)',
+          display: 'flex', flexDirection: 'column', gap: 10,
         }}>
-          <span>Next call in {advanceLeft}s</span>
+          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+            <span style={{ fontWeight: 800, fontSize: '0.86rem' }}>Next call in</span>
+            <span style={{ fontWeight: 800, fontSize: '1.3rem', color: '#5B21B6', fontVariantNumeric: 'tabular-nums' }}>{advanceLeft}s</span>
+          </div>
           <button
-            onClick={() => { clearAdvanceTimer(); setAdvanceLeft(0); }}
-            style={{ border: 'none', background: 'rgba(255,255,255,0.20)', color: '#fff',
-                     padding: '3px 10px', borderRadius: 50, cursor: 'pointer',
-                     fontFamily: 'Outfit,sans-serif', fontWeight: 700, fontSize: '0.74rem' }}>
-            Stop
+            onClick={() => {
+              clearAdvanceTimer(); setAdvanceLeft(0);
+              if (pendingNextLeadRef.current) { const nl = pendingNextLeadRef.current; pendingNextLeadRef.current = null; triggerCallAndOpen(nl); }
+            }}
+            style={{ border: 'none', background: '#5B21B6', color: '#fff', padding: '9px 12px', borderRadius: 50,
+                     cursor: 'pointer', fontFamily: 'Outfit,sans-serif', fontWeight: 800, fontSize: '0.82rem',
+                     boxShadow: '0 4px 12px rgba(91,33,182,0.30)' }}>
+            ▶ Continue now
+          </button>
+          <button
+            onClick={() => { clearAdvanceTimer(); setAdvanceLeft(0); setBreakStep('choose'); }}
+            style={{ border: '1.5px solid #5B21B6', background: '#fff', color: '#5B21B6', padding: '8px 12px', borderRadius: 50,
+                     cursor: 'pointer', fontFamily: 'Outfit,sans-serif', fontWeight: 800, fontSize: '0.82rem' }}>
+            ☕ Take a break
+          </button>
+          <button
+            onClick={() => { setAutoMode('off'); clearAdvanceTimer(); setAdvanceLeft(0); pendingNextLeadRef.current = null; }}
+            style={{ border: 'none', background: 'transparent', color: 'rgba(220,38,38,0.9)', padding: '4px', borderRadius: 50,
+                     cursor: 'pointer', fontFamily: 'Outfit,sans-serif', fontWeight: 800, fontSize: '0.78rem' }}>
+            ✕ Stop auto-call
           </button>
         </div>
       )}

@@ -23,8 +23,8 @@ export const TIMER_GROUPS = [
     items: [
       { key: 'robotNudgeIntervalMs', label: 'Idle nudge interval', unit: 'ms', default: 30000, min: 5000, max: 600000,
         help: 'How often the robot re-nudges a caller sitting idle on the Call, Assigned or review pages.' },
-      { key: 'autoPauseNudgeCount', label: 'Idle nudges before auto-pause', unit: 'count', default: 5, min: 1, max: 20,
-        help: 'Unanswered idle nudges before the account auto-pauses.' },
+      { key: 'autoPauseNudgeCount', label: 'Idle nudges before blocking the caller', unit: 'count', default: 5, min: 1, max: 20,
+        help: 'Unanswered idle nudges before the account is BLOCKED (auto-paused, is_active=FALSE) — a TL/admin must resume them.' },
     ],
   },
   {
@@ -33,8 +33,8 @@ export const TIMER_GROUPS = [
     items: [
       { key: 'extAlertNudgeIntervalMs', label: 'Nudge interval', unit: 'ms', default: 30000, min: 5000, max: 600000,
         help: 'How often the robot re-asks on the "Is your SmartFlow extension on?" alert.' },
-      { key: 'extAlertNudgeCount', label: 'Nudges before auto-pause', unit: 'count', default: 5, min: 1, max: 20,
-        help: 'Ignored nudges on the extension alert before the account auto-pauses.' },
+      { key: 'extAlertNudgeCount', label: 'Nudges before blocking the caller', unit: 'count', default: 5, min: 1, max: 20,
+        help: 'Ignored nudges on the extension alert before the account is BLOCKED (auto-paused, is_active=FALSE) — a TL/admin must resume them.' },
     ],
   },
   {
@@ -43,8 +43,8 @@ export const TIMER_GROUPS = [
     items: [
       { key: 'agentReasonNudgeIntervalMs', label: 'Nudge interval', unit: 'ms', default: 30000, min: 5000, max: 600000,
         help: "How often the robot re-asks on the agent reason card (the caller's own SmartFlow line didn't pick up)." },
-      { key: 'agentReasonNudgeCount', label: 'Nudges before auto-pause', unit: 'count', default: 5, min: 1, max: 20,
-        help: 'Ignored nudges on the agent reason card before the account auto-pauses.' },
+      { key: 'agentReasonNudgeCount', label: 'Nudges before blocking the caller', unit: 'count', default: 5, min: 1, max: 20,
+        help: "If the caller doesn't respond to the agent reason card for this many nudges, the account is BLOCKED (auto-paused, is_active=FALSE) and the auto-call stops — a TL/admin must resume them. Default 5 (~30s each)." },
       { key: 'agentRetryCap', label: 'Retry attempts before blocking the caller', unit: 'count', default: 15, min: 1, max: 50,
         help: 'How many times the agent reason card may retrigger the SmartFlow call — the "Attempt X of Y" counter. Once this many attempts are reached, the account is auto-paused (blocked) instead of retrying again. Default 15.' },
     ],
@@ -55,8 +55,8 @@ export const TIMER_GROUPS = [
     items: [
       { key: 'formReasonNudgeIntervalMs', label: 'Nudge interval', unit: 'ms', default: 30000, min: 5000, max: 600000,
         help: 'How often the robot re-asks the caller to fill the post-call reason form.' },
-      { key: 'formReasonNudgeCount', label: 'Nudges before auto-pause', unit: 'count', default: 5, min: 1, max: 20,
-        help: 'Ignored nudges on the form reason card before the account auto-pauses.' },
+      { key: 'formReasonNudgeCount', label: 'Nudges before blocking the caller', unit: 'count', default: 5, min: 1, max: 20,
+        help: 'Ignored nudges on the form reason card before the account is BLOCKED (auto-paused, is_active=FALSE) — a TL/admin must resume them.' },
       { key: 'formTimerLongCallThresholdMs', label: 'Long-call threshold (no 45s form timer)', unit: 'min', default: 180000, min: 60000, max: 1800000,
         help: 'When a connected call lasts AT LEAST this long, the post-call form opens WITHOUT the 45-second countdown — the caller fills it at their own pace. Calls shorter than this are treated as customer-cut and trigger the urgent 45s window. Range: 1 minute to 30 minutes. Default 3 minutes.' },
     ],
@@ -67,8 +67,8 @@ export const TIMER_GROUPS = [
     items: [
       { key: 'customBreakNudgeIntervalMs', label: 'Nudge interval', unit: 'ms', default: 30000, min: 5000, max: 600000,
         help: 'How often the robot re-asks on the custom-break ("Other") card.' },
-      { key: 'customBreakNudgeCount', label: 'Nudges before auto-pause', unit: 'count', default: 4, min: 1, max: 20,
-        help: 'Ignored nudges on the custom-break card before the account auto-pauses.' },
+      { key: 'customBreakNudgeCount', label: 'Nudges before blocking the caller', unit: 'count', default: 4, min: 1, max: 20,
+        help: 'Ignored nudges on the custom-break card before the account is BLOCKED (auto-paused, is_active=FALSE) — a TL/admin must resume them.' },
     ],
   },
   {
@@ -77,8 +77,8 @@ export const TIMER_GROUPS = [
     items: [
       { key: 'lateReturnNudgeIntervalMs', label: 'Nudge interval', unit: 'ms', default: 30000, min: 5000, max: 600000,
         help: 'How often the robot re-asks on the late-return reason card.' },
-      { key: 'lateReturnNudgeCount', label: 'Nudges before auto-pause', unit: 'count', default: 5, min: 1, max: 20,
-        help: 'Ignored nudges on the late-return card before the account auto-pauses.' },
+      { key: 'lateReturnNudgeCount', label: 'Nudges before blocking the caller', unit: 'count', default: 5, min: 1, max: 20,
+        help: 'Ignored nudges on the late-return card before the account is BLOCKED (auto-paused, is_active=FALSE) — a TL/admin must resume them.' },
     ],
   },
   {
@@ -87,8 +87,8 @@ export const TIMER_GROUPS = [
     items: [
       { key: 'breakPickerCountdownMs', label: 'Inactivity countdown', unit: 'ms', default: 10000, min: 3000, max: 120000,
         help: 'Inactivity window on the break-picker card before a strike is counted.' },
-      { key: 'breakPickerStrikeCount', label: 'Strikes before auto-pause', unit: 'count', default: 3, min: 1, max: 20,
-        help: 'Inactivity strikes on the break-picker card before the account auto-pauses.' },
+      { key: 'breakPickerStrikeCount', label: 'Strikes before blocking the caller', unit: 'count', default: 3, min: 1, max: 20,
+        help: 'Inactivity strikes on the break-picker card before the account is BLOCKED (auto-paused, is_active=FALSE) — a TL/admin must resume them.' },
     ],
   },
 

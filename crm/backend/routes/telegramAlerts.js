@@ -15,6 +15,9 @@ const router  = express.Router();
 const pool    = require('../db');
 const { adminAuth }      = require('../middleware/adminAuth');
 const { sendTelegram }   = require('../utils/telegramNotifier');
+const { sendTextToNumber } = require('../utils/whapiSend');
+const { alertChannelId }  = require('../utils/whatsappAlerts');
+const { sendHourlyReports } = require('../utils/hourlyCallerReportScheduler');
 
 router.use(adminAuth);
 
@@ -55,8 +58,8 @@ router.get('/', async (req, res) => {
 /* ── POST /api/admin/telegram-alerts ────────────────────────────────── */
 router.post(
   '/',
-  body('telegram_chat_id').isString().trim().notEmpty().withMessage('Telegram User ID is required.'),
-  body('target_type').isIn(['team_leader', 'manager']).withMessage('target_type must be team_leader or manager.'),
+  body('telegram_chat_id').isString().trim().notEmpty().withMessage('WhatsApp number is required.'),
+  body('target_type').isIn(['team_leader', 'manager', 'assistant_manager']).withMessage('target_type must be team_leader, manager or assistant_manager.'),
   body('team_leader_id').optional({ nullable: true, checkFalsy: true }).isUUID().withMessage('Invalid team_leader_id.'),
   body('department').optional({ nullable: true, checkFalsy: true }).isIn(['sales', 'marketing']).withMessage('Department must be sales or marketing.'),
   body('label').optional({ nullable: true }).isString(),
@@ -144,15 +147,46 @@ router.post('/:id/test', async (req, res) => {
     const r = rows[0];
     if (!r) return res.status(404).json({ error: 'Recipient not found.' });
 
-    const result = await sendTelegram(
-      r.telegram_chat_id,
-      `✅ <b>MHS CRM test message</b>\n\nIf you can read this, alerts are wired up correctly for <b>${r.label || 'this recipient'}</b>.`
-    );
-    if (!result.ok) return res.status(502).json({ error: result.error || 'Telegram send failed.' });
-    res.json({ ok: true });
+    // Alerts now go over WhatsApp (Whapi) — send the test to the recipient's
+    // WhatsApp number (telegram_chat_id reused) via the Web-Reminder channel.
+    const channelId = await alertChannelId();
+    if (!channelId) return res.status(400).json({ error: 'No Whapi channel set. Pick one on Web Reminder → Alerts and Save.' });
+    const number = String(r.telegram_chat_id || '').replace(/\D/g, '');
+    if (number.length < 10) return res.status(400).json({ error: 'Enter a valid WhatsApp number first.' });
+
+    try {
+      await sendTextToNumber(channelId, number,
+        `✅ MHS CRM test message\n\nIf you can read this, WhatsApp alerts are wired up correctly for ${r.label || 'this recipient'}.`);
+      res.json({ ok: true });
+    } catch (e) {
+      return res.status(502).json({ error: `WhatsApp send failed: ${e.message}` });
+    }
   } catch (err) {
     console.error('POST /telegram-alerts/:id/test error:', err.message);
     res.status(500).json({ error: 'Test send failed.' });
+  }
+});
+
+/* ── POST /api/admin/telegram-alerts/report-now ─────────────────────────
+   Manually fire the hourly caller report to every configured recipient now
+   (the "Send report now" button on the Alerts page). Bypasses the office-hours
+   window so it can be tested on demand. */
+router.post('/report-now', async (req, res) => {
+  try {
+    const result = await sendHourlyReports({ force: true });
+    if (!result.ok) {
+      const msg = result.reason === 'no_channel'
+        ? 'No Whapi channel set. Pick one on Web Reminder → Alerts and Save.'
+        : `Report not sent (${result.reason}).`;
+      return res.status(400).json({ error: msg });
+    }
+    if (result.sent === 0) {
+      return res.status(400).json({ error: 'No TL / manager recipients with a valid WhatsApp number. Add one above first.' });
+    }
+    res.json({ ok: true, sent: result.sent, recipients: result.recipients });
+  } catch (err) {
+    console.error('POST /telegram-alerts/report-now error:', err.message);
+    res.status(500).json({ error: 'Failed to send report.' });
   }
 });
 

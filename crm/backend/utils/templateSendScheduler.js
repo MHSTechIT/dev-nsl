@@ -61,16 +61,16 @@ async function resolveTarget(source) {
     catch (e) { return { channelId, webinarDatetime, error: `group_unresolved:${e.code || e.message}` }; }
   }
   if (!groupId) return { channelId, webinarDatetime, error: 'no_group_id' };
-  return { channelId, groupId, webinarDatetime };
+  return { channelId, groupId, webinarDatetime, linkUrl: active.link_url };
 }
 
-async function recordSend(templateId, webinarKey, source, status, detail) {
+async function recordSend(templateId, webinarKey, source, status, detail, groupLink, groupName) {
   try {
     await pool.query(
-      `INSERT INTO template_sends (template_id, webinar_key, source, status, detail)
-       VALUES ($1,$2,$3,$4,$5)
+      `INSERT INTO template_sends (template_id, webinar_key, source, status, detail, group_link, group_name)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
        ON CONFLICT (template_id, webinar_key) DO NOTHING`,
-      [templateId, webinarKey, source, status, (detail || '').slice(0, 240)]);
+      [templateId, webinarKey, source, status, (detail || '').slice(0, 240), groupLink || null, groupName || null]);
   } catch (e) { console.error('[templateSend] record error:', e.message); }
 }
 
@@ -103,7 +103,10 @@ async function processSource(source, now) {
     if (target.error) { console.warn(`[templateSend:${source}] ${t.name}: target ${target.error} — will retry`); continue; }
     try {
       const res = await sendTemplateToGroup(target.channelId, target.groupId, t);
-      await recordSend(t.id, webinarKey, source, 'sent', `${res.mode}${res.note ? ' · ' + res.note : ''}`);
+      // Resolve the group name for the history log (only on an actual send).
+      let groupName = null;
+      try { groupName = (await getMemberCount(target.channelId, target.linkUrl)).groupName; } catch { /* name optional */ }
+      await recordSend(t.id, webinarKey, source, 'sent', `${res.mode}${res.note ? ' · ' + res.note : ''}`, target.linkUrl, groupName);
       console.log(`[templateSend:${source}] sent "${t.name}" (${res.mode}) → group ${target.groupId}`);
     } catch (e) {
       // Transient (or not-in-group) failure → don't record, retry next tick.

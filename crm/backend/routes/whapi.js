@@ -23,7 +23,9 @@ router.use(adminAuth);
    (source) pins exactly one channel; it stays pinned until explicitly changed,
    surviving navigation, reload, and other devices. Stored on the per-source
    webinar_config row (whapi_channel_id column). */
-const ALLOWED_SOURCES = new Set(['meta', 'yt', 'meta2', 'metatemp', 'tagmango']);
+// 'webreminder' is a dedicated key so the Web Reminder → Alerts page can pin
+// its OWN Whapi channel, independent of Meta Temp's.
+const ALLOWED_SOURCES = new Set(['meta', 'yt', 'meta2', 'metatemp', 'tagmango', 'webreminder']);
 const getSource = (req) => {
   const v = req.query.source ?? req.body?.source;
   return ALLOWED_SOURCES.has(v) ? v : 'meta';

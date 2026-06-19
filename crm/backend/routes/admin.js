@@ -14,6 +14,7 @@ const { broadcast } = require('../utils/sseClients');
 const callerSse = require('../utils/callerSse');
 const activityLogger = require('../utils/activityLogger');
 const { syncLeadsToSheet } = require('../utils/leadsSheetSync');
+const tata = require('../utils/tataClient');
 const { rotateLink }       = require('../utils/linkRotation');
 const { mirrorActiveLink } = require('../utils/whapiLinkRotation');
 const { nextWebinarName, nextUpcomingWebinarName } = require('../utils/webinarName');
@@ -2428,6 +2429,32 @@ router.delete('/wa-templates/:id', async (req, res) => {
   }
 });
 
+/* ── GET /api/admin/wa-templates/:id/history ──
+   This month's send history for one template: which WhatsApp groups it was sent
+   to (name + invite link), when, and the outcome. Auto-clears logs older than
+   the current month on each view, so the History page only ever shows the
+   current month ("every month once it auto-clears"). */
+router.get('/wa-templates/:id/history', async (req, res) => {
+  try {
+    // Monthly auto-clear: purge anything before the start of the current month.
+    await pool.query("DELETE FROM template_sends WHERE created_at < date_trunc('month', NOW())");
+    const { rows } = await pool.query(
+      `SELECT group_name, group_link, status, detail, created_at, webinar_key
+         FROM template_sends
+        WHERE template_id = $1
+          AND status = 'sent'
+          AND created_at >= date_trunc('month', NOW())
+        ORDER BY created_at DESC`,
+      [req.params.id]);
+    const groups = new Set(rows.map(r => r.group_link || r.group_name).filter(Boolean));
+    const month = new Date().toLocaleString('en-IN', { month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata' });
+    res.json({ month, group_count: groups.size, total: rows.length, history: rows });
+  } catch (err) {
+    console.error('wa-templates history error:', err.message);
+    res.status(500).json({ error: 'Failed to load history.' });
+  }
+});
+
 /* ── Create-User form configuration (per-role field on/off + custom fields) ──
    Stored as one JSONB blob: { [role]: { builtins: {field:bool}, custom:
    [{ key, label, type, enabled }] } }. The Users page Create/Edit form reads
@@ -3023,6 +3050,119 @@ router.get('/caller-active-call/:callerId', async (req, res) => {
   } catch (err) {
     console.error('[admin] caller-active-call error:', err.message);
     res.status(500).json({ error: 'failed to load active call' });
+  }
+});
+
+/* ── POST /api/admin/caller-active-call/:callerId/monitor ──
+   Supervisor LIVE LISTEN on the caller's in-progress call (Smartflo Monitor,
+   type=1 — silent, the agent & customer don't know). Smartflo rings the
+   supervisor's own Smartflo number (`supervisor_number`) and bridges them in to
+   listen. The monitor uses the CALLER's Smartflo account (the live call_id lives
+   there). Body: { supervisor_number }. */
+router.post('/caller-active-call/:callerId/monitor', async (req, res) => {
+  const { callerId } = req.params;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(callerId || '')) {
+    return res.status(400).json({ error: 'invalid callerId' });
+  }
+  const supNum = String(req.body?.supervisor_number || '').replace(/\D/g, '');
+  if (supNum.length < 10) {
+    return res.status(400).json({ error: 'Enter your Smartflo number first — that phone will ring so you can listen.' });
+  }
+  try {
+    // The live call belongs to the caller's Smartflo account — monitor with
+    // that same account's API key, and grab the live provider_call_id.
+    const { rows } = await pool.query(
+      `SELECT c.provider_call_id, u.tata_account_type, u.tata_smartflo_api_key
+         FROM calls c
+         JOIN crm_users u ON u.id = c.caller_id
+        WHERE c.caller_id = $1
+          AND c.ended_at IS NULL
+          AND c.status IN ('initiated','ringing','answered')
+          AND c.started_at > NOW() - INTERVAL '30 minutes'
+        ORDER BY c.started_at DESC
+        LIMIT 1`,
+      [callerId]
+    );
+    const live = rows[0];
+    if (!live || !live.provider_call_id) {
+      return res.status(409).json({ error: 'No live call to listen to right now.' });
+    }
+    const result = await tata.monitorCall({
+      callId:      live.provider_call_id,
+      agentId:     supNum,
+      accountType: live.tata_account_type || undefined,
+      perUserKey:  live.tata_smartflo_api_key || undefined,
+    });
+    res.json({ ok: true, raw: result.raw });
+  } catch (err) {
+    console.error('[admin] caller-active-call monitor error:', err.message);
+    const status = err.status && err.status < 500 ? err.status : 502;
+    res.status(status).json({ error: err.message || 'Live listen failed — try again.' });
+  }
+});
+
+/* ── GET /api/admin/tata-numbers?days=7 ──
+   Each caller's Tata Tele number (the outbound DID shown to customers) plus a
+   SPAM-RISK signal. Tata exposes no spam flag — but when a DID gets flagged as
+   spam, customers stop answering, so its pickup (answer) rate collapses. We
+   surface that rate over the window and classify:
+     healthy      → answer rate ≥ 30%
+     at_risk      → 15% ≤ rate < 30%
+     likely_spam  → rate < 15% (with enough volume)
+     no_data      → fewer than MIN_CALLS dials in the window
+   Thresholds are heuristic, not a guarantee — a low rate strongly correlates
+   with a flagged DID but can also mean a bad lead batch. */
+router.get('/tata-numbers', async (req, res) => {
+  const days = Math.min(90, Math.max(1, parseInt(req.query.days, 10) || 7));
+  const MIN_CALLS = 10;   // below this we don't judge — too little signal
+  try {
+    const { rows } = await pool.query(`
+      WITH stats AS (
+        SELECT c.caller_id,
+               COUNT(*) FILTER (WHERE c.direction = 'outbound')::int AS dialed,
+               COUNT(*) FILTER (WHERE c.direction = 'outbound' AND c.customer_answered_at IS NOT NULL)::int AS answered,
+               MAX(c.started_at) AS last_call_at
+          FROM calls c
+         WHERE c.caller_id IS NOT NULL
+           AND c.started_at > NOW() - make_interval(days => $1)
+         GROUP BY c.caller_id
+      )
+      SELECT u.id, u.full_name, u.role,
+             u.tata_caller_id, u.tata_agent_number, u.tata_extension, u.tata_account_type,
+             u.is_active,
+             COALESCE(s.dialed, 0)   AS dialed,
+             COALESCE(s.answered, 0) AS answered,
+             s.last_call_at
+        FROM crm_users u
+        LEFT JOIN stats s ON s.caller_id = u.id
+       WHERE u.deleted_at IS NULL
+         AND (u.tata_caller_id IS NOT NULL OR u.tata_agent_number IS NOT NULL OR u.tata_extension IS NOT NULL)
+       ORDER BY u.full_name ASC
+    `, [days]);
+
+    const numbers = rows.map(r => {
+      const dialed = Number(r.dialed) || 0;
+      const answered = Number(r.answered) || 0;
+      const rate = dialed > 0 ? Math.round((answered / dialed) * 100) : null;
+      let risk;
+      if (dialed < MIN_CALLS) risk = 'no_data';
+      else if (rate < 15)     risk = 'likely_spam';
+      else if (rate < 30)     risk = 'at_risk';
+      else                    risk = 'healthy';
+      return {
+        caller_id: r.id, name: r.full_name, role: r.role, is_active: r.is_active,
+        did: r.tata_caller_id || null,
+        agent_number: r.tata_agent_number || null,
+        extension: r.tata_extension || null,
+        account_type: r.tata_account_type || null,
+        dialed, answered, answer_rate: rate, risk,
+        last_call_at: r.last_call_at || null,
+      };
+    });
+    res.json({ days, min_calls: MIN_CALLS, numbers, generated_at: new Date().toISOString() });
+  } catch (err) {
+    console.error('[admin] tata-numbers error:', err.message);
+    res.status(500).json({ error: 'Failed to load Tata numbers.' });
   }
 });
 
@@ -3679,7 +3819,11 @@ router.get('/caller-report', async (req, res) => {
              cb.activity_status, cb.last_heartbeat_at, cb.activity_break, cb.rest_started_at,
              da.batch,
              COALESCE(na.touched, 0)          AS touched,
-             COALESCE(na.answered, 0)         AS answered,
+             -- "Answered" = calls the CUSTOMER actually picked up (telephony
+             -- customer_answered_at), so it lines up with Missed / Ans Talk
+             -- which are also call-based. (Was the completed/follow_up note
+             -- count, which read 0 even when a call clearly connected.)
+             COALESCE(ca.answered, 0)         AS answered,
              COALESCE(ca.missed, 0)           AS missed,
              COALESCE(ca.answered_dur_sec, 0) AS answered_dur_sec,
              COALESCE(ca.missed_dur_sec, 0)   AS missed_dur_sec,

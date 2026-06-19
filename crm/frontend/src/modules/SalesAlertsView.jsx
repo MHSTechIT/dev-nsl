@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Toast from '../components/Toast';
+import WhapiView from '../admin/WhapiView';
 
 /* ──────────────────────────────────────────────────────────────────────
    Sales → Alerts tab.
@@ -30,6 +31,7 @@ export default function SalesAlertsView({ token, source = 'all' }) {
   const [loading,     setLoading]     = useState(true);
   const [saving,      setSaving]      = useState(false);
   const [testingId,   setTestingId]   = useState(null);
+  const [sendingReport, setSendingReport] = useState(false);
   const [error,       setError]       = useState('');
   const [toast,       setToast]       = useState({ msg: '', kind: 'success' });
   const [rows,        setRows]        = useState([]);
@@ -173,6 +175,23 @@ export default function SalesAlertsView({ token, source = 'all' }) {
     }
   }
 
+  async function sendReportNow() {
+    setSendingReport(true);
+    try {
+      const res = await fetch('/api/admin/telegram-alerts/report-now', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Failed to send report.');
+      setToast({ msg: `Hourly report sent to ${data.sent} recipient${data.sent === 1 ? '' : 's'}.`, kind: 'success' });
+    } catch (e) {
+      setToast({ msg: e.message, kind: 'error' });
+    } finally {
+      setSendingReport(false);
+    }
+  }
+
   const dirtyCount = rows.filter(r => r._draft || r._dirty).length;
 
   return (
@@ -246,8 +265,31 @@ export default function SalesAlertsView({ token, source = 'all' }) {
           >
             {saving ? 'Saving…' : dirtyCount > 0 ? `Save ${dirtyCount} change${dirtyCount === 1 ? '' : 's'}` : 'Save'}
           </button>
+
+          {/* Manually fire the hourly caller report to all TL / manager
+              recipients now (bypasses the 9 AM–6 PM window) — for testing. */}
+          <button
+            onClick={sendReportNow}
+            disabled={sendingReport}
+            style={{ ...ghostBtn(), marginLeft: 'auto', opacity: sendingReport ? 0.6 : 1 }}
+            title="Send the hourly caller report to all TL / manager recipients now"
+          >
+            {sendingReport ? <><Spinner /> Sending…</> : (
+              <>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l3 2"/>
+                </svg>
+                Send report now
+              </>
+            )}
+          </button>
         </div>
       </div>
+
+      {/* Whapi channel manager — same card as the Meta Temp → Whapi tab, but
+          on its OWN dedicated 'webreminder' source so the Web Reminder pins its
+          own channel permanently, independent of Meta Temp's. */}
+      <WhapiView token={token} source="webreminder" />
 
       {toast.msg && <Toast message={toast.msg} kind={toast.kind} onDone={() => setToast({ msg: '', kind: 'success' })} />}
     </div>
@@ -260,16 +302,21 @@ export default function SalesAlertsView({ token, source = 'all' }) {
    when persisted, green when target is a manager (whole-dept).
    ────────────────────────────────────────────────────────────────────── */
 function AlertRow({ row, teamLeaders, testing, onChange, onTest, onRemove }) {
-  const isManager = row.target_type === 'manager';
-  const isDirty   = row._draft || row._dirty;
+  const isManager          = row.target_type === 'manager';
+  const isAssistantManager = row.target_type === 'assistant_manager';
+  const isDirty            = row._draft || row._dirty;
 
-  const dropdownValue = isManager
-    ? `manager:${row.department || ''}`
-    : `tl:${row.team_leader_id || ''}`;
+  const dropdownValue = isAssistantManager
+    ? 'amgr:'
+    : isManager
+      ? `manager:${row.department || ''}`
+      : `tl:${row.team_leader_id || ''}`;
 
   function onDropdownChange(e) {
     const v = e.target.value;
-    if (v.startsWith('manager:')) {
+    if (v.startsWith('amgr:')) {
+      onChange({ target_type: 'assistant_manager', team_leader_id: '', department: '' });
+    } else if (v.startsWith('manager:')) {
       onChange({ target_type: 'manager', team_leader_id: '', department: v.slice('manager:'.length) });
     } else if (v.startsWith('tl:')) {
       onChange({ target_type: 'team_leader', department: '', team_leader_id: v.slice('tl:'.length) });
@@ -277,12 +324,15 @@ function AlertRow({ row, teamLeaders, testing, onChange, onTest, onRemove }) {
   }
 
   const accent = isDirty
-    ? '#F59E0B'                       // amber — unsaved
-    : isManager ? '#16A34A' : PURPLE;  // green for managers, purple for TL
+    ? '#F59E0B'                                    // amber — unsaved
+    : isAssistantManager ? '#0891B2'               // cyan for assistant managers
+      : isManager ? '#16A34A'                      // green for managers
+        : PURPLE;                                  // purple for TL
 
   // What this recipient covers, in plain words. Shown as a subtitle so
   // the admin doesn't have to re-read the dropdown to see the scope.
   const scopeLabel = (() => {
+    if (isAssistantManager) return 'Assistant Manager — all callers';
     if (isManager) {
       if (!row.department) return 'Manager — all departments';
       return `Manager — ${row.department}`;
@@ -352,11 +402,11 @@ function AlertRow({ row, teamLeaders, testing, onChange, onTest, onRemove }) {
         gap: 12,
         alignItems: 'flex-end',
       }}>
-        <Field label="Telegram User ID" style={{ flex: '1 1 160px' }}>
+        <Field label="WhatsApp number" style={{ flex: '1 1 160px' }}>
           <input
             value={row.telegram_chat_id || ''}
             onChange={(e) => onChange({ telegram_chat_id: e.target.value })}
-            placeholder="e.g. 123456789"
+            placeholder="e.g. 919876543210"
             style={inputStyle()}
           />
         </Field>
@@ -432,6 +482,7 @@ function RoleDropdown({ value, teamLeaders, onChange }) {
   // Resolve current value to a friendly label for the trigger button.
   const triggerLabel = (() => {
     if (!value || value === 'tl:') return '— Pick TL or Manager —';
+    if (value.startsWith('amgr:')) return 'Assistant Manager — All callers';
     if (value.startsWith('manager:')) {
       const d = value.slice('manager:'.length);
       if (!d) return 'Manager — All departments';
@@ -544,6 +595,14 @@ function RoleDropdown({ value, teamLeaders, onChange }) {
             icon={<BadgeIcon />}
             selected={value === 'manager:'}
             onClick={() => pick('manager:')}
+          />
+
+          <SectionLabel>Assistant Manager</SectionLabel>
+          <DropdownItem
+            label="Assistant Manager — All callers"
+            icon={<BadgeIcon />}
+            selected={value === 'amgr:'}
+            onClick={() => pick('amgr:')}
           />
         </div>
       )}

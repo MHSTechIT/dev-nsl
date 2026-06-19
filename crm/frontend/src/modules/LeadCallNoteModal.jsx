@@ -583,12 +583,15 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
   }, [callPhase]);
 
   /* Robot repeat-nudges for the two reason cards. While a card is open and the
-     caller hasn't acted, the robot re-asks every 30 s.
-       • agent_reason_card — after 5 unanswered nudges the lead auto-pauses
-         (same path as the SmartFlow retry cap).
-       • form_reason_card  — NEVER gives up. The robot keeps nudging until the
-         caller actually fills the reason and submits; there is no auto-pause /
-         auto-advance escape, so the form always gets completed. */
+     caller hasn't acted, the robot re-asks every nudge interval (~30 s). BOTH
+     cards BLOCK the account if the caller never responds:
+       • agent_reason_card — after `agentReasonNudgeCount` unanswered nudges
+         (Timer → Agent reason card, default 5) the account is blocked.
+       • form_reason_card  — after `formReasonNudgeCount` unanswered nudges
+         (Timer → Form reason card, default 5) the account is blocked.
+     Both route through saveAutoPaused() → outcome='auto_paused' → is_active=FALSE
+     on the backend, and (autoAdvance:false) stop the auto-call so the blocked
+     overlay takes over rather than opening the next lead. */
   const { count: agentNudgeCount } = useRobotNudge({
     active: callPhase === 'agent_reason_card',
     intervalMs: t.agentReasonNudgeIntervalMs,
@@ -1699,7 +1702,12 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
     fetch(`/api/caller/leads/${lead.id}/hangup`, {
       method: 'POST', headers: { Authorization: `Bearer ${jwt}` },
     }).catch(() => {});
-    setTimeout(() => callOnSaved('auto_paused', { autoAdvance: true }), t.dnpAutoPauseDelayMs);
+    // Block (not advance): the note above already flipped the caller's account
+    // to is_active=FALSE on the backend, which pushes a `caller.paused` SSE so
+    // CallerShell shows the blocked overlay. autoAdvance:false stops the
+    // auto-call loop instead of opening the next lead — otherwise the block is
+    // invisible because the next call starts on top of it.
+    setTimeout(() => callOnSaved('auto_paused', { autoAdvance: false }), t.dnpAutoPauseDelayMs);
   }
 
   /* ── Form derived state ───────────────────────────────────────────── */
@@ -2968,10 +2976,10 @@ function CenteredOverlay({
           </svg>
         </div>
         <h3 style={{ margin: 0, fontWeight: 800, fontSize: '1.05rem', color: '#3B0764' }}>
-          Caller couldn't be reached after {retryCap} attempts.
+          Account blocked — no response.
         </h3>
         <p style={{ margin: '10px 0 0', fontSize: '0.86rem', color: 'rgba(91,33,182,0.65)' }}>
-          Lead parked. Loading the next lead…
+          You didn't respond to the call card. Ask your TL or admin to resume you.
         </p>
       </div>
     );

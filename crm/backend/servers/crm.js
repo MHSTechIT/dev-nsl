@@ -43,6 +43,7 @@ const { startTemplateSendScheduler }            = require('../utils/templateSend
 const { startMetaLeadSyncScheduler }            = require('../utils/metaLeadSyncScheduler');
 const emptyQueueAlertScheduler                  = require('../utils/emptyQueueAlertScheduler');
 const dnpReassignScheduler                      = require('../utils/dnpReassignScheduler');
+const hourlyCallerReportScheduler               = require('../utils/hourlyCallerReportScheduler');
 
 const { startListener }                         = require('../utils/pgListener');
 const { handleLeadCreated, sweepUnassignedLeads } = require('../utils/leadCreatedListener');
@@ -68,7 +69,7 @@ app.listen(PORT, () => {
   console.log(`[crm] running on port ${PORT}`);
 
   if (DISABLE_SCHEDULERS) {
-    console.log('[crm] DISABLE_SCHEDULERS=true → skipping linkSwap, whapiMemberRotation, templateSend, tataInboundSync, leadsAlert, emptyQueueAlert, dnpReassign, sheetsSync, staleCallReaper, activitySpanReaper, dailyReconciliation (metaLeadSync still runs — idempotent)');
+    console.log('[crm] DISABLE_SCHEDULERS=true → skipping linkSwap, whapiMemberRotation, templateSend, tataInboundSync, leadsAlert, emptyQueueAlert, dnpReassign, hourlyCallerReport, sheetsSync, staleCallReaper, activitySpanReaper, dailyReconciliation (metaLeadSync still runs — idempotent)');
   } else {
     // All schedulers — race-prone if run in more than one process, so CRM owns
     // every one and the funnel services start none.
@@ -112,6 +113,11 @@ app.listen(PORT, () => {
     // Auto-reopen DNP (Not Picked) leads into Assigned at 11:00/13:00/16:00 IST,
     // Mon–Sat (skips Sunday) — so callers retry unreached customers.
     dnpReassignScheduler.startScheduler();
+
+    // Hourly caller-performance report over WhatsApp (Whapi) to the TLs +
+    // (Assistant) Managers on the Alerts page. On the hour, 9 AM–6 PM IST,
+    // Mon–Sat (Sunday holiday). today-so-far totals per caller.
+    hourlyCallerReportScheduler.startScheduler();
 
     cron.schedule('25 18 * * *', () => {
       console.log('[Sheets Sync] Starting daily sync...');

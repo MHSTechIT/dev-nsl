@@ -279,6 +279,56 @@ async function hangup({ providerCallId, accountType, perUserKey }) {
   return { ok: false, reason: 'all_variants_failed', attempts };
 }
 
+/**
+ * Smartflo "Call Options" — supervisor live actions on an ACTIVE call.
+ *   POST /v1/call/options  { type, call_id, agent_id?, intercom? }
+ *   type: 1=Monitor (silent listen), 2=Whisper, 3=Barge, 4=Transfer.
+ *
+ * For Monitor (live listen) Smartflo connects the supervisor (agent_id — the
+ * Smartflo-registered number/extension that will RING so they can hear) to the
+ * live call_id silently. The call_id must belong to the same Smartflo account
+ * whose API key we send, so the caller's account is passed in.
+ *
+ * @param {object} opts
+ * @param {number|string} opts.type            – 1 monitor / 2 whisper / 3 barge / 4 transfer
+ * @param {string} opts.callId                 – Tata provider_call_id of the LIVE call
+ * @param {string} [opts.agentId]              – supervisor identifier (rings to listen) — monitor/whisper
+ * @param {string|string[]} [opts.intercom]    – transfer target (type 4)
+ * @param {string} [opts.accountType]
+ * @param {string} [opts.perUserKey]
+ * @returns {Promise<{ ok: true, raw: any }>}  – throws on Smartflo failure
+ */
+async function callOptions({ type, callId, agentId, intercom, accountType, perUserKey }) {
+  const apiKey = resolveApiKey({ perUserKey, accountType });
+  if (!apiKey) { const e = new Error('TATA_TELE_API_KEY not set in backend/.env'); e.status = 500; throw e; }
+  if (!callId) { const e = new Error('No live call id to act on.'); e.status = 422; throw e; }
+
+  const body = { type: String(type), call_id: callId };
+  if (agentId)  body.agent_id = digitsOnly(agentId) || String(agentId);
+  if (intercom) body.intercom = intercom;
+
+  const url = `${BASE_URL.replace(/\/$/, '')}/v1/call/options`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'Authorization': apiKey },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  let data; try { data = JSON.parse(text); } catch { data = { raw: text }; }
+
+  if (smartfloIsFailure(res.status, data)) {
+    const msg = data?.message || data?.error || `Tata API ${res.status}`;
+    const err = new Error(msg);
+    err.status = res.status >= 400 ? res.status : 400;
+    err.body = data;
+    throw err;
+  }
+  return { ok: true, raw: data };
+}
+
+/* Convenience: silent live-listen (Monitor, type 1). */
+async function monitorCall(opts) { return callOptions({ ...opts, type: 1 }); }
+
 /* ── Webhook signature verification (HMAC-SHA256) ── */
 function verifyWebhookSignature(rawBody, signatureHeader) {
   if (!WEBHOOK_SECRET) return true; // dev mode — accept anything until secret is set
@@ -494,6 +544,8 @@ module.exports = {
   resolveApiKey,
   startCall,
   hangup,
+  callOptions,
+  monitorCall,
   verifyWebhookSignature,
   normalizeWebhookEvent,
   fetchInboundMissedCalls,

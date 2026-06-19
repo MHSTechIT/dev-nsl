@@ -13,7 +13,9 @@ const { callerAuth } = require('../middleware/callerAuth');
 const { workspaceConfig } = require('../utils/callerWorkspace');
 const tataInboundSync = require('../utils/tataInboundSync');
 const activityLogger = require('../utils/activityLogger');
-const { notifyAutoPause } = require('../utils/telegramNotifier');
+// Auto-pause alerts now go over WhatsApp (Whapi) instead of Telegram. Same
+// (callerId, reason) signature, so the call sites below are unchanged.
+const { notifyAutoPauseWhatsApp: notifyAutoPause } = require('../utils/whatsappAlerts');
 
 router.use(callerAuth);
 

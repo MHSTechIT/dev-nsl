@@ -102,7 +102,7 @@ export default function SalesTimerView({ token, source = 'all', readOnly = false
   const [saving, setSaving]     = useState(false);
   const [error, setError]       = useState('');
   const [toast, setToast]       = useState(null);          // { msg, kind }
-  const [collapsed, setCollapsed] = useState({});          // { groupId: true }
+  const [openGroup, setOpenGroup] = useState(null);        // accordion: id of the one open section (null = all closed)
   const [subPage, setSubPage]   = useState('callers');     // 'callers' | 'tl'
 
   const load = useCallback(async () => {
@@ -184,7 +184,8 @@ export default function SalesTimerView({ token, source = 'all', readOnly = false
   }
 
   function toggleGroup(id) {
-    setCollapsed(prev => ({ ...prev, [id]: !prev[id] }));
+    // Accordion: open the clicked section and close any other; click again to close.
+    setOpenGroup(prev => (prev === id ? null : id));
   }
 
   // Groups belonging to the active sub-page (existing cards default to 'callers';
@@ -238,7 +239,7 @@ export default function SalesTimerView({ token, source = 'all', readOnly = false
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {pageGroups.map(group => {
-            const isCollapsed = !!collapsed[group.id];
+            const isCollapsed = openGroup !== group.id;
             return (
               <div
                 key={group.id}

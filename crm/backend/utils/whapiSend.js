@@ -94,4 +94,63 @@ async function sendTemplateToGroup(channelId, to, msg) {
   return { ok: true, mode: 'text_with_link', endpoint: '/messages/text', raw, note: 'media over WhatsApp size cap — sent as link' };
 }
 
-module.exports = { sendTemplateToGroup, publicMediaUrl, localMediaSize, fitsNative, SIZE_CAP };
+/* Normalize a WhatsApp recipient to the bare digits Whapi expects for `to`. */
+function waNumber(n) {
+  return String(n || '').replace(/\D/g, '');
+}
+
+/* Resolve a number to its real WhatsApp id via /contacts. Critical: the
+   /messages/* endpoints do NOT add the country code — they send to
+   "<digits>@s.whatsapp.net" verbatim, so a 10-digit Indian number with no
+   country code ends up at an invalid chat and silently never delivers.
+   /contacts returns the normalized wa_id ("91XXXXXXXXXX@s.whatsapp.net"). */
+async function resolveTo(ch, number) {
+  const digits = waNumber(number);
+  if (!digits) throw new Error('no recipient number');
+  try {
+    const base = (ch.apiUrl || 'https://gate.whapi.cloud/').replace(/\/$/, '');
+    const r = await fetch(base + '/contacts', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${ch.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contacts: [digits] }),
+    });
+    const d = await r.json();
+    const c = d?.contacts?.[0];
+    if (c && c.status === 'valid' && c.wa_id) return c.wa_id;
+  } catch { /* fall through */ }
+  // Fallback: assume an Indian number if it's a bare 10-digit mobile.
+  return digits.length === 10 ? `91${digits}` : digits;
+}
+
+/* Send a plain text WhatsApp message to an individual number. */
+async function sendTextToNumber(channelId, number, body) {
+  const ch = await resolveChannel(channelId);
+  const to = await resolveTo(ch, number);
+  return gatePost(ch, '/messages/text', { to, body });
+}
+
+/* Send an interactive message with quick-reply BUTTONS to an individual number.
+   buttons = [{ id, title }]. The tapped button's `id` comes back on the channel's
+   inbound webhook (we encode "resume:<callerId>" so the handler can route it).
+   Falls back to a plain text body if the account/plan can't render buttons. */
+async function sendButtonsToNumber(channelId, number, body, buttons) {
+  const ch = await resolveChannel(channelId);
+  const to = await resolveTo(ch, number);
+  const payload = {
+    to,
+    type: 'button',
+    body: { text: body },
+    action: {
+      buttons: (buttons || []).slice(0, 3).map(b => ({ type: 'quick_reply', title: b.title, id: b.id })),
+    },
+  };
+  try {
+    return { ok: true, mode: 'buttons', raw: await gatePost(ch, '/messages/interactive', payload) };
+  } catch (e) {
+    // Buttons unsupported on this account → degrade to text (so the alert still lands).
+    const raw = await gatePost(ch, '/messages/text', { to, body });
+    return { ok: true, mode: 'text_fallback', raw, note: `buttons failed: ${e.message}` };
+  }
+}
+
+module.exports = { sendTemplateToGroup, sendTextToNumber, sendButtonsToNumber, waNumber, publicMediaUrl, localMediaSize, fitsNative, SIZE_CAP };

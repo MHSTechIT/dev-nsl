@@ -224,9 +224,13 @@ const _templateSendsMigration = pool.query(`
     source      TEXT,
     status      TEXT        NOT NULL DEFAULT 'sent',
     detail      TEXT,
+    group_link  TEXT,
+    group_name  TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (template_id, webinar_key)
   );
+  ALTER TABLE template_sends ADD COLUMN IF NOT EXISTS group_link TEXT;
+  ALTER TABLE template_sends ADD COLUMN IF NOT EXISTS group_name TEXT;
 `);
 if (_templateSendsMigration && typeof _templateSendsMigration.catch === 'function') {
   _templateSendsMigration.catch(err => console.error('[Migration] template_sends error:', err.message));
@@ -680,6 +684,26 @@ if (_telegramAlertsMigration && typeof _telegramAlertsMigration.catch === 'funct
   _telegramAlertsMigration.catch(err => console.error('[Migration] telegram_alert_recipients error:', err.message));
 }
 
+// Auto-migrate: allow a third recipient kind, 'assistant_manager' (org-wide,
+// like 'manager'), used by the hourly caller-report scheduler. Idempotent:
+// drop + re-add both CHECK constraints so reruns are safe.
+const _alertRecipientTypeMigration = _telegramAlertsMigration.then(() => pool.query(`
+  ALTER TABLE telegram_alert_recipients
+    DROP CONSTRAINT IF EXISTS telegram_alert_recipients_target_type_check;
+  ALTER TABLE telegram_alert_recipients
+    ADD  CONSTRAINT telegram_alert_recipients_target_type_check
+         CHECK (target_type IN ('team_leader','manager','assistant_manager'));
+  ALTER TABLE telegram_alert_recipients
+    DROP CONSTRAINT IF EXISTS telegram_alert_recipients_check;
+  ALTER TABLE telegram_alert_recipients
+    ADD  CONSTRAINT telegram_alert_recipients_check
+         CHECK ((target_type = 'team_leader' AND team_leader_id IS NOT NULL)
+                 OR target_type IN ('manager','assistant_manager'));
+`));
+if (_alertRecipientTypeMigration && typeof _alertRecipientTypeMigration.catch === 'function') {
+  _alertRecipientTypeMigration.catch(err => console.error('[Migration] telegram_alert_recipients assistant_manager error:', err.message));
+}
+
 // Auto-migrate: telegram_poll_state — singleton row that tracks the highest
 // Telegram update_id we've processed via long-polling. Persisting this in
 // Postgres (not memory) means restarts don't replay messages.
@@ -973,6 +997,10 @@ app.use('/api/caller', callerRouter);
 app.use('/api/caller', callsRouter);
 // Tata posts call-status/recording callbacks with NO auth and NO workspace
 // marker. Meta's /api/webhooks/* mount bound to calls / leads / crm_users.
+// Whapi inbound (WhatsApp) — resume a caller when a recipient taps the
+// "Resume caller" button on the auto-pause alert. Mounted BEFORE the general
+// /api/webhooks router so the more-specific path wins.
+app.use('/api/webhooks/whapi', require('./routes/whapiInbound'));
 app.use('/api/webhooks',     createWebhooksRouter({ calls: 'calls',     leads: 'leads',     users: 'crm_users' }));
 // Meta Lead Ads webhook (push leads instead of polling the Graph API). Public,
 // GET handshake + POST leadgen events → inserts into the Meta `leads` table.

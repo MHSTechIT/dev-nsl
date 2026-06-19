@@ -531,6 +531,33 @@ export default function WhatsAppLinksEditor({ token, source = 'meta' }) {
     } catch { loadTemplates(); }
   }
 
+  // ── Per-card ⋮ menu: Edit / Delete / History ──
+  const [menuTplId, setMenuTplId]   = useState(null);   // which card's menu is open
+  const [historyTpl, setHistoryTpl] = useState(null);   // template whose history modal is open
+  const [historyData, setHistoryData] = useState(null); // { month, group_count, total, history }
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  async function deleteTemplate(t) {
+    if (!window.confirm(`Delete the template "${t.name || 'Untitled'}"? This cannot be undone.`)) return;
+    try {
+      await fetch(`/api/admin/wa-templates/${t.id}?source=${source}`, {
+        method: 'DELETE', headers: { Authorization: `Bearer ${token}` },
+      });
+      setTemplates(prev => prev.filter(x => x.id !== t.id));
+    } catch { loadTemplates(); }
+  }
+
+  function openHistory(t) {
+    setHistoryTpl(t);
+    setHistoryData(null);
+    setHistoryLoading(true);
+    fetch(`/api/admin/wa-templates/${t.id}/history?source=${source}`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(d => setHistoryData(d))
+      .catch(() => setHistoryData({ history: [], group_count: 0, total: 0 }))
+      .finally(() => setHistoryLoading(false));
+  }
+
   // Permanent WhatsApp link (Meta Temp) — persisted on webinar_config.
   const [permLink, setPermLink]     = useState('');
   const [savingPerm, setSavingPerm] = useState(false);
@@ -883,6 +910,40 @@ export default function WhatsAppLinksEditor({ token, source = 'meta' }) {
                     >
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 113 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
                     </button>
+                    {/* ⋮ menu — Edit / Delete / History */}
+                    <div style={{ position: 'relative', flexShrink: 0 }}>
+                      <button
+                        type="button"
+                        onClick={() => setMenuTplId(menuTplId === t.id ? null : t.id)}
+                        title="More actions"
+                        style={{ border: '1px solid rgba(91,33,182,0.20)', background: '#fff', color: '#5B21B6', width: 30, height: 30, borderRadius: 8, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+                      >
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg>
+                      </button>
+                      {menuTplId === t.id && (
+                        <>
+                          <div onClick={() => setMenuTplId(null)} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
+                          <div style={{
+                            position: 'absolute', top: 'calc(100% + 4px)', right: 0, zIndex: 41,
+                            background: '#fff', borderRadius: 10, border: '1px solid rgba(139,92,246,0.20)',
+                            boxShadow: '0 8px 24px rgba(91,33,182,0.18)', padding: 4, minWidth: 150,
+                          }}>
+                            {[
+                              { label: 'Edit', color: '#5B21B6', onClick: () => { setMenuTplId(null); setEditingTpl(t); setTplOpen(true); } },
+                              { label: 'History', color: '#5B21B6', onClick: () => { setMenuTplId(null); openHistory(t); } },
+                              { label: 'Delete', color: '#DC2626', onClick: () => { setMenuTplId(null); deleteTemplate(t); } },
+                            ].map(item => (
+                              <button key={item.label} type="button" onClick={item.onClick}
+                                style={{ width: '100%', textAlign: 'left', border: 'none', background: 'transparent', cursor: 'pointer', padding: '8px 12px', borderRadius: 7, fontFamily: 'Outfit, sans-serif', fontSize: '0.82rem', fontWeight: 700, color: item.color }}
+                                onMouseEnter={e => e.currentTarget.style.background = 'rgba(91,33,182,0.06)'}
+                                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                                {item.label}
+                              </button>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </div>
                   </div>
                 </div>
                 {/* Row 2: body preview (1 line) + media indicator */}
@@ -931,6 +992,53 @@ export default function WhatsAppLinksEditor({ token, source = 'meta' }) {
           onClose={() => setTplOpen(false)}
           onSaved={() => loadTemplates()}
         />
+      )}
+
+      {/* History modal — this month's group sends for a template */}
+      {historyTpl && (
+        <div onClick={() => setHistoryTpl(null)} style={{
+          position: 'fixed', inset: 0, zIndex: 9000, background: 'rgba(15,0,40,0.45)',
+          backdropFilter: 'blur(5px)', WebkitBackdropFilter: 'blur(5px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
+        }}>
+          <div onClick={e => e.stopPropagation()} style={{
+            width: '100%', maxWidth: 560, maxHeight: '80vh', overflowY: 'auto',
+            background: '#fff', borderRadius: 18, padding: '20px 22px', fontFamily: 'Outfit, sans-serif',
+            boxShadow: '0 24px 60px rgba(91,33,182,0.35)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 4 }}>
+              <h3 style={{ margin: 0, fontWeight: 800, fontSize: '1.02rem', color: '#3B0764' }}>Send history — {historyTpl.name}</h3>
+              <button onClick={() => setHistoryTpl(null)} style={{ border: 'none', background: 'rgba(91,33,182,0.08)', color: '#5B21B6', width: 30, height: 30, borderRadius: 8, cursor: 'pointer', fontSize: '1rem', fontWeight: 700 }}>✕</button>
+            </div>
+            <p style={{ margin: '0 0 14px', fontSize: '0.78rem', color: 'rgba(91,33,182,0.6)' }}>
+              {historyData?.month ? `${historyData.month} · ` : ''}Sent to <b>{historyData?.group_count ?? 0}</b> group{(historyData?.group_count === 1) ? '' : 's'} ({historyData?.total ?? 0} total). Logs auto-clear each month.
+            </p>
+            {historyLoading ? (
+              <div style={{ padding: '24px 0', textAlign: 'center', color: 'rgba(91,33,182,0.5)' }}>Loading…</div>
+            ) : (historyData?.history?.length ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {historyData.history.map((h, i) => (
+                  <div key={i} style={{ border: '1px solid rgba(139,92,246,0.18)', borderRadius: 10, padding: '10px 12px' }}>
+                    <div style={{ fontWeight: 700, fontSize: '0.84rem', color: '#3B0764' }}>
+                      {h.group_name || '(group name unavailable)'}
+                    </div>
+                    {h.group_link && (
+                      <a href={h.group_link} target="_blank" rel="noreferrer" style={{ fontSize: '0.74rem', color: '#5B21B6', wordBreak: 'break-all' }}>{h.group_link}</a>
+                    )}
+                    <div style={{ fontSize: '0.72rem', color: 'rgba(91,33,182,0.55)', marginTop: 2 }}>
+                      {new Date(h.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                      {h.detail ? ` · ${h.detail}` : ''}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={{ padding: '24px 0', textAlign: 'center', color: 'rgba(91,33,182,0.5)', fontSize: '0.85rem' }}>
+                No sends this month yet.
+              </div>
+            ))}
+          </div>
+        </div>
       )}
     </div>
   );

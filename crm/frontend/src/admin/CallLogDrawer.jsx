@@ -103,6 +103,8 @@ export default function CallLogDrawer({ token, caller, onClose }) {
   const [error, setError]     = useState('');
   const [active, setActive]   = useState(null);   // current in-progress call (polled)
   const [nowMs, setNowMs]     = useState(() => Date.now()); // ticks the live timer
+  const [monitoring, setMonitoring] = useState(false);
+  const [monitorMsg, setMonitorMsg] = useState(null);       // { kind:'ok'|'err', text }
 
   useEffect(() => {
     let cancelled = false;
@@ -147,6 +149,41 @@ export default function CallLogDrawer({ token, caller, onClose }) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
+
+  /* Supervisor live-listen (Smartflo Monitor). Smartflo rings the supervisor's
+     OWN Smartflo number and bridges them in to silently listen — so we need
+     that number. Stored once in localStorage; prompt the first time. */
+  async function startMonitor() {
+    let supNum = '';
+    try { supNum = localStorage.getItem('mhs_monitor_number') || ''; } catch { /* sandbox */ }
+    if (!supNum) {
+      supNum = (window.prompt('Enter YOUR Smartflo number — it will ring so you can listen in (e.g. 9876543210):') || '').trim();
+      if (!supNum) return;
+      try { localStorage.setItem('mhs_monitor_number', supNum); } catch { /* sandbox */ }
+    }
+    setMonitoring(true);
+    setMonitorMsg(null);
+    try {
+      const r = await fetch(`/api/admin/caller-active-call/${callerId}/monitor`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ supervisor_number: supNum }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || 'Live listen failed.');
+      setMonitorMsg({ kind: 'ok', text: `Ringing ${supNum} — answer to listen in silently.` });
+    } catch (e) {
+      setMonitorMsg({ kind: 'err', text: e.message });
+    } finally {
+      setMonitoring(false);
+    }
+  }
+
+  function changeMonitorNumber() {
+    const cur = (() => { try { return localStorage.getItem('mhs_monitor_number') || ''; } catch { return ''; } })();
+    const next = (window.prompt('Your Smartflo number to ring for live listen:', cur) || '').trim();
+    if (next) { try { localStorage.setItem('mhs_monitor_number', next); } catch { /* sandbox */ } setMonitorMsg({ kind: 'ok', text: `Saved ${next}.` }); }
+  }
 
   function liveElapsed() {
     if (!active?.since) return '0:00';
@@ -207,27 +244,68 @@ export default function CallLogDrawer({ token, caller, onClose }) {
           <div style={{
             padding: '12px 22px', background: active.connected ? 'rgba(22,163,74,0.07)' : 'rgba(217,119,6,0.07)',
             borderBottom: '1px solid rgba(209,196,240,0.5)',
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+            display: 'flex', flexDirection: 'column', gap: 10,
           }}>
             <style>{`@keyframes cld-pulse { 0%,100% { opacity:1; transform:scale(1);} 50% { opacity:.45; transform:scale(.8);} }`}</style>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-              <span style={{
-                width: 10, height: 10, borderRadius: '50%', flexShrink: 0,
-                background: active.connected ? '#16A34A' : '#D97706',
-                animation: 'cld-pulse 1.2s ease-in-out infinite',
-              }} />
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: '0.72rem', fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: active.connected ? '#15803D' : '#B45309' }}>
-                  {active.connected ? 'On call — live' : (active.status === 'ringing' ? 'Ringing…' : 'Connecting…')}
-                </div>
-                <div style={{ fontSize: '0.9rem', fontWeight: 700, color: INK, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {active.direction === 'inbound' ? '↘ ' : '↗ '}{active.full_name}{active.phone ? ` · +91 ${active.phone}` : ''}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                <span style={{
+                  width: 10, height: 10, borderRadius: '50%', flexShrink: 0,
+                  background: active.connected ? '#16A34A' : '#D97706',
+                  animation: 'cld-pulse 1.2s ease-in-out infinite',
+                }} />
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: '0.72rem', fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: active.connected ? '#15803D' : '#B45309' }}>
+                    {active.connected ? 'On call — live' : (active.status === 'ringing' ? 'Ringing…' : 'Connecting…')}
+                  </div>
+                  <div style={{ fontSize: '0.9rem', fontWeight: 700, color: INK, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {active.direction === 'inbound' ? '↘ ' : '↗ '}{active.full_name}{active.phone ? ` · +91 ${active.phone}` : ''}
+                  </div>
                 </div>
               </div>
+              <div style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 800, fontSize: '1.05rem', color: active.connected ? '#15803D' : '#B45309', flexShrink: 0 }}>
+                {liveElapsed()}
+              </div>
             </div>
-            <div style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 800, fontSize: '1.05rem', color: active.connected ? '#15803D' : '#B45309', flexShrink: 0 }}>
-              {liveElapsed()}
+
+            {/* Supervisor live-listen — rings your Smartflo number to silently
+                join the call. Only useful once the call is actually connected. */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <button
+                onClick={startMonitor}
+                disabled={monitoring || !active.connected}
+                title={active.connected ? 'Ring your Smartflo number to listen in silently' : 'Available once the call connects'}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 7,
+                  padding: '8px 16px', borderRadius: 50, border: 'none',
+                  background: (monitoring || !active.connected) ? 'rgba(21,128,61,0.35)' : '#15803D',
+                  color: '#fff', fontWeight: 800, fontSize: '0.82rem',
+                  cursor: (monitoring || !active.connected) ? 'default' : 'pointer',
+                  boxShadow: (monitoring || !active.connected) ? 'none' : '0 4px 12px rgba(21,128,61,0.30)',
+                }}
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 14v-2a9 9 0 0 1 18 0v2"/><path d="M21 16a2 2 0 0 1-2 2h-1v-6h1a2 2 0 0 1 2 2zM3 16a2 2 0 0 0 2 2h1v-6H5a2 2 0 0 0-2 2z"/>
+                </svg>
+                {monitoring ? 'Connecting…' : 'Listen live'}
+              </button>
+              <button
+                onClick={changeMonitorNumber}
+                style={{ background: 'transparent', border: 'none', color: 'rgba(49,46,129,0.6)', fontSize: '0.74rem', fontWeight: 700, cursor: 'pointer', textDecoration: 'underline' }}
+                title="Change the Smartflo number that rings for live listen"
+              >
+                my number
+              </button>
             </div>
+
+            {monitorMsg && (
+              <div style={{
+                fontSize: '0.8rem', fontWeight: 600,
+                color: monitorMsg.kind === 'ok' ? '#15803D' : '#B91C1C',
+              }}>
+                {monitorMsg.kind === 'ok' ? '✓ ' : '✕ '}{monitorMsg.text}
+              </div>
+            )}
           </div>
         )}
 
