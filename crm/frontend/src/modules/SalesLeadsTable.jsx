@@ -208,11 +208,16 @@ export default function SalesLeadsTable({ token, source = 'all' }) {
      When any lead carries field_data we switch to this dynamic layout; the
      Assigned To column is appended at the end. */
   const prettyLabel = (k) => String(k).replace(/[_-]+/g, ' ').replace(/\?+$/, '').trim().replace(/\b\w/g, c => c.toUpperCase());
+  // Name/phone keys ("full name", "phone number", etc.) are already covered by
+  // the fixed NAME column (name + phone stacked), so skip them in the dynamic
+  // columns — otherwise every spelling variant shows as a duplicate FULL NAME /
+  // PHONE NUMBER column.
+  const isNameOrPhone = (k) => { const s = String(k).toLowerCase(); return /phone|mobile|name|பெயர/.test(s); };
   const fieldKeys = useMemo(() => {
     const keys = []; const seen = new Set();
     for (const l of leads) {
       const fd = l.field_data;
-      if (fd && typeof fd === 'object') for (const k of Object.keys(fd)) if (!seen.has(k)) { seen.add(k); keys.push(k); }
+      if (fd && typeof fd === 'object') for (const k of Object.keys(fd)) if (!seen.has(k) && !isNameOrPhone(k)) { seen.add(k); keys.push(k); }
     }
     return keys;
   }, [leads]);
@@ -351,6 +356,7 @@ export default function SalesLeadsTable({ token, source = 'all' }) {
               <thead>
                 <tr style={{ background: 'rgba(237,234,248,0.50)', textAlign: 'left' }}>
                   <th style={thStyle}>Name</th>
+                  <th style={thStyle}>Phone</th>
                   {fieldKeys.map(k => <th key={k} style={thStyle}>{prettyLabel(k)}</th>)}
                   <th style={thStyle}>Webinar</th>
                   <th style={thStyle}>Registered</th>
@@ -365,7 +371,9 @@ export default function SalesLeadsTable({ token, source = 'all' }) {
                         <span style={{ fontWeight: 600, color: '#3B0764' }}>{l.full_name || '—'}</span>
                         <SourceBadge source={l.source} />
                       </div>
-                      <div style={{ fontSize: '0.72rem', color: 'rgba(91,33,182,0.55)' }}>{fmtPhone(l.whatsapp_number)}</div>
+                    </td>
+                    <td style={{ ...tdStyle, fontFamily: 'ui-monospace, monospace', fontSize: '0.80rem', color: 'rgba(91,33,182,0.85)' }}>
+                      {fmtPhone(l.whatsapp_number)}
                     </td>
                     {fieldKeys.map(k => {
                       const v = l.field_data && l.field_data[k];

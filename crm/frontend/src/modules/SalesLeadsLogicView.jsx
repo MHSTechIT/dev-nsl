@@ -7,6 +7,10 @@ import Toast               from '../components/Toast';
    their round-robin position, and the cursor's current state.
    ────────────────────────────────────────────────────────────────────────── */
 
+/* Sentinel tab id used when no webinar exists — edits the per-workspace
+   Leads-Logic TEMPLATE (saved/loaded with ?source= instead of ?webinar_id=). */
+const TEMPLATE_ID = '__template__';
+
 const ROLE_BADGE = {
   junior_caller: { bg: '#FEF9C3', fg: '#A16207', label: 'Junior Caller' },
   senior_caller: { bg: '#FFEDD5', fg: '#C2410C', label: 'Senior Caller' },
@@ -44,14 +48,25 @@ export default function SalesLeadsLogicView({ token, source = 'all' }) {
         if (!res.ok) throw new Error('Failed to load webinars.');
         const data = await res.json();
         const all  = data.webinars || [];
+        const now = Date.now();
         const current  = all.find(w => w.is_active);
-        const upcoming = all.find(w => !w.is_active && (w.lead_count ?? 0) === 0)
-                      || all.find(w => !w.is_active);
+        // "Upcoming" = an inactive webinar whose date is still in the FUTURE.
+        // A past inactive webinar (already happened) is NOT upcoming — showing it
+        // made a stale 0-lead past webinar (e.g. aws-113) appear as the current/
+        // upcoming card. Only current + a real future webinar should show here.
+        const upcoming = all.find(w => !w.is_active && w.webinar_at && new Date(w.webinar_at).getTime() > now);
         const picked = [current, upcoming].filter(Boolean);
         if (cancelled) return;
-        setWebinars(picked);
-        setActiveTab(picked[0]?.id || null);
-        if (picked.length === 0) { setLoading(false); setError('No webinars found.'); }
+        // No live/upcoming webinar → fall back to the WORKSPACE TEMPLATE tab so
+        // the admin can still set the Leads Logic. Whatever they save here is
+        // applied automatically once a webinar is created or promoted.
+        if (picked.length === 0) {
+          setWebinars([{ id: TEMPLATE_ID, name: 'workspace default', isTemplate: true }]);
+          setActiveTab(TEMPLATE_ID);
+        } else {
+          setWebinars(picked);
+          setActiveTab(picked[0]?.id || null);
+        }
       } catch (e) {
         if (!cancelled) { setError(e.message); setLoading(false); }
       }
@@ -65,7 +80,10 @@ export default function SalesLeadsLogicView({ token, source = 'all' }) {
     (async () => {
       setLoading(true);
       try {
-        const res = await fetch(`/api/admin/lead-share-config?webinar_id=${encodeURIComponent(activeTab)}`, {
+        const qs = activeTab === TEMPLATE_ID
+          ? `source=${encodeURIComponent(source)}`
+          : `webinar_id=${encodeURIComponent(activeTab)}`;
+        const res = await fetch(`/api/admin/lead-share-config?${qs}`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         if (!res.ok) throw new Error('Failed to load configuration.');
@@ -78,7 +96,7 @@ export default function SalesLeadsLogicView({ token, source = 'all' }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [activeTab, config, token]);
+  }, [activeTab, config, token, source]);
 
   const tabConfig = config[activeTab] || [];
   /* In rotation = enabled in the lead-share config. A paused (inactive)
@@ -136,7 +154,8 @@ export default function SalesLeadsLogicView({ token, source = 'all' }) {
     setError('');
     try {
       const payload = {
-        webinar_id: activeTab,
+        // Template tab → save to the workspace (source); else per-webinar.
+        ...(activeTab === TEMPLATE_ID ? { source } : { webinar_id: activeTab }),
         callers: editRows.map((r, idx) => ({
           caller_id:          r.caller_id,
           enabled:            !!r.enabled,
@@ -177,7 +196,9 @@ export default function SalesLeadsLogicView({ token, source = 'all' }) {
         <div style={{ display: 'flex', gap: 4, background: '#fff', borderRadius: 14, padding: 6, boxShadow: '0 2px 12px rgba(91,33,182,0.08)' }}>
         {webinars.map((w, idx) => {
           const active = activeTab === w.id;
-          const role = idx === 0 ? 'current webinar' : 'upcoming webinar';
+          const role = w.isTemplate ? 'leads logic (applies to next webinar)'
+                     : idx === 0    ? 'current webinar'
+                     :                'upcoming webinar';
           return (
             <button
               key={w.id}
@@ -191,7 +212,7 @@ export default function SalesLeadsLogicView({ token, source = 'all' }) {
                 boxShadow: active ? '0 2px 10px rgba(91,33,182,0.30)' : 'none',
               }}
             >
-              {role} ({(w.name || '').toLowerCase()})
+              {w.isTemplate ? role : `${role} (${(w.name || '').toLowerCase()})`}
             </button>
           );
         })}

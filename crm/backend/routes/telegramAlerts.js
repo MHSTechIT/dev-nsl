@@ -15,8 +15,6 @@ const router  = express.Router();
 const pool    = require('../db');
 const { adminAuth }      = require('../middleware/adminAuth');
 const { sendTelegram }   = require('../utils/telegramNotifier');
-const { sendTextToNumber } = require('../utils/whapiSend');
-const { alertChannelId }  = require('../utils/whatsappAlerts');
 const { sendHourlyReports } = require('../utils/hourlyCallerReportScheduler');
 
 router.use(adminAuth);
@@ -147,19 +145,17 @@ router.post('/:id/test', async (req, res) => {
     const r = rows[0];
     if (!r) return res.status(404).json({ error: 'Recipient not found.' });
 
-    // Alerts now go over WhatsApp (Whapi) — send the test to the recipient's
-    // WhatsApp number (telegram_chat_id reused) via the Web-Reminder channel.
-    const channelId = await alertChannelId();
-    if (!channelId) return res.status(400).json({ error: 'No Whapi channel set. Pick one on Web Reminder → Alerts and Save.' });
-    const number = String(r.telegram_chat_id || '').replace(/\D/g, '');
-    if (number.length < 10) return res.status(400).json({ error: 'Enter a valid WhatsApp number first.' });
+    // Alerts go over Telegram (reverted from Whapi). Send the test to the
+    // recipient's Telegram chat id.
+    const chatId = String(r.telegram_chat_id || '').trim();
+    if (!chatId) return res.status(400).json({ error: 'Enter a Telegram chat id first.' });
 
     try {
-      await sendTextToNumber(channelId, number,
-        `✅ MHS CRM test message\n\nIf you can read this, WhatsApp alerts are wired up correctly for ${r.label || 'this recipient'}.`);
+      await sendTelegram(chatId,
+        `✅ MHS CRM test message\n\nIf you can read this, Telegram alerts are wired up correctly for ${r.label || 'this recipient'}.`);
       res.json({ ok: true });
     } catch (e) {
-      return res.status(502).json({ error: `WhatsApp send failed: ${e.message}` });
+      return res.status(502).json({ error: `Telegram send failed: ${e.message}` });
     }
   } catch (err) {
     console.error('POST /telegram-alerts/:id/test error:', err.message);

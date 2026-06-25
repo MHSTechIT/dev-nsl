@@ -74,7 +74,7 @@ async function assignNewLead(leadId, sugarLevel, webinarId) {
     //    excluded: round-robin keeps assigning to them so leads queue up for
     //    when they resume, instead of being skipped and handed to others.
     //    To stop a caller getting leads, disable them in the leads-logic page.
-    const { rows: eligible } = await client.query(`
+    let { rows: eligible } = await client.query(`
       SELECT lsc.caller_id
         FROM lead_share_config lsc
         JOIN crm_users u ON u.id = lsc.caller_id
@@ -85,6 +85,25 @@ async function assignNewLead(leadId, sugarLevel, webinarId) {
          AND (u.workspace IS NULL OR u.workspace = $3::text)
        ORDER BY lsc.position ASC, lsc.created_at ASC
     `, [webinarId, sugarLevel, leadSource]);
+
+    // Fallback: this webinar has NO per-webinar rotation of its own → use the
+    // WORKSPACE TEMPLATE the admin set on the Web Reminder → Leads Logic page.
+    // This is what makes "the logic I set" apply automatically the moment a new
+    // webinar is created or an upcoming one is promoted to current.
+    if (eligible.length === 0) {
+      const tpl = await client.query(`
+        SELECT lst.caller_id
+          FROM lead_share_template lst
+          JOIN crm_users u ON u.id = lst.caller_id
+         WHERE lst.source  = $3::text
+           AND lst.enabled = TRUE
+           AND ('all' = ANY(lst.allowed_lead_types) OR $2 = ANY(lst.allowed_lead_types))
+           AND u.deleted_at IS NULL
+           AND (u.workspace IS NULL OR u.workspace = $3::text)
+         ORDER BY lst.position ASC
+      `, [webinarId, sugarLevel, leadSource]);
+      eligible = tpl.rows;
+    }
 
     if (eligible.length === 0) {
       await client.query('COMMIT');

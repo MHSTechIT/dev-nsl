@@ -71,6 +71,11 @@ function badgeStyleByColor(c) {
 }
 function StatusBadge({ row, nowTick }) {
   const now = nowTick;
+  // Paused by admin takes priority over every other status (a paused caller
+  // can't dial or receive leads, whether it's office hours or not).
+  if (row.is_active === false) {
+    return <span title="Paused by admin — cannot dial or receive new leads" style={{ ...badgeStyleByColor('red'), background: 'rgba(220,38,38,0.12)', color: '#DC2626' }}>Paused</span>;
+  }
   const istHr = new Date(now + 5.5 * 3600 * 1000).getUTCHours();
   if (!(istHr >= 9 && istHr < 18)) {
     return <span title="Tracking window is 9 AM – 6 PM IST" style={{ ...badgeStyleByColor('red'), background: 'rgba(107,114,128,0.12)', color: '#6B7280' }}>Off hours</span>;
@@ -220,7 +225,8 @@ export default function SalesNewPageView({ token, source = 'all' }) {
   const isOpen = (g) => !collapsed.has(g.id);
   const toggleGroup = (id) => setCollapsed((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const [selectedId, setSelectedId] = useState(null);      // clicked → highlighted caller row
-  const [menu, setMenu]           = useState(null);        // per-caller ⋮ menu { callerId, name, x, y }
+  const [menu, setMenu]           = useState(null);        // per-caller ⋮ menu { callerId, name, isActive, x, y }
+  const [pauseBusyId, setPauseBusyId] = useState(null);    // caller_id of an in-flight pause/resume toggle
   const [callerPageRow, setCallerPageRow] = useState(null); // "Caller page" drawer target
   const [callLogRow, setCallLogRow]       = useState(null); // "View call log" drawer target
   const [activityRow, setActivityRow]     = useState(null); // status-pill → activity timeline drawer
@@ -324,6 +330,30 @@ export default function SalesNewPageView({ token, source = 'all' }) {
       setLoading(false);
     }
   }, [token, range.from, range.to, webinarId, source, preset, fromTime, toTime]);
+
+  /* Pause / Resume a caller — PATCH /api/admin/crm-users/:id { is_active }.
+     is_active = FALSE is the "paused" flag (leadAssigner skips paused callers,
+     and they can't dial). Refetch after so the row's badge updates. */
+  const togglePause = useCallback(async (callerId, name, currentlyActive) => {
+    if (!token || !callerId || pauseBusyId) return;
+    const targetActive = !currentlyActive;   // pause → false, resume → true
+    setPauseBusyId(callerId);
+    setError('');
+    try {
+      const res = await fetch(`/api/admin/crm-users/${callerId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ is_active: targetActive }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d.error || 'Failed to update caller.');
+      await fetchReport();
+    } catch (e) {
+      setError(`${targetActive ? 'Resume' : 'Pause'} failed for ${name}: ${e.message}`);
+    } finally {
+      setPauseBusyId(null);
+    }
+  }, [token, pauseBusyId, fetchReport]);
 
   useEffect(() => { fetchReport(); }, [fetchReport]);
   useEffect(() => {
@@ -910,7 +940,13 @@ export default function SalesNewPageView({ token, source = 'all' }) {
                             onClick={(e) => {
                               e.stopPropagation();
                               const b = e.currentTarget.getBoundingClientRect();
-                              setMenu({ callerId: r.caller_id, name: r.name, x: Math.min(b.left, window.innerWidth - 230), y: b.bottom + 4 });
+                              // 3 items ≈ 150px tall. If opening below would run off
+                              // the bottom of the screen (last rows like santhosh),
+                              // flip the menu ABOVE the kebab so all items show.
+                              const MENU_H = 156;
+                              const openUp = b.bottom + 4 + MENU_H > window.innerHeight;
+                              const y = openUp ? Math.max(8, b.top - 4 - MENU_H) : b.bottom + 4;
+                              setMenu({ callerId: r.caller_id, name: r.name, isActive: r.is_active !== false, x: Math.min(b.left, window.innerWidth - 230), y });
                             }}
                             title="Actions"
                             style={kebabBtn}
@@ -975,24 +1011,33 @@ export default function SalesNewPageView({ token, source = 'all' }) {
         <>
           <div onClick={() => setMenu(null)} style={{ position: 'fixed', inset: 0, zIndex: 60 }} />
           <div style={{ position: 'fixed', top: menu.y, left: menu.x, zIndex: 61, minWidth: 210, background: '#fff', border: '1px solid rgba(124,58,237,0.15)', borderRadius: 12, boxShadow: '0 12px 32px rgba(91,33,182,0.22)', padding: 6 }}>
-            {MENU_ITEMS.map((it) => (
+            {MENU_ITEMS.map((it) => {
+              // The pause row is a toggle: show "Resume caller" when the caller
+              // is already paused. Danger styling only applies to the Pause action.
+              const isPauseItem = it.id === 'pause';
+              const isPaused    = menu.isActive === false;
+              const label       = isPauseItem ? (isPaused ? 'Resume caller' : 'Pause caller') : it.label;
+              const danger      = isPauseItem ? !isPaused : it.danger;
+              const busy        = isPauseItem && pauseBusyId === menu.callerId;
+              return (
               <button
                 key={it.id}
+                disabled={busy}
                 onClick={() => {
-                  const cid = menu.callerId, cname = menu.name;
-                  setMenu(null);
-                  if (it.id === 'callerpage') setCallerPageRow({ caller_id: cid, name: cname });
-                  if (it.id === 'calllog')    setCallLogRow({ caller_id: cid, name: cname });
-                  // TODO: wire 'pause' action
+                  const cid = menu.callerId, cname = menu.name, active = menu.isActive !== false;
+                  if (it.id === 'callerpage') { setMenu(null); setCallerPageRow({ caller_id: cid, name: cname }); }
+                  else if (it.id === 'calllog') { setMenu(null); setCallLogRow({ caller_id: cid, name: cname }); }
+                  else if (it.id === 'pause') { setMenu(null); togglePause(cid, cname, active); }
                 }}
-                style={{ display: 'flex', alignItems: 'center', gap: 11, width: '100%', textAlign: 'left', border: 'none', background: 'transparent', cursor: 'pointer', borderRadius: 8, padding: '9px 12px', fontFamily: 'Outfit, sans-serif', fontWeight: 600, fontSize: '0.86rem', color: it.danger ? '#DC2626' : INK }}
-                onMouseEnter={(e) => { e.currentTarget.style.background = it.danger ? 'rgba(220,38,38,0.08)' : 'rgba(124,58,237,0.08)'; }}
+                style={{ display: 'flex', alignItems: 'center', gap: 11, width: '100%', textAlign: 'left', border: 'none', background: 'transparent', cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.5 : 1, borderRadius: 8, padding: '9px 12px', fontFamily: 'Outfit, sans-serif', fontWeight: 600, fontSize: '0.86rem', color: danger ? '#DC2626' : INK }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = danger ? 'rgba(220,38,38,0.08)' : 'rgba(124,58,237,0.08)'; }}
                 onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
               >
-                <span style={{ display: 'inline-flex', color: it.danger ? '#DC2626' : VIOLET }}>{it.icon}</span>
-                {it.label}
+                <span style={{ display: 'inline-flex', color: danger ? '#DC2626' : VIOLET }}>{it.icon}</span>
+                {busy ? '…' : label}
               </button>
-            ))}
+              );
+            })}
           </div>
         </>
       )}

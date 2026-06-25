@@ -214,6 +214,31 @@ router.post('/leads/:lead_id/hangup', async (req, res) => {
       if (result.ok && result.reason !== 'already_ended') { dropped = true; break; }
     }
 
+    // Fallback: none of our STORED ids actually dropped a live leg. This happens
+    // when we only captured the short uuid (e.g. "6a3c021b61754") — Tata's
+    // hangup needs the full dialplan call_id ("DR5-D4-1782316664.1164970"), and
+    // that id never landed in any of our rows. Ask Tata which calls are live
+    // RIGHT NOW and match ours by the lead's phone number, then hang up with the
+    // authoritative call_id. This is what was leaving follow-up calls connected.
+    if (!dropped) {
+      const { rows: lr } = await pool.query(
+        `SELECT whatsapp_number FROM ${cfg.leads} WHERE id = $1`, [leadId]
+      );
+      const leadLast10 = String(lr[0]?.whatsapp_number || '').replace(/\D/g, '').slice(-10);
+      if (leadLast10.length === 10) {
+        const live = await tata.liveCalls({ accountType: acct, perUserKey: key });
+        for (const lc of (live.calls || [])) {
+          const dest = String(lc.destination || lc.dst || lc.dest || lc.called_number || '').replace(/\D/g, '');
+          if (!dest.endsWith(leadLast10)) continue;             // not this lead's call
+          const liveId = lc.call_id || lc.id || lc.uuid;
+          if (!liveId) continue;
+          const r = await tata.hangup({ providerCallId: String(liveId), accountType: acct, perUserKey: key });
+          attempts.push({ id: liveId, via: 'live_calls', ok: !!r.ok, reason: r.reason || null });
+          if (r.ok && r.reason !== 'already_ended') { dropped = true; break; }
+        }
+      }
+    }
+
     // Mark every recent non-terminal row ended regardless — the leg is gone
     // (either we just dropped it or it was already ended on Tata's side).
     await pool.query(

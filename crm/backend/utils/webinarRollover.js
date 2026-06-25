@@ -64,23 +64,12 @@ async function rolloverWebinarIfEnded(source) {
       }
       console.log(`[webinarRollover] ${source}: webinar ended → promoted upcoming into current`);
     } else {
-      // No upcoming → blank the current webinar so the admin sets a fresh one.
-      // next_webinar_at is NOT NULL (registration countdown), so reset it to its
-      // default (a neutral ~4-days-out placeholder) rather than null; the webinar
-      // IDENTITY (datetime, end date, link, forms, active-row name) is what clears.
-      await pool.query(
-        `UPDATE webinar_config SET
-            next_webinar_at          = DEFAULT,
-            current_webinar_date     = NULL,
-            current_webinar_datetime = NULL,
-            current_webinar_link     = '',
-            current_form_id          = NULL,
-            updated_at               = NOW()
-          WHERE source = $1`,
-        [source]
-      );
-      await pool.query(`UPDATE webinars SET is_active = FALSE WHERE is_active AND source = $1`, [source]);
-      console.log(`[webinarRollover] ${source}: webinar ended, no upcoming → blanked current webinar`);
+      // No upcoming → DO NOTHING. The current webinar persists (stays active)
+      // until the admin sets a new one. Leads keep getting worked after the
+      // webinar datetime passes, so we must NOT deactivate/blank the current
+      // webinar just because its date is in the past — that orphaned leads and
+      // made Leads Logic fall back to a stale past webinar.
+      return false;
     }
     return true;
   } catch (e) {

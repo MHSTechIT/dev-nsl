@@ -1747,7 +1747,8 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
       return null;
     }
     if (followUpOnly) {
-      if (!note.trim())                   return 'Please add a note about the follow-up.';
+      // Follow-up: the ONLY thing we need is WHEN to call back. No sugar, no
+      // discovery fields, no note required.
       if (!followUpAtLocal)               return 'Pick a follow-up date and time.';
       return null;
     }
@@ -2209,11 +2210,13 @@ export default function LeadCallNoteModal({ jwt, lead, onClose, onSaved, onPhase
 
             <button type="button"
               onClick={() => {
-                setWantsFollowUp(v => {
-                  const next = !v;
-                  if (next && interested !== 'yes') setInterested('yes');
-                  return next;
-                });
+                // Toggle follow-up. Keep both state updates OUTSIDE the functional
+                // updater (calling setInterested inside it is impure and can
+                // misfire under StrictMode, leaving follow-up half-set so the form
+                // still demanded sugar/discovery fields).
+                const turningOn = !wantsFollowUp;
+                setWantsFollowUp(turningOn);
+                if (turningOn && interested !== 'yes') setInterested('yes');
               }}
               style={{
                 flex: '1 1 200px', alignSelf: 'flex-end', height: '2.85rem',

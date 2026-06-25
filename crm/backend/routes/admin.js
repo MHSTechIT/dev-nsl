@@ -2043,10 +2043,56 @@ router.get('/empty-queue-callers', async (req, res) => {
   }
 });
 
-/* ── GET /api/admin/lead-share-config?webinar_id=<uuid> ── */
+/* ── GET /api/admin/lead-share-config?webinar_id=<uuid> | ?source=<workspace> ──
+   Two modes:
+   • webinar_id → that webinar's saved rotation (per-webinar override). Where a
+     webinar has no saved row for a caller, the default comes from the workspace
+     TEMPLATE (so a freshly-created webinar already shows the saved logic).
+   • source     → the WORKSPACE TEMPLATE itself (used on the Web Reminder page
+     when no webinar exists yet). caller eligibility = workspace match / untagged. */
 router.get('/lead-share-config', async (req, res) => {
   const { webinar_id } = req.query;
-  if (!webinar_id) return res.status(400).json({ error: 'webinar_id required' });
+  const sourceParam = req.query.source;
+
+  // ── Source (template) mode — no webinar required ──────────────────────────
+  if (!webinar_id && sourceParam) {
+    try {
+      const callersRes = await pool.query(
+        `SELECT id, full_name, email, role, is_active
+           FROM crm_users
+          WHERE role IN ('junior_caller','senior_caller')
+            AND deleted_at IS NULL
+            AND (workspace IS NULL OR workspace = $1)
+          ORDER BY created_at ASC`,
+        [sourceParam]
+      );
+      const tplRes = await pool.query(
+        `SELECT caller_id, enabled, allowed_lead_types, position
+           FROM lead_share_template WHERE source = $1`,
+        [sourceParam]
+      );
+      const tplByCaller = {};
+      for (const row of tplRes.rows) tplByCaller[row.caller_id] = row;
+      const config = callersRes.rows.map((c, idx) => {
+        const saved = tplByCaller[c.id];
+        return {
+          caller_id: c.id, full_name: c.full_name, email: c.email, role: c.role, is_active: c.is_active,
+          enabled:            saved ? saved.enabled            : true,
+          allowed_lead_types: saved ? saved.allowed_lead_types : ['all'],
+          position:           saved ? saved.position           : idx,
+          has_saved_config:   !!saved,
+          assigned_count:     0,   // no webinar context → no per-webinar counts
+        };
+      });
+      return res.json({ callers: config, mode: 'template', source: sourceParam });
+    } catch (err) {
+      if (err.message && err.message.includes('does not exist')) return res.json({ callers: [], mode: 'template' });
+      console.error('Get lead-share-config (template) error:', err.message);
+      return res.status(500).json({ error: 'Failed to load configuration' });
+    }
+  }
+
+  if (!webinar_id) return res.status(400).json({ error: 'webinar_id or source required' });
 
   try {
     // Callers eligible to be in THIS webinar's rotation (junior + senior
@@ -2089,25 +2135,37 @@ router.get('/lead-share-config', async (req, res) => {
         GROUP BY assigned_user_id`,
       [webinar_id]
     );
-    const [callersRes, configRes, countsRes] = await Promise.all([callersQuery, configQuery, countsQuery]);
+    // Workspace template — the fallback default for any caller this webinar has
+    // not explicitly configured (so a brand-new webinar already shows the saved
+    // Leads-Logic the admin set on the Web Reminder page).
+    const templateQuery = pool.query(
+      `SELECT caller_id, enabled, allowed_lead_types, position
+         FROM lead_share_template
+        WHERE source = (SELECT source FROM webinars WHERE id = $1)`,
+      [webinar_id]
+    );
+    const [callersRes, configRes, countsRes, templateRes] = await Promise.all([callersQuery, configQuery, countsQuery, templateQuery]);
 
     const configByCaller = {};
     for (const row of configRes.rows) configByCaller[row.caller_id] = row;
+    const tplByCaller = {};
+    for (const row of templateRes.rows) tplByCaller[row.caller_id] = row;
     const countByCaller = {};
     for (const row of countsRes.rows) countByCaller[row.caller_id] = row.count;
 
     const config = callersRes.rows.map((c, idx) => {
-      const saved = configByCaller[c.id];
+      const saved = configByCaller[c.id];       // per-webinar override
+      const tpl   = tplByCaller[c.id];           // workspace template default
       return {
         caller_id: c.id,
         full_name: c.full_name,
         email:     c.email,
         role:      c.role,
         is_active: c.is_active,
-        // Defaults: enabled=true, allowed=['all'], stable position
-        enabled:            saved ? saved.enabled            : true,
-        allowed_lead_types: saved ? saved.allowed_lead_types : ['all'],
-        position:           saved ? saved.position           : idx,
+        // Per-webinar value wins; else the workspace template; else hard default.
+        enabled:            saved ? saved.enabled            : (tpl ? tpl.enabled            : true),
+        allowed_lead_types: saved ? saved.allowed_lead_types : (tpl ? tpl.allowed_lead_types : ['all']),
+        position:           saved ? saved.position           : (tpl ? tpl.position           : idx),
         has_saved_config:   !!saved,
         assigned_count:     countByCaller[c.id] || 0,
       };
@@ -2126,10 +2184,24 @@ router.get('/lead-share-config', async (req, res) => {
 /* ── PUT /api/admin/lead-share-config ── */
 const ALLOWED_LEAD_TYPES = ['250+', '150-250', 'all'];
 
+async function writeShareTemplate(client, source, callers) {
+  await client.query('DELETE FROM lead_share_template WHERE source = $1', [source]);
+  for (let i = 0; i < callers.length; i++) {
+    const c = callers[i];
+    await client.query(
+      `INSERT INTO lead_share_template
+         (source, caller_id, enabled, allowed_lead_types, position, updated_at)
+       VALUES ($1, $2, $3, $4::TEXT[], $5, NOW())`,
+      [source, c.caller_id, c.enabled, c.allowed_lead_types, typeof c.position === 'number' ? c.position : i]
+    );
+  }
+}
+
 router.put('/lead-share-config', async (req, res) => {
   const { webinar_id, callers } = req.body;
-  if (!webinar_id || !Array.isArray(callers)) {
-    return res.status(400).json({ error: 'webinar_id and callers[] required' });
+  const sourceParam = req.body.source;
+  if ((!webinar_id && !sourceParam) || !Array.isArray(callers)) {
+    return res.status(400).json({ error: 'webinar_id or source, plus callers[], required' });
   }
   // Validate every row
   for (const c of callers) {
@@ -2149,6 +2221,14 @@ router.put('/lead-share-config', async (req, res) => {
   try {
     await client.query('BEGIN');
 
+    // ── Template (workspace) mode — no webinar needed ──────────────────────
+    if (!webinar_id && sourceParam) {
+      await writeShareTemplate(client, sourceParam, callers);
+      await client.query('COMMIT');
+      return res.json({ success: true, mode: 'template' });
+    }
+
+    // ── Per-webinar mode (override) ────────────────────────────────────────
     // Wipe + reinsert is the simplest correctness model
     await client.query('DELETE FROM lead_share_config WHERE webinar_id = $1', [webinar_id]);
 
@@ -2169,6 +2249,14 @@ router.put('/lead-share-config', async (req, res) => {
        ON CONFLICT (webinar_id) DO UPDATE SET last_position = -1, updated_at = NOW()`,
       [webinar_id]
     );
+
+    // Mirror this logic into the workspace TEMPLATE so the SAME setup
+    // automatically applies to the NEXT webinar created/promoted for this
+    // source. (The admin sets it once; every future webinar inherits it.)
+    const { rows: wsrc } = await client.query('SELECT source FROM webinars WHERE id = $1', [webinar_id]);
+    if (wsrc[0] && wsrc[0].source) {
+      await writeShareTemplate(client, wsrc[0].source, callers);
+    }
 
     await client.query('COMMIT');
     res.json({ success: true });

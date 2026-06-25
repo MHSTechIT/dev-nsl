@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Toast from '../components/Toast';
-import WhapiView from '../admin/WhapiView';
 
 /* ──────────────────────────────────────────────────────────────────────
    Sales → Alerts tab.
@@ -286,11 +285,6 @@ export default function SalesAlertsView({ token, source = 'all' }) {
         </div>
       </div>
 
-      {/* Whapi channel manager — same card as the Meta Temp → Whapi tab, but
-          on its OWN dedicated 'webreminder' source so the Web Reminder pins its
-          own channel permanently, independent of Meta Temp's. */}
-      <WhapiView token={token} source="webreminder" />
-
       {toast.msg && <Toast message={toast.msg} kind={toast.kind} onDone={() => setToast({ msg: '', kind: 'success' })} />}
     </div>
   );
@@ -402,11 +396,11 @@ function AlertRow({ row, teamLeaders, testing, onChange, onTest, onRemove }) {
         gap: 12,
         alignItems: 'flex-end',
       }}>
-        <Field label="WhatsApp number" style={{ flex: '1 1 160px' }}>
+        <Field label="Telegram User ID" style={{ flex: '1 1 160px' }}>
           <input
             value={row.telegram_chat_id || ''}
             onChange={(e) => onChange({ telegram_chat_id: e.target.value })}
-            placeholder="e.g. 919876543210"
+            placeholder="e.g. 123456789"
             style={inputStyle()}
           />
         </Field>

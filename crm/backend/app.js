@@ -287,6 +287,25 @@ const _shareConfigMigration = pool.query(`
   );
   CREATE INDEX IF NOT EXISTS idx_share_config_webinar ON lead_share_config (webinar_id, position);
 
+  -- Per-WORKSPACE (source) Leads-Logic template. This is the persistent round-
+  -- robin queue the admin sets on the Web Reminder → Leads Logic page even when
+  -- NO webinar exists yet. When a webinar is later created or an upcoming one is
+  -- promoted to current, leadAssigner falls back to this template if that
+  -- webinar has no per-webinar lead_share_config of its own — so "the logic I
+  -- set" just works for whatever webinar becomes current. Per-webinar config
+  -- (lead_share_config) still overrides this when present.
+  CREATE TABLE IF NOT EXISTS lead_share_template (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source             TEXT NOT NULL,
+    caller_id          UUID NOT NULL REFERENCES crm_users(id) ON DELETE CASCADE,
+    enabled            BOOLEAN NOT NULL DEFAULT TRUE,
+    allowed_lead_types TEXT[] NOT NULL DEFAULT ARRAY['all']::TEXT[],
+    position           INTEGER NOT NULL DEFAULT 0,
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (source, caller_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_share_template_source ON lead_share_template (source, position);
+
   CREATE TABLE IF NOT EXISTS round_robin_state (
     webinar_id    UUID PRIMARY KEY REFERENCES webinars(id) ON DELETE CASCADE,
     last_position INTEGER NOT NULL DEFAULT -1,

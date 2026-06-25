@@ -280,6 +280,39 @@ async function hangup({ providerCallId, accountType, perUserKey }) {
 }
 
 /**
+ * Smartflo "Live Calls" — every call currently active on this account.
+ *   GET /v1/live_calls → [] or [{ call_id, id, uuid, did, destination, source,
+ *                                 state, user_id, channel_id, ... }]
+ * Used as the authoritative source of a live call's dialplan call_id when our
+ * stored provider_call_id is only the short uuid (which Tata's hangup rejects).
+ *
+ * @returns {Promise<{ ok: boolean, calls: Array<object>, reason?: string }>}
+ */
+async function liveCalls({ accountType, perUserKey } = {}) {
+  const apiKey = resolveApiKey({ perUserKey, accountType });
+  if (!apiKey) return { ok: false, reason: 'no_api_key', calls: [] };
+  const url = `${BASE_URL.replace(/\/$/, '')}/v1/live_calls`;
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { 'Accept': 'application/json', 'Authorization': apiKey },
+    });
+    const text = await res.text();
+    let data; try { data = JSON.parse(text); } catch { data = null; }
+    if (res.status >= 400) return { ok: false, reason: `http_${res.status}`, calls: [] };
+    // Top-level array (observed), with a couple of defensive wrapper fallbacks.
+    const calls = Array.isArray(data) ? data
+                : Array.isArray(data?.data) ? data.data
+                : Array.isArray(data?.results) ? data.results
+                : Array.isArray(data?.live_calls) ? data.live_calls
+                : [];
+    return { ok: true, calls };
+  } catch (e) {
+    return { ok: false, reason: e.message, calls: [] };
+  }
+}
+
+/**
  * Smartflo "Call Options" — supervisor live actions on an ACTIVE call.
  *   POST /v1/call/options  { type, call_id, agent_id?, intercom? }
  *   type: 1=Monitor (silent listen), 2=Whisper, 3=Barge, 4=Transfer.
@@ -544,6 +577,7 @@ module.exports = {
   resolveApiKey,
   startCall,
   hangup,
+  liveCalls,
   callOptions,
   monitorCall,
   verifyWebhookSignature,

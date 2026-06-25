@@ -17,8 +17,7 @@
  * append-only `lead_call_notes` history.
  */
 const pool = require('../db');
-const { sendTextToNumber, waNumber } = require('./whapiSend');
-const { alertChannelId } = require('./whatsappAlerts');
+const { sendTelegram } = require('./telegramNotifier');
 
 const TICK_MS    = 60 * 1000;   // check every minute; the hour-key guard de-dupes
 const WINDOW_FROM = 9;          // 9 AM IST (inclusive)
@@ -47,7 +46,7 @@ async function buildReportRows() {
   const { rows } = await pool.query(`
     WITH w AS (SELECT $1::timestamptz AS d_start, $2::timestamptz AS d_end),
     caller_base AS (
-      SELECT u.id AS caller_id, u.full_name AS name, u.team_leader_id
+      SELECT u.id AS caller_id, u.full_name AS name, u.team_leader_id, u.is_active
         FROM crm_users u
        WHERE u.role IN ('junior_caller','senior_caller')
          AND u.deleted_at IS NULL
@@ -75,7 +74,7 @@ async function buildReportRows() {
          AND n.created_at >= w.d_start AND n.created_at <= w.d_end
        GROUP BY n.caller_id
     )
-    SELECT cb.caller_id, cb.name, cb.team_leader_id,
+    SELECT cb.caller_id, cb.name, cb.team_leader_id, cb.is_active,
            COALESCE(ca.dialed, 0)    AS dialed,
            COALESCE(ca.connected, 0) AS connected,
            COALESCE(na.worked, 0)    AS worked,
@@ -117,19 +116,39 @@ function formatReportMessage(rows, scopeLabel) {
 
   const t = { dialed: 0, connected: 0, worked: 0, hot: 0, warm: 0, cold: 0, junk: 0, dnp: 0, completed: 0 };
   rows.forEach((r, i) => {
+    // Paused caller → show ONLY the paused line, skip all metrics.
+    if (r.is_active === false) {
+      lines.push(`${i + 1}. *${r.name}*  —  ⏸ Paused`, ``);
+      return;
+    }
     for (const k of Object.keys(t)) t[k] += Number(r[k]) || 0;
+    // One metric per line for easy reading on a phone.
     lines.push(
-      `${i + 1}. *${r.name}*\n` +
-      `   📞 ${r.dialed} dialed · ✅ ${r.connected} connected · 📝 ${r.worked} worked\n` +
-      `   🔥 ${r.hot} · 🌤 ${r.warm} · ❄️ ${r.cold} · 🗑 ${r.junk} · 🚫 ${r.dnp} DNP · 🎯 ${r.completed} enrolled`
+      `${i + 1}. *${r.name}*`,
+      `   📞 Dialed: ${r.dialed}`,
+      `   ✅ Connected: ${r.connected}`,
+      `   📝 Worked: ${r.worked}`,
+      `   🔥 Hot: ${r.hot}`,
+      `   🌤 Warm: ${r.warm}`,
+      `   ❄️ Cold: ${r.cold}`,
+      `   🗑 Junk: ${r.junk}`,
+      `   🚫 DNP: ${r.dnp}`,
+      `   🎯 Enrolled: ${r.completed}`,
+      ``
     );
   });
 
   lines.push(
-    ``,
     `— *Team totals* —`,
-    `📞 ${t.dialed} dialed · ✅ ${t.connected} connected · 📝 ${t.worked} worked`,
-    `🔥 ${t.hot} · 🌤 ${t.warm} · ❄️ ${t.cold} · 🗑 ${t.junk} · 🚫 ${t.dnp} DNP · 🎯 ${t.completed} enrolled`
+    `📞 Dialed: ${t.dialed}`,
+    `✅ Connected: ${t.connected}`,
+    `📝 Worked: ${t.worked}`,
+    `🔥 Hot: ${t.hot}`,
+    `🌤 Warm: ${t.warm}`,
+    `❄️ Cold: ${t.cold}`,
+    `🗑 Junk: ${t.junk}`,
+    `🚫 DNP: ${t.dnp}`,
+    `🎯 Enrolled: ${t.completed}`
   );
   return lines.join('\n');
 }
@@ -143,7 +162,7 @@ async function reportRecipients() {
       FROM telegram_alert_recipients r
       LEFT JOIN crm_users tl ON tl.id = r.team_leader_id
      WHERE r.target_type IN ('team_leader','manager','assistant_manager')`);
-  return rows.filter(r => waNumber(r.wa_number).length >= 10);
+  return rows.filter(r => String(r.wa_number || '').trim().length > 0);
 }
 
 /* Send the report to every configured recipient. Returns a small summary. */
@@ -151,9 +170,6 @@ async function sendHourlyReports({ force = false } = {}) {
   if (_running) return { ok: false, reason: 'already_running' };
   _running = true;
   try {
-    const channelId = await alertChannelId();
-    if (!channelId) { console.warn('[hourlyReport] no Web-Reminder Whapi channel pinned — skipping'); return { ok: false, reason: 'no_channel' }; }
-
     const recipients = await reportRecipients();
     if (recipients.length === 0) return { ok: true, sent: 0, reason: 'no_recipients' };
 
@@ -170,7 +186,7 @@ async function sendHourlyReports({ force = false } = {}) {
       if (isTL && scoped.length === 0) continue;
       const body = formatReportMessage(scoped, scopeLabel);
       try {
-        await sendTextToNumber(channelId, r.wa_number, body);
+        await sendTelegram(r.wa_number, body);
         sent++;
       } catch (e) {
         console.error(`[hourlyReport] send to ${r.wa_number} failed: ${e.message}`);
