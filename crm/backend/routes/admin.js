@@ -4269,6 +4269,16 @@ router.post('/leads/manual-assign', async (req, res) => {
           WHERE id = ANY($2::uuid[])`,
         [row.user_id, chunkIds]
       );
+      // Write the assignment HISTORY event too — the Overview "Assigned" column
+      // counts lead_assignments rows (cumulative events), not current state, so
+      // without this a manual share shows Assigned=0 even though the leads moved.
+      // Matches the auto round-robin (leadAssigner) and admin-move shapes.
+      await client.query(
+        `INSERT INTO lead_assignments (lead_id, caller_id, webinar_id, reason, kind)
+         SELECT id, $1::uuid, webinar_id, 'manual_assign', 'fresh'
+           FROM leads WHERE id = ANY($2::uuid[])`,
+        [row.user_id, chunkIds]
+      );
       actual.push({ user_id: row.user_id, requested: row.count, assigned: ask });
     }
 
