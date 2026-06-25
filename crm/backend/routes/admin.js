@@ -1878,7 +1878,11 @@ router.patch('/crm-users/:id', crmUserPatchValidators, async (req, res) => {
   // manually (they were never set).
   const setFragments = Object.keys(updates).map((k, i) => (k === 'custom_fields' ? `${k} = $${i + 1}::jsonb` : `${k} = $${i + 1}`));
   if (Object.prototype.hasOwnProperty.call(updates, 'is_active') && updates.is_active === true) {
-    setFragments.push('auto_paused_at = NULL', 'auto_pause_reason = NULL');
+    // Mirror resumeCaller(): clear the auto-pause bookkeeping AND open a 10-min
+    // grace window so the break-overrun watchdog doesn't re-block a caller who
+    // is still mid-break the instant the admin/manager lifts the block.
+    setFragments.push('auto_paused_at = NULL', 'auto_pause_reason = NULL',
+      "auto_pause_grace_until = NOW() + INTERVAL '10 minutes'");
   }
   const setClause = setFragments.join(', ');
   const values = Object.keys(updates).map(k => updates[k]);

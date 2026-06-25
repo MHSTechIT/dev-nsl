@@ -39,6 +39,17 @@ const _asstMgrMigration = pool.query(
 const _avatarMigration = pool.query(
   `ALTER TABLE crm_users ADD COLUMN IF NOT EXISTS avatar_url TEXT`
 );
+
+// Auto-migrate: grace window after a block/auto-pause is REMOVED. While this
+// timestamp is in the future the break-overrun watchdog will NOT re-pause the
+// caller — so a caller still mid-break when an admin/manager resumes them gets
+// 10 extra minutes instead of being re-blocked on the very next heartbeat.
+const _pauseGraceMigration = pool.query(
+  `ALTER TABLE crm_users ADD COLUMN IF NOT EXISTS auto_pause_grace_until TIMESTAMPTZ`
+);
+if (_pauseGraceMigration && typeof _pauseGraceMigration.catch === 'function') {
+  _pauseGraceMigration.catch(e => console.error('[migrate] auto_pause_grace_until:', e.message));
+}
 if (_avatarMigration && typeof _avatarMigration.catch === 'function') {
   _avatarMigration.catch(err => console.error('[Migration] avatar_url error:', err.message));
 }

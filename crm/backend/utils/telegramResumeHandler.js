@@ -46,9 +46,12 @@ async function resumeCaller(callerId, sourceLabel) {
   // matters for the user-facing message).
   const { rows } = await pool.query(
     `UPDATE crm_users
-        SET is_active         = TRUE,
-            auto_paused_at    = NULL,
-            auto_pause_reason = NULL
+        SET is_active              = TRUE,
+            auto_paused_at         = NULL,
+            auto_pause_reason      = NULL,
+            -- 10-min grace: the break-overrun watchdog won't re-pause until this
+            -- passes, so a caller still mid-break isn't re-blocked instantly.
+            auto_pause_grace_until = NOW() + INTERVAL '10 minutes'
       WHERE id = $1
         AND auto_paused_at IS NOT NULL
    RETURNING id, full_name, role, department`,

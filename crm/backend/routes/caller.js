@@ -71,7 +71,7 @@ router.post('/heartbeat', async (req, res) => {
     // Fetch previous state so we can update rest_started_at correctly,
     // and detect transitions for the activity audit log.
     const { rows: prev } = await pool.query(
-      `SELECT activity_status, rest_started_at, last_heartbeat_at, is_active FROM ${cfg.users} WHERE id = $1`,
+      `SELECT activity_status, rest_started_at, last_heartbeat_at, is_active, auto_pause_grace_until FROM ${cfg.users} WHERE id = $1`,
       [req.caller.id]
     );
     const prevStatus = prev[0]?.activity_status || null;
@@ -116,8 +116,14 @@ router.post('/heartbeat', async (req, res) => {
       // Break-overrun auto-pause: >10 min past the break's end time pauses
       // the caller. The custom "Other" break is additionally exempt until
       // 30 min have elapsed since the break started.
+      // Post-resume grace: if the caller was just un-blocked (admin/manager/
+      // Telegram/WhatsApp resume set auto_pause_grace_until = now+10min), skip
+      // the watchdog until that window passes — otherwise a caller still mid-
+      // break would be re-blocked on the very next heartbeat.
       let autoPaused = false;
-      if (tag === 'ON_BREAK' && breakInfo && breakInfo.endsAt && prev[0]?.is_active !== false) {
+      const graceUntil = prev[0]?.auto_pause_grace_until;
+      const inGrace = graceUntil && new Date(graceUntil).getTime() > Date.now();
+      if (tag === 'ON_BREAK' && breakInfo && breakInfo.endsAt && prev[0]?.is_active !== false && !inGrace) {
         const overtimeMs = Date.now() - new Date(breakInfo.endsAt).getTime();
         const elapsedMs  = breakInfo.startedAt ? Date.now() - new Date(breakInfo.startedAt).getTime() : 0;
         const isOther    = ![TEA_LABEL, LUNCH_LABEL, TWOHR_LABEL].includes(breakInfo.reason);
